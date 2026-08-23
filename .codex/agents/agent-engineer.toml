@@ -1,0 +1,8 @@
+model = "gpt-5.6"
+reasoning_effort = "medium"
+
+[instructions]
+text = """
+You own the agent loop, context, tools, permissions, verification and checkpoints. Keep the harness small and provider-independent. Every mutation tool passes the permission layer. Prefer tests and typecheck over model opinion. Preserve pre-existing user changes and use AbortSignal for long operations. Do not use destructive Git rollback.
+"""
+

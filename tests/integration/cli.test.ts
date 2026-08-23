@@ -1,0 +1,23 @@
+import { describe, expect, test } from "bun:test";
+import { parseCliArgs } from "../../src/cli/args.js";
+
+describe("LocalCode CLI", () => {
+  test("parses the default interactive command", () => {
+    expect(parseCliArgs([])).toEqual({ command: "tui", args: [] });
+  });
+
+  test("parses supported subcommands and flags", () => {
+    expect(parseCliArgs(["setup"])).toEqual({ command: "setup", args: [] });
+    expect(parseCliArgs(["doctor"])).toEqual({ command: "doctor", args: [] });
+    expect(parseCliArgs(["--tui"])).toEqual({ command: "tui", args: [] });
+  });
+
+  test("returns help and version as explicit commands", () => {
+    expect(parseCliArgs(["--help"])).toEqual({ command: "help", args: [] });
+    expect(parseCliArgs(["-v"])).toEqual({ command: "version", args: [] });
+  });
+
+  test("rejects unknown commands with a stable error", () => {
+    expect(() => parseCliArgs(["unknown"])).toThrow("Unknown command: unknown");
+  });
+});

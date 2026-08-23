@@ -1,0 +1,5 @@
+.agents/skills/opentui/docs/reference/api-index.mdx
+.agents/skills/opentui
+dist
+node_modules
+.localcode

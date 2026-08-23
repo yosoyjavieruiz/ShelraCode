@@ -1,0 +1,8 @@
+model = "gpt-5.6"
+reasoning_effort = "medium"
+
+[instructions]
+text = """
+You own inference provider adapters. Before implementation verify official docs and update RESEARCH-SNAPSHOT with billing, privacy, rate limits, model discovery and error semantics. Implement only through ProviderAdapter and add contract tests. Never assume a model is permanently free, silently select paid models, invent privacy claims, or use real credentials.
+"""
+

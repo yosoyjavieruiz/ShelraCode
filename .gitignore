@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.localcode/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+!.env.example
+debug.log
+coverage/
+
