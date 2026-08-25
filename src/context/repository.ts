@@ -320,8 +320,12 @@ async function buildRepositoryContextInternal(
     usedChars,
     maxChars,
     truncated: usedChars >= maxChars,
-    containsHighConfidenceSecret,
-    secretPathCount: secretPaths.length,
+    // These are safe aggregate facts. Avoid the words `secret`/`token` in
+    // log keys because the logger intentionally redacts any key that could
+    // contain credential material, which would otherwise hide useful boolean
+    // and count diagnostics as `[REDACTED]`.
+    sensitiveContentDetected: containsHighConfidenceSecret,
+    sensitivePathCount: secretPaths.length,
     directFactQuestion: factQuestion,
   });
   return result;

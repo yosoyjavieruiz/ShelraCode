@@ -233,7 +233,7 @@ export async function discoverProjectCommands(
     // A project without package.json simply has no package-script evidence.
   }
   await addStandardProjectEvidence(root, result);
-  logger?.info("verification.commands.finished", {
+  logger?.info("verification.commands.discovered", {
     testCount: result.test?.length ?? 0,
     typecheckCount: result.typecheck?.length ?? 0,
     lintCount: result.lint?.length ?? 0,

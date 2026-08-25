@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { selectVerificationPlan } from "../../src/agent/verification-plan.js";
 import { discoverProjectCommands } from "../../src/context/project-commands.js";
+import { createLogger, type LogRecord } from "../../src/shared/logging.js";
 
 test("project command discovery maps manifest scripts to verification stages", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "localcode-commands-"));
@@ -43,6 +44,24 @@ test("verification plan ignores mutating-only stages", () => {
       format: ["prettier --write ."],
     }),
   ).toEqual([]);
+});
+
+test("command discovery logs discovery, not verification execution", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "localcode-commands-log-"));
+  const records: LogRecord[] = [];
+  const logger = createLogger({
+    level: "debug",
+    sink: { write: (record) => records.push(record) },
+  });
+
+  await discoverProjectCommands(root, logger);
+
+  expect(records.map((record) => record.event)).toContain(
+    "verification.commands.discovered",
+  );
+  expect(records.map((record) => record.event)).not.toContain(
+    "verification.commands.finished",
+  );
 });
 
 test("project command discovery recognizes common build evidence", async () => {

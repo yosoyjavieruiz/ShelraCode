@@ -177,6 +177,9 @@ export class CheckpointService {
         this.logger?.warn("checkpoint.preservation.failed", {
           checkpointId,
           path: file.path,
+          reason: current.exists ? "changed-external" : "missing",
+          actualExists: current.exists,
+          actualContentLength: current.content.length,
         });
         return false;
       }

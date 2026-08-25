@@ -80,6 +80,39 @@ test("reports whether checkpointed work is still preserved", async () => {
   db.close();
 });
 
+test("logs why checkpoint preservation failed without exposing file content", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-checkpoint-preservation-log-"),
+  );
+  await writeFile(path.join(root, "file.ts"), "before\n", "utf8");
+  const records: LogRecord[] = [];
+  const logger = createLogger({
+    level: "debug",
+    sink: { write: (record) => records.push(record) },
+  });
+  const db = new LocalCodeDatabase(":memory:", logger);
+  const service = new CheckpointService(db, root, logger);
+  const id = await service.create("task-preservation-log", ["file.ts"]);
+
+  await writeFile(
+    path.join(root, "file.ts"),
+    "external-secret-content\n",
+    "utf8",
+  );
+  expect(await service.isPreserved(id)).toBe(false);
+
+  const failure = records.find(
+    (record) => record.event === "checkpoint.preservation.failed",
+  );
+  expect(failure?.data).toMatchObject({
+    path: "file.ts",
+    reason: "changed-external",
+    actualExists: true,
+  });
+  expect(JSON.stringify(records)).not.toContain("external-secret-content");
+  db.close();
+});
+
 test("checkpoint logs lifecycle and stale-edit evidence without file content", async () => {
   const root = await mkdtemp(
     path.join(os.tmpdir(), "localcode-checkpoint-logs-"),
