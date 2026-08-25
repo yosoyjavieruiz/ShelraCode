@@ -534,6 +534,13 @@ retained and marked as historical when newer runtime policy supersedes them.
 | TUI behavior and visual contracts         | [`docs/TUI.md`](docs/TUI.md), [`docs/ui-chat-v2/`](docs/ui-chat-v2/)                                                                                   |
 | Agent-v1 audit package                    | [`docs/agent-v1/`](docs/agent-v1/)                                                                                                                     |
 
+## License
+
+Copyright 2026 Javier Ruiz.
+
+This project is licensed under the Apache License, Version 2.0. See
+[`LICENSE`](LICENSE) for the full text.
+
 ## Contributing
 
 Read [`AGENTS.md`](AGENTS.md) before making changes. In particular:
