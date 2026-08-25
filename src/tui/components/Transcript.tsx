@@ -581,6 +581,22 @@ function PresentationItem(props: {
   const colors = props.theme.colors;
   const color = (value: string) => themeColor(props.theme, value);
   const kind = props.item().kind;
+  if (kind === "model-progress") {
+    const current = () => {
+      const value = props.item();
+      return value.kind === "model-progress" ? value : undefined;
+    };
+    return (
+      <text fg={color(colors.text.muted)}>
+        {() => {
+          const value = current();
+          if (!value) return "";
+          const count = value.chars.toLocaleString();
+          return `MODEL ANALYSIS · ${value.streaming ? "streaming" : "captured"} · ${count} chars · private reasoning text hidden; visible actions follow`;
+        }}
+      </text>
+    );
+  }
   if (kind === "assistant-text") {
     const liveText = (): string => {
       const current = props.item();

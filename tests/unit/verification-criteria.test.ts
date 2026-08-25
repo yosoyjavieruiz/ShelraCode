@@ -62,6 +62,8 @@ describe("structural coding criteria", () => {
       pass: true,
       satisfiedCriterionIds: ["criterion-1", "criterion-2", "criterion-3"],
       issues: [],
+      nextPaths: [],
+      nextActions: [],
     });
   });
 
@@ -79,5 +81,32 @@ describe("structural coding criteria", () => {
       "The final diff review has not passed.",
       "Pre-existing user work is not preserved.",
     ]);
+  });
+
+  test("points recovery at the paths from the latest failed verification", async () => {
+    const taskLedger = ledger();
+    recordTaskAction(taskLedger, {
+      id: "write",
+      kind: "write",
+      target: "src/value.ts",
+      status: "succeeded",
+    });
+    recordVerificationRun(taskLedger, {
+      id: "failed-test",
+      stage: "test",
+      command: "bun test",
+      status: "failed",
+      exitCode: 1,
+      failurePaths: ["tests/value.test.ts"],
+      startedAt: new Date().toISOString(),
+    });
+
+    const result = await verifyStructuralCodingCriteria(taskLedger, {
+      reviewFinalDiff: () => true,
+      userWorkPreserved: () => true,
+    });
+
+    expect(result.nextPaths).toEqual(["tests/value.test.ts"]);
+    expect(result.nextActions?.[0]).toContain("tests/value.test.ts");
   });
 });

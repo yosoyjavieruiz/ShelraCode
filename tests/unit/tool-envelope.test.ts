@@ -78,3 +78,42 @@ test("recovers LM Studio default lowercase tool_request envelopes", () => {
     },
   ]);
 });
+
+test("recovers a validated EditFile argument hidden in a model tool_response wrapper", () => {
+  const calls = recoverTextToolCalls(
+    "<tool_response>\n" +
+      '{"tool":"EditFile","ok":true,"output":{"path":"src/value.ts","oldText":"return 1;","newText":"return 2;","replaceAll":false}}\n' +
+      "</tool_response>",
+    7,
+  );
+
+  expect(calls).toEqual([
+    {
+      id: "recovered-7-1",
+      name: "EditFile",
+      arguments:
+        '{"path":"src/value.ts","oldText":"return 1;","newText":"return 2;","replaceAll":false}',
+    },
+  ]);
+});
+
+test("recovers adjacent JSON tool objects without leaking them as assistant text", () => {
+  const calls = recoverTextToolCalls(
+    '{"name":"ReadFile","arguments":{"path":"demo.txt"}}\n' +
+      '{"name":"SearchText","arguments":{"query":"hello","path":"."}}',
+    8,
+  );
+
+  expect(calls).toEqual([
+    {
+      id: "recovered-8-1",
+      name: "ReadFile",
+      arguments: '{"path":"demo.txt"}',
+    },
+    {
+      id: "recovered-8-2",
+      name: "SearchText",
+      arguments: '{"query":"hello","path":"."}',
+    },
+  ]);
+});

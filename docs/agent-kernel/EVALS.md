@@ -1,5 +1,16 @@
 # Evaluation Program
 
+## Current routing policy - 2026-08-25
+
+The capability-class veto described in older evaluation snapshots is
+superseded. A `chat_only`, `workspace_reader`, or unmeasured probe is now a
+quality signal, not an independent route veto. A candidate still has to pass
+privacy, cost, quota, health, context, and executable-tool gates; after
+selection, the host-owned loop, permissions, recovery, verification, and
+completion gate determine whether the task succeeds. This keeps the 1.5B
+route usable for small-resource users without claiming frontier-level task
+completion.
+
 The deterministic fixture in `tests/support/fixture-repo.ts` contains a
 manifest, `AGENTS.md`, TypeScript sources, tests, and an injectable failing
 math implementation. `tests/support/fake-provider.ts` separates kernel
@@ -21,10 +32,11 @@ host-owned `test -> typecheck -> build` plan, failed-stage blocking, and full
 plan reruns after a later edit.
 
 The full repository suite is now green under the canonical browser-conditioned
-command. Live-model capability is still separate:
-installed LM Studio qwen probe currently returns `workspace_reader`, so it is
-not eligible to mutate or verify code. A complete model-vs-harness matrix and
-a live zero-cost remote benchmark remain open evidence, not assumed results.
+command. Live-model capability is still separate: the historical LM Studio
+Qwen probe returned `workspace_reader`; under the current router that result
+does not independently block a runnable local candidate, but it remains an
+important quality signal. A complete model-vs-harness matrix and a live
+zero-cost remote benchmark remain open evidence, not assumed results.
 
 Final verification snapshot (2026-08-24):
 
@@ -154,7 +166,7 @@ the same disposable fixture boundary:
 | Qwen2.5 Coder 7B Q6_K + LM Studio + Agent Kernel, multi-file coding | FAIL safely: blocked; 0 writes; no false completion                             |
 | Qwen2.5 Coder 7B capability doctor                                  | `workspace_reader`, not coding-eligible                                         |
 | Strong remote benchmark                                             | NOT RUN; no remote inference authorized                                         |
-| Hybrid route                                                        | Not selected; capability hard gate correctly rejects the local model for coding |
+| Hybrid route                                                        | Historical run was not selected because the old capability-class veto rejected the local model; current routing no longer applies that veto |
 
 The complex run's failure mode was model/tool behavior, not a harness false
 success: the model emitted planning prose and fenced tool-shaped snippets,

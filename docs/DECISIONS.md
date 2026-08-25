@@ -20,12 +20,12 @@
 
 ## ADR-003: Strict-zero deny by default
 
-**Date:** 2026-08-23  
-**Decision:** credentials do not establish free billing, privacy, or ZDR; uncertain routes are excluded.  
-**Context:** provider policies and quotas are volatile and provider docs currently distinguish free allocations, paid overage, and data improvement.  
+**Date:** 2026-08-25 (amended)
+**Decision:** credentials never establish privacy or ZDR. Known provider-free routes may be admitted with expiring, quota-bearing metadata: Groq becomes `free_quota` when keyed, while OpenRouter is `verified_free` only for filtered free catalog records.
+**Context:** provider policies and quotas are volatile; official docs distinguish no-payment Free allocations, paid overage, rate limits and data/privacy behavior.
 **Alternatives:** optimistic free inference, user-managed provider list only.  
 **Reason:** unexpected spending and privacy violations are P0 failures.  
-**Consequence:** setup may show unverified readiness, but routing stops until evidence is configured.
+**Consequence:** strict-zero never upgrades or selects paid inference. Quota exhaustion may fall back only to another eligible local/free route. Remote private-repository content still stops until privacy/ZDR evidence is configured.
 
 ## ADR-004: Native bun:sqlite
 

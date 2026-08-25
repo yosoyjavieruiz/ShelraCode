@@ -70,5 +70,6 @@ export interface ToolResult<O = unknown> {
   field?: string;
   path?: string;
   suggestedAction?: string;
+  details?: Record<string, unknown>;
   durationMs: number;
 }

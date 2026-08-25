@@ -69,6 +69,13 @@ describe("route selection", () => {
         candidate({
           id: "local/unprobed",
           agentProbe: undefined,
+          capabilities: {
+            tools: false,
+            structuredOutput: true,
+            reasoning: false,
+            vision: false,
+            maxContext: 16_000,
+          },
         }),
         candidate({ id: "local/eligible" }),
       ]),
@@ -84,7 +91,7 @@ describe("route selection", () => {
     ).toBe(true);
   });
 
-  test("logs the first actionable reason when no route is eligible", () => {
+  test("logs the first actionable reason when no executable tool route exists", () => {
     const records: LogRecord[] = [];
     const logger = createLogger({
       level: "debug",
@@ -92,7 +99,18 @@ describe("route selection", () => {
     });
 
     const decision = selectRoute(
-      request([candidate({ id: "local/unprobed", agentProbe: undefined })]),
+      request([
+        candidate({
+          id: "local/no-tools",
+          capabilities: {
+            tools: false,
+            structuredOutput: true,
+            reasoning: false,
+            vision: false,
+            maxContext: 16_000,
+          },
+        }),
+      ]),
       logger,
     );
 
@@ -101,7 +119,9 @@ describe("route selection", () => {
       records.find((record) => record.event === "route.none")?.data,
     ).toEqual(
       expect.objectContaining({
-        reasonSummary: expect.stringContaining("capability probe required"),
+        reasonSummary: expect.stringContaining(
+          "required tool capability is unavailable",
+        ),
       }),
     );
   });
@@ -220,6 +240,38 @@ describe("route selection", () => {
     expect(decision.explanation).toContain("No eligible route");
   });
 
+  test("can attempt a fresh free-only route when the provider omits quota headers", () => {
+    const remote = candidate({
+      id: "groq/free-quota",
+      providerId: "groq",
+      source: "free_cloud",
+      free: {
+        status: "free_quota",
+        verifiedAt: now,
+        expiresAt: "2026-08-24T18:00:00.000Z",
+      },
+      privacy: {
+        classification: "zdr_capable",
+        retentionKnown: true,
+        zdrAvailable: true,
+        trainsOnInputs: false,
+      },
+    });
+    const route = request([remote]);
+    route.quotas = {
+      groq: {
+        providerId: "groq",
+        confidence: "unknown",
+        observedAt: now,
+      },
+    };
+
+    const decision = selectRoute(route);
+
+    expect(decision.selected?.candidate.id).toBe(remote.id);
+    expect(decision.selected?.breakdown.quotaHeadroom).toBe(0.35);
+  });
+
   test("blocks a cloud route when sanitized context contains a high-confidence secret", () => {
     const cloud = candidate({
       id: "groq/free",
@@ -332,6 +384,31 @@ describe("route selection", () => {
     expect(selectRoute(route).selected?.candidate.id).toBe("paid/model");
   });
 
+  test("never treats a paid model record as a free-cloud route", () => {
+    const leakedPaidModel = candidate({
+      id: "openrouter/paid-model",
+      providerId: "openrouter",
+      source: "free_cloud",
+      free: { status: "paid_required" },
+      privacy: {
+        classification: "zdr_capable",
+        retentionKnown: true,
+        zdrAvailable: true,
+        trainsOnInputs: false,
+      },
+    });
+    const route = request([leakedPaidModel]);
+    route.routingMode = "ask-before-paid";
+    route.paidApproved = true;
+
+    const decision = selectRoute(route);
+
+    expect(decision.selected).toBeUndefined();
+    expect(decision.rejections[0]?.reasons).toContain(
+      "paid model excluded from free provider boundary",
+    );
+  });
+
   test("rejects unknown training behavior under private policy", () => {
     const cloud = candidate({
       id: "cloud/unknown-training",
@@ -350,7 +427,7 @@ describe("route selection", () => {
     expect(selectRoute(route).selected).toBeUndefined();
   });
 
-  test("rejects a candidate that failed its agentic-coding capability probe when the task needs tools", () => {
+  test("keeps a runnable candidate eligible when its capability probe is weaker", () => {
     const failedProbe = candidate({
       id: "local/chat-only",
       providerId: "local",
@@ -366,22 +443,25 @@ describe("route selection", () => {
       },
     });
 
-    const decision = selectRoute(request([failedProbe]));
+    const route = request([failedProbe]);
+    route.task = {
+      ...route.task,
+      requiredCapability: "advanced_coding_agent",
+    };
+    const decision = selectRoute(route);
 
-    expect(decision.selected).toBeUndefined();
-    expect(decision.rejections[0]?.reasons).toContain(
-      "capability chat_only is below required workspace_reader",
-    );
+    expect(decision.selected?.candidate.id).toBe(failedProbe.id);
+    expect(decision.rejections).toEqual([]);
+    expect(decision.explanation).not.toContain("No eligible route");
+    expect(decision.explanation).not.toContain("below required");
   });
 
-  test("a candidate with no probe result is rejected for repository work", () => {
+  test("a candidate with no probe result remains eligible when its tools are executable", () => {
     const unprobed = candidate({ id: "local/unprobed", agentProbe: undefined });
 
     const decision = selectRoute(request([unprobed]));
-    expect(decision.selected).toBeUndefined();
-    expect(decision.rejections[0]?.reasons).toContain(
-      "capability probe required for workspace_reader",
-    );
+    expect(decision.selected?.candidate.id).toBe(unprobed.id);
+    expect(decision.rejections).toEqual([]);
   });
 
   test("respects an open circuit breaker before scoring", () => {
@@ -409,7 +489,7 @@ describe("route selection", () => {
     );
   });
 
-  test("selects a stronger eligible local model instead of a chat-only local model", () => {
+  test("uses capability as a preference without blocking the only runnable model", () => {
     const weak = candidate({
       id: "local/chat-only",
       displayName: "Chat only",
@@ -432,8 +512,8 @@ describe("route selection", () => {
 
     expect(decision.selected?.candidate.id).toBe("local/strong");
     expect(
-      decision.rejections.find((item) => item.candidateId === weak.id)?.reasons,
-    ).toContain("capability chat_only is below required workspace_reader");
+      decision.rejections.find((item) => item.candidateId === weak.id),
+    ).toBeUndefined();
   });
 
   test("local candidates do not lose eligibility because of a cloud quota snapshot", () => {

@@ -28,9 +28,16 @@ function freshness(
   confirmationKey: string,
 ): ProviderProfile["freeStatus"] {
   if (!envBoolean(env, confirmationKey)) return { status: "unknown" };
+  return expiringFreeStatus("verified_free", 24 * 60 * 60 * 1_000);
+}
+
+function expiringFreeStatus(
+  status: "verified_free" | "free_quota",
+  ttlMs: number,
+): ProviderProfile["freeStatus"] {
   const verifiedAt = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString();
-  return { status: "verified_free", verifiedAt, expiresAt };
+  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+  return { status, verifiedAt, expiresAt };
 }
 
 function privacy(
@@ -58,10 +65,48 @@ function openRouterFreeModel(model: unknown): boolean {
     typeof value.pricing === "object" && value.pricing !== null
       ? (value.pricing as Record<string, unknown>)
       : undefined;
+  const promptPrice =
+    typeof pricing?.prompt === "string" ? Number(pricing.prompt) : Number.NaN;
+  const completionPrice =
+    typeof pricing?.completion === "string"
+      ? Number(pricing.completion)
+      : Number.NaN;
   return (
+    id === "openrouter/free" ||
     id.endsWith(":free") ||
-    (pricing?.prompt === "0" && pricing?.completion === "0")
+    (Number.isFinite(promptPrice) &&
+      promptPrice === 0 &&
+      Number.isFinite(completionPrice) &&
+      completionPrice === 0)
   );
+}
+
+function freeStatusFor(
+  env: Record<string, string | undefined>,
+  id: string,
+  source: ProviderProfile["source"],
+  apiKey: string | undefined,
+): ProviderProfile["freeStatus"] {
+  if (source !== "free_cloud") return { status: "paid_required" };
+  if (!apiKey) return { status: "unknown" };
+
+  // OpenRouter's free variants are model-level guarantees. A configured key
+  // is enough to expose only those variants; no paid model is ever catalogued.
+  if (id === "openrouter")
+    return expiringFreeStatus("verified_free", 24 * 60 * 60 * 1_000);
+
+  // Groq has a no-payment Free plan, but its request/token allowance is
+  // volatile and account dependent. Treat it as quota-bearing, not unlimited.
+  // An explicit confirmation can promote the status to verified_free while
+  // retaining the same strict-zero and privacy gates.
+  if (id === "groq") {
+    return envBoolean(env, "GROQ_FREE_CONFIRMED")
+      ? freshness(env, "GROQ_FREE_CONFIRMED")
+      : expiringFreeStatus("free_quota", 15 * 60 * 1_000);
+  }
+
+  const freeConfirmation = `${id.toUpperCase()}_FREE_CONFIRMED`;
+  return freshness(env, freeConfirmation);
 }
 
 function profile(
@@ -71,24 +116,24 @@ function profile(
   baseUrl: string,
   source: ProviderProfile["source"],
   key: string,
+  apiKey?: string,
 ): ProviderProfile {
-  const freeConfirmation = `${id.toUpperCase()}_FREE_CONFIRMED`;
   const zdrConfirmation = `${id.toUpperCase()}_ZDR_CONFIRMED`;
+  const resolvedApiKey = apiKey ?? (env[key]?.trim() || undefined);
   return {
     id,
     displayName,
     baseUrl,
     source,
-    freeStatus:
-      source === "free_cloud"
-        ? freshness(env, freeConfirmation)
-        : { status: "paid_required" },
+    freeStatus: freeStatusFor(env, id, source, resolvedApiKey),
     privacy:
       source === "free_cloud"
         ? privacy(env, zdrConfirmation)
         : { classification: "unknown", retentionKnown: false },
-    apiKey: env[key]?.trim() || undefined,
-    ...(id === "openrouter" ? { isFreeModel: openRouterFreeModel } : {}),
+    ...(resolvedApiKey ? { apiKey: resolvedApiKey } : {}),
+    ...(id === "openrouter"
+      ? { isFreeModel: openRouterFreeModel, freeOnly: true }
+      : {}),
   };
 }
 
@@ -132,11 +177,11 @@ export async function createProviderRegistry(
       definition.baseUrl,
       definition.source,
       definition.key,
+      apiKey,
     );
     const providerProfile = {
       ...configuredProfile,
       ...(logger ? { logger } : {}),
-      ...(apiKey ? { apiKey } : {}),
     };
     statuses.push({
       id: definition.id,
@@ -149,9 +194,11 @@ export async function createProviderRegistry(
       note:
         definition.id === "opencode"
           ? "Paid per-request service; never selected by strict-zero."
-          : apiKey
-            ? "Credential configured; free and privacy confirmations remain explicit."
-            : "Not configured; set the provider API key to enable discovery.",
+          : !apiKey
+            ? "Not configured; set the provider API key. No paid account is required for this route."
+            : definition.id === "openrouter"
+              ? "Only OpenRouter models explicitly marked free are exposed; paid variants and fallback are filtered out."
+              : "Groq Free tier enabled; rate limits may stop the route and no paid upgrade or fallback is automatic.",
     });
     if (apiKey)
       adapters.push(new GenericOpenAICompatibleProvider(providerProfile));
@@ -173,9 +220,9 @@ export async function createProviderRegistry(
             definition.baseUrl,
             definition.source,
             definition.key,
+            apiKey,
           ),
           ...(logger ? { logger } : {}),
-          ...(apiKey ? { apiKey } : {}),
           fetchImpl,
         },
       );

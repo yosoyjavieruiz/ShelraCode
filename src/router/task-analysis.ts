@@ -26,28 +26,11 @@ function requiredCapability(
     ) {
       return "advanced_coding_agent";
     }
-    // Bounded, single-file work (a low-complexity SMALL_EDIT/
-    // TEST_GENERATION/DEBUGGING) only needs `workspace_reader`, not the
-    // full `coding_agent` tier. Live capability-probe evidence
-    // (docs/agent-kernel/MODEL-CAPABILITIES.md) shows the router was
-    // hard-blocking every edit task on real hardware: the local models
-    // that install-and-run out of the box (Qwen2.5 Coder 1.5B/7B) both
-    // pass conversation, repository read, and multi-turn tool use, but
-    // land at `workspace_reader` because their own multi-file/executable-
-    // test probe scenario fails — while the *product's actual promise* is
-    // exactly small, bounded edits with a small local model, which the
-    // same evidence documents these models CAN do (a real one-file edit
-    // plus a passing test in a disposable fixture). Requiring the strict
-    // `coding_agent` floor here meant `selectRoute` returned "No eligible
-    // route" for the single most common request shape on the one
-    // realistic local setup — an unconditional dead end, not a
-    // capability-appropriate one. Safe to loosen precisely because the
-    // completion gate (`completion-gate.ts`/`verifier.ts`) independently
-    // verifies real evidence before ever reporting success — an attempt
-    // that fails is reported as failed, never silently claimed done.
-    // REFACTOR/MULTI_FILE_EDIT and high-complexity work above keep the
-    // strict `advanced_coding_agent` floor unchanged: that is exactly the
-    // territory the same evidence shows these models genuinely fail.
+    // Bounded, single-file work gets a lower starting target than a complex
+    // multi-file objective. This is a routing preference and context hint,
+    // not an eligibility floor: the router may still attempt the only
+    // policy-valid local model, including a 1.5B model, and host verification
+    // decides whether the real result satisfies the objective.
     return "workspace_reader";
   }
   return "workspace_reader";

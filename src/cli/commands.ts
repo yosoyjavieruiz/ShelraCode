@@ -6,7 +6,11 @@ import {
   type ControlPlane,
 } from "./control-plane.js";
 import { persistRepositorySettings } from "../config/settings.js";
-import type { CapabilityResult } from "../shared/types.js";
+import type {
+  AgentCapabilityClass,
+  CapabilityResult,
+  ModelCandidate,
+} from "../shared/types.js";
 
 function mark(value: boolean): string {
   return value ? "[ok]" : "[ ]";
@@ -32,13 +36,34 @@ function measuredCapability(
   return result ? capabilityResultMark(result) : capabilityMark(fallback);
 }
 
-export function agentDoctorLines(
-  models: readonly import("../shared/types.js").ModelCandidate[],
-): string[] {
-  const local =
-    models.find(
-      (model) => model.source === "local" && model.providerId !== "llmfit",
-    ) ?? models.find((model) => model.source === "local");
+function doctorCapabilityClass(
+  model: ModelCandidate,
+): AgentCapabilityClass | "UNPROBED" {
+  return model.agentProbe?.agentCapabilityClass ?? "UNPROBED";
+}
+
+function doctorCapabilityRank(model: ModelCandidate): number {
+  switch (doctorCapabilityClass(model)) {
+    case "advanced_coding_agent":
+      return 4;
+    case "coding_agent":
+      return 3;
+    case "workspace_reader":
+      return 2;
+    case "chat_only":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+export function agentDoctorLines(models: readonly ModelCandidate[]): string[] {
+  const localModels = models.filter(
+    (model) => model.source === "local" && model.providerId !== "llmfit",
+  );
+  const local = [...localModels].sort(
+    (left, right) => doctorCapabilityRank(right) - doctorCapabilityRank(left),
+  )[0];
   if (!local)
     return [
       "LocalCode Agent Diagnostics",
@@ -50,6 +75,23 @@ export function agentDoctorLines(
   const environment = probe?.environment;
   const contextLength =
     environment?.contextLength ?? local.capabilities.maxContext;
+  const progressiveCount = localModels.filter((model) => {
+    const capability = doctorCapabilityClass(model);
+    return (
+      capability === "workspace_reader" ||
+      capability === "coding_agent" ||
+      capability === "advanced_coding_agent"
+    );
+  }).length;
+  const boundedCodingCount = localModels.filter((model) => {
+    const capability = doctorCapabilityClass(model);
+    return (
+      capability === "coding_agent" || capability === "advanced_coding_agent"
+    );
+  }).length;
+  const autonomousCodingCount = localModels.filter(
+    (model) => doctorCapabilityClass(model) === "advanced_coding_agent",
+  ).length;
   return [
     "LocalCode Agent Diagnostics",
     "",
@@ -73,7 +115,17 @@ export function agentDoctorLines(
     `Test iteration               ${capabilityResultMark(probe?.profile?.verificationBehavior)}`,
     `Verification                 ${capabilityResultMark(probe?.profile?.verificationBehavior)}`,
     "",
-    `Autonomous coding             ${probe?.agentCapabilityClass === "advanced_coding_agent" ? "READY" : "NOT READY"}`,
+    `Autonomous coding             ${autonomousCodingCount > 0 ? "READY" : "NOT READY"}`,
+    "",
+    `Local models detected          ${localModels.length}`,
+    `Progressive coding             ${progressiveCount > 0 ? "READY" : "NOT READY"}`,
+    `Bounded coding                 ${boundedCodingCount > 0 ? "READY" : "NOT READY"}`,
+    "",
+    "Local capability matrix",
+    ...localModels.map(
+      (model) =>
+        `  ${model.displayName} · ${doctorCapabilityClass(model)} · ${model.local?.runtime ?? model.providerId}`,
+    ),
   ];
 }
 

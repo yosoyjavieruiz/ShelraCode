@@ -15,7 +15,7 @@ import type { LocalCodeLogger } from "../shared/logging.js";
  * harness does not hide its own defects behind model switching.
  */
 export interface RouteFailureEvidence {
-  code: ProviderFailureCode | ToolErrorCode;
+  code: ProviderFailureCode | ToolErrorCode | "AGENT_INCOMPLETE";
   message: string;
   mutationOccurred: boolean;
 }
@@ -45,7 +45,9 @@ export interface RouteFallbackHooks<Outcome extends RouteExecutionOutcome> {
   ) => void | Promise<void>;
 }
 
-const ROUTE_ESCALATION_CODES = new Set<ProviderFailureCode>([
+const ROUTE_ESCALATION_CODES = new Set<
+  ProviderFailureCode | "AGENT_INCOMPLETE"
+>([
   "MODEL_NOT_FOUND",
   "MODEL_DEPRECATED",
   "MODEL_UNAVAILABLE",
@@ -58,6 +60,7 @@ const ROUTE_ESCALATION_CODES = new Set<ProviderFailureCode>([
   "DAILY_QUOTA_EXHAUSTED",
   "MONTHLY_QUOTA_EXHAUSTED",
   "FREE_TIER_EXHAUSTED",
+  "AGENT_INCOMPLETE",
 ]);
 
 export function shouldEscalateRoute(failure: RouteFailureEvidence): boolean {
@@ -132,7 +135,10 @@ export async function runWithRouteFallback<
       failureCode: outcome.failure?.code,
     });
 
-    if (outcome.status === "failed" && outcome.failure) {
+    if (
+      (outcome.status === "failed" || outcome.status === "blocked") &&
+      outcome.failure
+    ) {
       const failure: RouteFailureEvidence = {
         ...outcome.failure,
         mutationOccurred: outcome.mutationOccurred,

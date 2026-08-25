@@ -3,6 +3,7 @@ export type ToolErrorCode =
   | "INVALID_ARGUMENT"
   | "NOT_FOUND"
   | "PATH_NOT_FOUND"
+  | "PATH_EXISTS"
   | "PATH_IS_FILE"
   | "PATH_IS_DIRECTORY"
   | "OUTSIDE_WORKSPACE"
@@ -23,10 +24,15 @@ export interface ToolErrorOptions {
   field?: string;
   path?: string;
   suggestedAction?: string;
+  details?: Record<string, unknown>;
 }
 
 function defaultRecoverable(code: ToolErrorCode): boolean {
-  return code !== "OUTSIDE_WORKSPACE" && code !== "PERMISSION_DENIED";
+  return (
+    code !== "OUTSIDE_WORKSPACE" &&
+    code !== "PERMISSION_DENIED" &&
+    code !== "PATH_EXISTS"
+  );
 }
 
 export class ToolError extends Error {
@@ -35,6 +41,7 @@ export class ToolError extends Error {
   readonly field?: string;
   readonly path?: string;
   readonly suggestedAction?: string;
+  readonly details?: Record<string, unknown>;
 
   constructor(
     code: ToolErrorCode,
@@ -48,6 +55,7 @@ export class ToolError extends Error {
     this.field = options.field;
     this.path = options.path;
     this.suggestedAction = options.suggestedAction;
+    this.details = options.details;
   }
 }
 
@@ -58,6 +66,7 @@ export interface ToolErrorDetails {
   field?: string;
   path?: string;
   suggestedAction?: string;
+  details?: Record<string, unknown>;
 }
 
 export function toolErrorCode(error: unknown): ToolErrorCode | undefined {
@@ -75,5 +84,6 @@ export function toolErrorDetails(error: unknown): ToolErrorDetails | undefined {
     ...(error.suggestedAction === undefined
       ? {}
       : { suggestedAction: error.suggestedAction }),
+    ...(error.details === undefined ? {} : { details: error.details }),
   };
 }

@@ -6,6 +6,19 @@ classification, tool contracts, agent loop, recovery, verification), see
 currently the priority and is tracked separately so it isn't lost in a
 UI-focused log.
 
+## Current product evidence — 2026-08-25
+
+The current source has a green canonical deterministic suite (`474 pass, 1
+skip, 0 fail`), a passing typecheck, a rebuilt `dist/index.js`, and passing
+source/bundle CLI smoke. The routing correction makes empirical capability a
+score/fallback signal instead of an unconditional route veto, so an executable
+1.5B local candidate can be attempted for an otherwise policy-valid task.
+This does not promote 1.5B to unrestricted long-horizon autonomy; live
+completion evidence remains task- and runtime-specific.
+The file-domain controls now distinguish read/list/create/edit/overwrite/delete
+operations, reject phantom objective paths, and surface rejected tool requests
+as `BLOCKED` activity with a typed recovery explanation.
+
 ## Done
 
 - Current UI was audited from the real `bun run dist/index.js --tui` artifact at
@@ -51,9 +64,10 @@ UI-focused log.
 
 - `llmfit` is not installed on this machine, so the hardware screen uses its
   documented basic-detection fallback.
-- Groq/OpenRouter credentials are present, but their automatic strict-zero
-  eligibility remains unverified until explicit free/privacy confirmations are
-  configured. Unknown billing/privacy remains ineligible by design.
+- Groq/OpenRouter credentials are present. Strict-zero now treats Groq as
+  expiring free-tier quota and OpenRouter as free-only catalog entries; paid
+  variants are excluded before routing. Remote privacy/ZDR remains a separate
+  hard gate, and live account quota/health evidence is still volatile.
 - No standalone native executable is produced; the current release artifact is
   the Bun bundle `dist/index.js` plus OpenTUI runtime assets.
 

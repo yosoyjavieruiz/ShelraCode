@@ -4,6 +4,22 @@ Living status for the agent-kernel workstream. See [AUDIT.md](AUDIT.md) for
 the full component table and [ROOT-CAUSES.md](ROOT-CAUSES.md) for the
 reported-failure investigation.
 
+## Routing policy addendum — 2026-08-25
+
+The former empirical capability-class veto has been removed from active
+selection. A measured `chat_only`/`workspace_reader` result, or a missing
+probe, no longer produces `STOP · ASK USER` by itself. Capability evidence is
+now a bounded score preference; a policy-valid candidate with executable tools
+can be attempted, including an accessible 1.5B local model. Privacy,
+`strict-zero`, paid-model exclusion, quota, health, context, tool permissions,
+workspace safety, and host-owned verification remain hard controls. A model
+that cannot complete the task is handled by the agent loop, verification, and
+bounded fallback rather than by a capability-label rejection.
+
+This supersedes older status paragraphs below that describe a capability class
+as an unconditional route gate. Those paragraphs remain historical evidence
+of the earlier failure and are not the current runtime policy.
+
 ## Done (this pass)
 
 - Traced the reported failure to source and reproduced both tool errors
@@ -419,3 +435,63 @@ JSONL log path. It produced 29 records with zero malformed lines, including
 control-plane, storage, hardware, runtime, provider, and process lifecycle
 events. `bun run logs:inspect -- <jsonl>` summarized the run without printing
 raw prompt or command output.
+
+## Progressive low-resource continuation — 2026-08-25
+
+The current kernel adds a guarded progressive path for accessible local
+models. Multi-file objectives with explicit workspace paths are decomposed by
+the host into one writable target at a time, with verification between stages.
+The active prompt budget is model-size aware and compaction preserves the
+objective/context anchor plus the latest observation.
+
+Fresh live evidence through the real LM Studio adapter:
+
+```text
+Qwen2.5 Coder 1.5B Instruct / Q8_0
+multi-file fixture: COMPLETED, verified=true, 9 turns
+files: src/math.ts, src/index.ts, tests/math.test.ts
+verification: 3 passing bun test stages
+simple fixture: COMPLETED, verified=true, 3 turns
+```
+
+The capability probe remains valuable evidence for score and fallback
+preference; it is no longer an unconditional ordinary-routing gate. The TUI
+may use the progressive fallback when no stronger candidate is available,
+explicit multi-file paths exist, and the local candidate has measured
+read/continuation capability. An arbitrary super-complex task is not yet
+proven by this fixture.
+
+## Final authoritative update - 2026-08-25
+
+The current deterministic suite is green:
+
+    474 pass / 1 skip / 0 fail / 1529 expectations
+
+The current source builds and the rebuilt dist/index.js passes the CLI smoke
+path. The final bundle TUI journey at 80 columns accepted Hola without
+repository tools, reached Task completed and verified, and restored the
+terminal after Ctrl+C.
+
+The exact Qwen2.5 Coder 1.5B Instruct / LM Studio / Q8_0 pair passed two
+consecutive final runs of the bounded three-file fixture, each in 10 turns
+with completed, verified=true, three passing verification stages and no
+user-worktree mutation. This promotes the progressive low-resource route to
+validated MVP status. It does not promote raw 1.5B to unrestricted
+frontier-level repository autonomy.
+
+Older contradictory entries in this file are historical snapshots. The
+latest evidence above is authoritative for the current source state.
+
+## Path-domain and transparency update - 2026-08-25
+
+Objective path extraction now ignores dependency names such as `Moment.js`
+unless the user explicitly identifies a file/document. Canonical path
+comparison and host criteria prevent a model from mutating outside the current
+target stage. The real integration regression covers the `Moment.js` plus
+`index.html` case.
+
+The filesystem contract now separates read/list/create/edit/overwrite/delete
+operations, typed file-vs-directory/missing-path errors, checkpoints, and
+bounded redaction-aware diffs. The TUI labels rejected requests `BLOCKED`
+instead of making them look like successful writes, and shows safe model
+progress metadata without revealing private reasoning text.

@@ -3,13 +3,18 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  createFileTool,
+  deleteFileTool,
   gitStatusTool,
+  editFileTool,
   listFilesTool,
   readFileTool,
   searchTextTool,
 } from "../../src/tools/workspace.js";
 import { ToolError, toolErrorCode } from "../../src/tools/errors.js";
 import type { ToolExecutionContext } from "../../src/tools/types.js";
+import { CheckpointService } from "../../src/checkpoint/checkpoint.js";
+import { LocalCodeDatabase } from "../../src/storage/database.js";
 
 // Regression coverage for the exact failures reported against LocalCode's
 // agent loop: `ListFiles` called on a SKILL.md file path (raw ENOTDIR) and
@@ -62,6 +67,20 @@ test("ListFiles on a missing path throws PATH_NOT_FOUND, not a raw ENOENT", asyn
   }
 });
 
+test("ReadFile on a missing path throws PATH_NOT_FOUND, not a raw ENOENT", async () => {
+  const { ctx } = await fixtureContext();
+  const input = readFileTool.validate({ path: "does/not/exist.txt" });
+  try {
+    await readFileTool.execute(input, ctx);
+    throw new Error("expected readFileTool.execute to reject");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ToolError);
+    expect((error as ToolError).code).toBe("PATH_NOT_FOUND");
+    expect((error as ToolError).message).not.toContain("ENOENT");
+    expect((error as ToolError).suggestedAction).toContain("parent");
+  }
+});
+
 test("ReadFile validate() rejects a non-positive maxChars with INVALID_ARGUMENT and a usable default hint", () => {
   expect(() =>
     readFileTool.validate({ path: "package.json", maxChars: 0 }),
@@ -73,6 +92,172 @@ test("ReadFile validate() rejects a non-positive maxChars with INVALID_ARGUMENT 
     expect((error as ToolError).code).toBe("INVALID_ARGUMENT");
     expect((error as ToolError).message).toContain("20000");
   }
+});
+
+test("EditFile rejects a no-op replacement before it can consume a mutation turn", () => {
+  expect(() =>
+    editFileTool.validate({
+      path: "package.json",
+      oldText: '"name":"x"',
+      newText: '"name":"x"',
+    }),
+  ).toThrow(ToolError);
+  try {
+    editFileTool.validate({
+      path: "package.json",
+      oldText: '"name":"x"',
+      newText: '"name":"x"',
+    });
+  } catch (error) {
+    expect(error).toBeInstanceOf(ToolError);
+    expect((error as ToolError).code).toBe("INVALID_ARGUMENT");
+    expect((error as ToolError).field).toBe("newText");
+    expect((error as ToolError).suggestedAction).toContain("different");
+  }
+});
+
+test("EditFile exposes bounded non-sensitive current content after a stale exact edit", async () => {
+  const { ctx, root } = await fixtureContext();
+  await writeFile(
+    path.join(root, "value.ts"),
+    "export const value = 1;\n",
+    "utf8",
+  );
+  const db = new LocalCodeDatabase(":memory:");
+  const checkpoint = new CheckpointService(db, root);
+  const checkpointId = await checkpoint.create("edit-recovery", ["value.ts"]);
+  const input = editFileTool.validate({
+    path: "value.ts",
+    oldText: "export const value = 999;",
+    newText: "export const value = 2;",
+  });
+  try {
+    await editFileTool.execute(input, {
+      ...ctx,
+      permissionMode: "AUTO",
+      checkpoint,
+      checkpointId,
+    });
+    throw new Error("expected editFileTool.execute to reject");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ToolError);
+    expect((error as ToolError).code).toBe("NOT_FOUND");
+    expect((error as ToolError).details?.currentContentPreview).toBe(
+      "export const value = 1;\n",
+    );
+    expect((error as ToolError).suggestedAction).toContain(
+      "currentContentPreview",
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("EditFile reports a typed missing-path error instead of creating a guessed file", async () => {
+  const { ctx, root } = await fixtureContext();
+  const db = new LocalCodeDatabase(":memory:");
+  const checkpoint = new CheckpointService(db, root);
+  const checkpointId = await checkpoint.create("missing-edit", ["missing.ts"]);
+  await expect(
+    editFileTool.execute(
+      editFileTool.validate({
+        path: "missing.ts",
+        oldText: "before",
+        newText: "after",
+      }),
+      { ...ctx, permissionMode: "AUTO", checkpoint, checkpointId },
+    ),
+  ).rejects.toMatchObject({
+    code: "PATH_NOT_FOUND",
+    path: "missing.ts",
+  });
+  expect(await Bun.file(path.join(root, "missing.ts")).exists()).toBe(false);
+  db.close();
+});
+
+test("WriteFile exposes whether it created or overwrote and includes a bounded diff", async () => {
+  const { ctx, root } = await fixtureContext();
+  await writeFile(path.join(root, "value.ts"), "const value = 1;\n", "utf8");
+  const db = new LocalCodeDatabase(":memory:");
+  const checkpoint = new CheckpointService(db, root);
+  const checkpointId = await checkpoint.create("write-diff", ["value.ts"]);
+  const { writeFileTool } = await import("../../src/tools/workspace.js");
+  const result = await writeFileTool.execute(
+    { path: "value.ts", content: "const value = 2;\n" },
+    { ...ctx, permissionMode: "AUTO", checkpoint, checkpointId },
+  );
+  expect(result.operation).toBe("overwritten");
+  expect(result.change).toMatchObject({
+    operation: "overwritten",
+    beforeExists: true,
+    afterExists: true,
+    addedLines: 1,
+    removedLines: 1,
+  });
+  expect(result.change.diffLines).toEqual([
+    "- const value = 1;",
+    "+ const value = 2;",
+  ]);
+  db.close();
+});
+
+test("CreateFile refuses to overwrite and DeleteFile requires approval", async () => {
+  const { ctx, root } = await fixtureContext();
+  await writeFile(
+    path.join(root, "remove.ts"),
+    "const remove = true;\n",
+    "utf8",
+  );
+  const db = new LocalCodeDatabase(":memory:");
+  const checkpoint = new CheckpointService(db, root);
+  const createCheckpoint = await checkpoint.create("create-existing", [
+    "package.json",
+  ]);
+  await expect(
+    createFileTool.execute(
+      createFileTool.validate({ path: "package.json", content: "nope" }),
+      {
+        ...ctx,
+        permissionMode: "AUTO",
+        checkpoint,
+        checkpointId: createCheckpoint,
+      },
+    ),
+  ).rejects.toMatchObject({ code: "PATH_EXISTS", recoverable: false });
+
+  const deleteCheckpoint = await checkpoint.create("delete-file", [
+    "remove.ts",
+  ]);
+  await expect(
+    deleteFileTool.execute(deleteFileTool.validate({ path: "remove.ts" }), {
+      ...ctx,
+      permissionMode: "AUTO",
+      checkpoint,
+      checkpointId: deleteCheckpoint,
+      requestApproval: async () => false,
+    }),
+  ).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+  expect(await Bun.file(path.join(root, "remove.ts")).exists()).toBe(true);
+  const deleted = await deleteFileTool.execute(
+    deleteFileTool.validate({ path: "remove.ts" }),
+    {
+      ...ctx,
+      permissionMode: "AUTO",
+      checkpoint,
+      checkpointId: deleteCheckpoint,
+      requestApproval: async () => true,
+    },
+  );
+  expect(deleted.operation).toBe("deleted");
+  expect(deleted.change).toMatchObject({
+    operation: "deleted",
+    beforeExists: true,
+    afterExists: false,
+    removedLines: 1,
+  });
+  expect(deleted.change.diffLines).toEqual(["- const remove = true;"]);
+  expect(await Bun.file(path.join(root, "remove.ts")).exists()).toBe(false);
+  db.close();
 });
 
 test("ReadFile keeps host truncation private while allowing bounded line ranges", async () => {

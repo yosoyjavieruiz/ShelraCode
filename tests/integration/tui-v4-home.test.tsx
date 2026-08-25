@@ -92,7 +92,9 @@ test("home hero restores the original ShelraCode logo at generous widths", async
   expect(
     frame
       .split("\n")
-      .filter((line) => line.includes(String.fromCodePoint(0x2588))),
+      // The final wordmark row uses box-drawing `═`/`╝` glyphs rather than
+      // full blocks, so count both glyph families that make up the logo.
+      .filter((line) => /[█═]/u.test(line)),
   ).toHaveLength(6);
 });
 

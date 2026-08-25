@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OllamaRuntime } from "../../src/runtimes/ollama.js";
 import { OpenAICompatibleLocalRuntime } from "../../src/runtimes/http.js";
 import type { FetchLike } from "../../src/providers/types.js";
+import { createLogger, type LogRecord } from "../../src/shared/logging.js";
 
 describe("local runtime adapters", () => {
   test("normalizes Ollama tags as local models", async () => {
@@ -122,5 +123,41 @@ describe("local runtime adapters", () => {
     expect(model?.local?.sizeBytes).toBe(1_646_573_056);
     expect(model?.local?.trainedForToolUse).toBe(false);
     expect(model?.capabilities.maxContext).toBe(32_768);
+  });
+
+  test("health failures log a safe reason and latency for each local runtime", async () => {
+    const records: LogRecord[] = [];
+    const logger = createLogger({
+      level: "debug",
+      sink: { write: (record) => records.push(record) },
+    });
+    const fetchImpl: FetchLike = async () => {
+      throw new Error("connect ECONNREFUSED 127.0.0.1:1234");
+    };
+
+    await new OpenAICompatibleLocalRuntime(
+      "llama.cpp",
+      "llama.cpp",
+      "http://llama.test/v1",
+      fetchImpl,
+      logger,
+    ).health();
+    await new OllamaRuntime("http://ollama.test", fetchImpl, logger).health();
+
+    const failures = records.filter(
+      (record) => record.event === "runtime.health.failed",
+    );
+    expect(failures).toHaveLength(2);
+    expect(failures.map((record) => record.data)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: "connect ECONNREFUSED 127.0.0.1:1234",
+          errorType: "Error",
+        }),
+      ]),
+    );
+    for (const failure of failures) {
+      expect(failure.data?.latencyMs).toEqual(expect.any(Number));
+    }
   });
 });

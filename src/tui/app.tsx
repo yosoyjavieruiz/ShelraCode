@@ -25,6 +25,12 @@ import type { HardwareInspection } from "../hardware/types.js";
 import type { ProviderStatus } from "../providers/registry.js";
 import type { SessionSummary } from "../storage/database.js";
 import { verifyStructuralCodingCriteria } from "../agent/verification-criteria.js";
+import {
+  extractObjectivePaths,
+  reviewCodingObjective,
+} from "../agent/objective-review.js";
+import { inferProgressiveTargets } from "../agent/progressive-plan.js";
+import { recommendedAgentContextChars } from "../agent/context-budget.js";
 import { AppEventBus } from "../shared/events.js";
 import { CircuitBreaker } from "../providers/circuit-breaker.js";
 import { persistRepositorySettings } from "../config/settings.js";
@@ -1094,11 +1100,15 @@ export function AppShell(
         const turnPolicy = resolveTurnPolicyForObjective(turnMode, objective);
         const needsRepositoryContext = turnPolicy.repositoryRead;
         if (needsRepositoryContext) setNotice("Preparing repository context…");
-        const repositoryContext = needsRepositoryContext
+        // Build a bounded routing context first. The selected model is not
+        // known until discovery/routing completes, so this snapshot is only
+        // for route scoring and deterministic evidence. The execution
+        // context is rebuilt below with the selected model's active budget.
+        const routingContext = needsRepositoryContext
           ? await buildRepositoryContext({
               root: process.cwd(),
               objective,
-              maxChars: 32_000,
+              maxChars: 12_000,
               signal,
               explicitPaths: contextFiles(),
               logger: taskLogger,
@@ -1107,6 +1117,7 @@ export function AppShell(
               files: [],
               prompt: "",
               instructions: [],
+              relevantMatches: [],
               containsHighConfidenceSecret: false,
               secretPaths: [],
             };
@@ -1115,10 +1126,11 @@ export function AppShell(
           type: "context.built",
           phase: "discover",
           data: {
-            files: repositoryContext.files.length,
-            instructions: repositoryContext.instructions?.length ?? 0,
+            files: routingContext.files.length,
+            instructions: routingContext.instructions?.length ?? 0,
+            objectiveMatches: routingContext.relevantMatches?.length ?? 0,
             containsHighConfidenceSecret:
-              repositoryContext.containsHighConfidenceSecret,
+              routingContext.containsHighConfidenceSecret,
           },
         });
         const projectCommands = needsRepositoryContext
@@ -1127,6 +1139,20 @@ export function AppShell(
         const verificationPlan =
           turnMode === "coding" ? selectVerificationPlan(projectCommands) : [];
         const analyzedTask = analyzeTask(objective);
+        const explicitObjectivePaths = extractObjectivePaths(objective);
+        const inferredProgressiveTargets =
+          analyzedTask.complexity >= 0.7
+            ? inferProgressiveTargets(
+                objective,
+                routingContext.relevantMatches ?? [],
+              )
+            : [];
+        const progressiveTargets = [
+          ...new Set([
+            ...explicitObjectivePaths,
+            ...inferredProgressiveTargets,
+          ]),
+        ].slice(0, 8);
         const requiredCapability: AgentCapabilityClass =
           turnPolicy.repositoryRead
             ? analyzedTask.requiredCapability === "advanced_coding_agent" ||
@@ -1171,20 +1197,40 @@ export function AppShell(
         const executableCandidates = candidates.filter((candidate) =>
           Boolean(providerForCandidate(candidate)),
         );
+        const hasAdvancedCodingCandidate = executableCandidates.some(
+          (candidate) =>
+            candidate.agentProbe?.agentCapabilityClass ===
+            "advanced_coding_agent",
+        );
+        const progressiveCodingFallback =
+          turnMode === "coding" &&
+          analyzedTask.requiredCapability === "advanced_coding_agent" &&
+          !hasAdvancedCodingCandidate &&
+          progressiveTargets.length > 1 &&
+          executableCandidates.some(
+            (candidate) =>
+              candidate.agentProbe?.agentCapabilityClass === "workspace_reader",
+          );
+        const effectiveTask = progressiveCodingFallback
+          ? {
+              ...task,
+              requiredCapability: "workspace_reader" as const,
+            }
+          : task;
         const routeRequest = {
           now: new Date(),
-          task,
+          task: effectiveTask,
           repositoryPolicy: controlPlane.settings.privacy,
           routingMode: controlPlane.settings.routingMode,
           contextTokens: Math.max(
             1,
-            Math.ceil(repositoryContext.prompt.length / 4),
+            Math.ceil(routingContext.prompt.length / 4),
           ),
           candidates: executableCandidates,
           quotas: catalog.quotas,
           circuitBreaker: routeCircuitBreaker,
           containsHighConfidenceSecret:
-            repositoryContext.containsHighConfidenceSecret,
+            routingContext.containsHighConfidenceSecret,
         };
         const decision = selectRoute(routeRequest, taskLogger);
         trace.record({
@@ -1194,7 +1240,10 @@ export function AppShell(
           data: {
             selected: decision.selected?.candidate.id ?? "STOP",
             provider: decision.selected?.candidate.providerId ?? "none",
-            requiredCapability: analyzedTask.requiredCapability,
+            requiredCapability: effectiveTask.requiredCapability,
+            ...(progressiveCodingFallback
+              ? { mode: "progressive_coding_fallback" }
+              : {}),
             routingMode: controlPlane.settings.routingMode,
           },
         });
@@ -1247,6 +1296,40 @@ export function AppShell(
           setNotice(
             `Running ${selected.providerId} · ${selected.displayName}…`,
           );
+          const activeContextBudget = recommendedAgentContextChars(
+            selected,
+            turnMode,
+            analyzedTask.complexity,
+          );
+          const agentContext = needsRepositoryContext
+            ? await buildRepositoryContext({
+                root: process.cwd(),
+                objective,
+                // Leave room for the system prompt, tool schemas, ledger
+                // state, and future observations. Raw files remain
+                // available through ReadFile on demand.
+                maxChars: Math.max(
+                  4_000,
+                  Math.floor(activeContextBudget * 0.65),
+                ),
+                signal,
+                snapshot: routingContext.snapshot,
+                explicitPaths: contextFiles(),
+                logger: taskLogger,
+              })
+            : routingContext;
+          trace.record({
+            taskId: turnId,
+            type: "context.built",
+            phase: "discover",
+            data: {
+              files: agentContext.files.length,
+              instructions: agentContext.instructions?.length ?? 0,
+              objectiveMatches: agentContext.relevantMatches?.length ?? 0,
+              activeContextBudget,
+              executionContextChars: agentContext.prompt.length,
+            },
+          });
           let result: Awaited<ReturnType<typeof runAgent>>;
           try {
             result = await runAgent(
@@ -1256,10 +1339,13 @@ export function AppShell(
                 root: process.cwd(),
                 candidate: selected,
                 mode: turnMode,
+                ...(progressiveCodingFallback
+                  ? { stagedPaths: progressiveTargets }
+                  : {}),
                 ...(turnMode === "coding"
                   ? {
                       successCriteria: [
-                        "A requested repository mutation is recorded.",
+                        "The user's concrete coding objective is satisfied and its relevant files or areas are covered.",
                         "Configured project verification passes.",
                         "The final diff is reviewed and pre-existing work is preserved.",
                       ],
@@ -1267,12 +1353,21 @@ export function AppShell(
                   : {}),
                 repositoryPolicy: controlPlane.settings.privacy,
                 permissionMode: controlPlane.settings.permissionMode,
-                context: repositoryContext.prompt || undefined,
+                context: agentContext.prompt || undefined,
                 containsHighConfidenceSecret:
-                  repositoryContext.containsHighConfidenceSecret,
+                  agentContext.containsHighConfidenceSecret,
                 verificationCommand: verificationPlan[0]?.command,
                 verificationCommands: verificationPlan,
-                maxTurns: 8,
+                // Coding work is a multi-step execution, not a single chat
+                // response. Keep conversation/read-only turns short, while
+                // giving staged local agents enough turns to read, mutate,
+                // verify, recover, and review without imposing an inference
+                // quota on the user.
+                maxTurns:
+                  turnMode === "coding"
+                    ? Math.max(16, Math.ceil(analyzedTask.complexity * 32))
+                    : 8,
+                contextBudgetChars: activeContextBudget,
                 systemPromptProfile: turnPolicy.systemPromptProfile,
               },
               {
@@ -1317,8 +1412,15 @@ export function AppShell(
                     throw error;
                   }
                 },
-                async verifySuccessCriteria(_currentTask, ledger) {
+                async verifySuccessCriteria(currentTask, ledger) {
                   return verifyStructuralCodingCriteria(ledger, {
+                    reviewObjective: () =>
+                      reviewCodingObjective(
+                        currentTask,
+                        ledger,
+                        currentTask.root,
+                        signal,
+                      ),
                     reviewFinalDiff: async () => {
                       if (signal.aborted) return false;
                       const { runCommand } =
@@ -1387,6 +1489,7 @@ export function AppShell(
                         appEvents.emit({
                           type: "approval.requested",
                           description: request.description,
+                          risk: request.risk,
                         });
                         setOverlay("approval");
                         setNotice("Approval required");
@@ -1407,6 +1510,16 @@ export function AppShell(
           return {
             result,
             status: result.status,
+            ...(result.status === "blocked" &&
+            result.ledger.filesChanged.length === 0
+              ? {
+                  failure: {
+                    code: "AGENT_INCOMPLETE" as const,
+                    message:
+                      "The selected model reached a bounded blocked state without changing the workspace.",
+                  },
+                }
+              : {}),
             ...(result.failure ? { failure: result.failure } : {}),
             mutationOccurred: result.ledger.filesChanged.length > 0,
           };
@@ -1424,7 +1537,10 @@ export function AppShell(
           {
             logger: taskLogger,
             onOutcome(candidate, outcome) {
-              if (outcome.status === "failed")
+              if (
+                outcome.status === "failed" ||
+                (outcome.status === "blocked" && outcome.failure)
+              )
                 routeCircuitBreaker.recordFailure(
                   candidate.providerId,
                   candidate.id,
@@ -2629,15 +2745,15 @@ export function AppShell(
   // so a token landing while already mid-conversation is a no-op here.
   const isEmptyConversation = createMemo(
     () =>
-      isConversation() && !activeObjective() && presentation().items.length === 0,
+      isConversation() &&
+      !activeObjective() &&
+      presentation().items.length === 0,
   );
   // Same reasoning as isEmptyConversation above: read directly inside the
   // root layout block to decide Transcript vs. HomeView, so it must be a
   // memo — presentation() changes every streamed token, but "is there at
   // least one item" flips at most once per conversation.
-  const hasTranscriptItems = createMemo(
-    () => presentation().items.length > 0,
-  );
+  const hasTranscriptItems = createMemo(() => presentation().items.length > 0);
   // The transcript and composer are one reading column in every conversation
   // state, including the empty home state. Keeping this as a single geometry
   // source prevents the input from shifting horizontally when the first turn

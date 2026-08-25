@@ -132,6 +132,23 @@ test("a harness/tool failure or an already-mutated task never retries another mo
   ).toBeUndefined();
 });
 
+test("free-provider billing failures never escalate to a paid route", () => {
+  expect(
+    shouldEscalateRoute({
+      code: "PAID_PLAN_REQUIRED",
+      message: "paid developer plan required",
+      mutationOccurred: false,
+    }),
+  ).toBe(false);
+  expect(
+    shouldEscalateRoute({
+      code: "FREE_TIER_EXHAUSTED",
+      message: "free tier exhausted",
+      mutationOccurred: false,
+    }),
+  ).toBe(true);
+});
+
 test("a verified free route can be used after a local runtime failure, but local-only policy still blocks it", () => {
   const local = candidate({ id: "local/first", providerId: "lm-studio" });
   const remote = candidate({
@@ -201,4 +218,69 @@ test("execution retries a failed model once with the next eligible route", async
   expect(attempts).toEqual([first.id, second.id]);
   expect(result.outcome?.status).toBe("completed");
   expect(result.decision.selected?.candidate.id).toBe(second.id);
+});
+
+test("an incomplete model can escalate before it mutates the workspace", async () => {
+  const first = candidate({
+    id: "local/reader",
+    providerId: "lm-studio",
+    quality: { coding: 1, toolUse: 1, confidence: "measured" },
+    agentProbe: {
+      conversation: true,
+      readTool: true,
+      multiTurnTools: true,
+      agenticCodingEligible: true,
+      agentCapabilityClass: "coding_agent",
+      notes: [],
+    },
+  });
+  const second = candidate({
+    id: "local/builder",
+    providerId: "llama.cpp",
+    quality: { coding: 0.1, toolUse: 0.1, confidence: "measured" },
+    agentProbe: {
+      conversation: true,
+      readTool: true,
+      multiTurnTools: true,
+      agenticCodingEligible: true,
+      agentCapabilityClass: "advanced_coding_agent",
+      notes: [],
+    },
+  });
+  const attempts: string[] = [];
+
+  expect(
+    shouldEscalateRoute({
+      code: "AGENT_INCOMPLETE",
+      message: "no action",
+      mutationOccurred: false,
+    }),
+  ).toBe(true);
+  expect(
+    shouldEscalateRoute({
+      code: "AGENT_INCOMPLETE",
+      message: "partial mutation",
+      mutationOccurred: true,
+    }),
+  ).toBe(false);
+
+  const result = await runWithRouteFallback(
+    request([first, second]),
+    async (model) => {
+      attempts.push(model.id);
+      return model.id === first.id
+        ? {
+            status: "blocked" as const,
+            failure: {
+              code: "AGENT_INCOMPLETE" as const,
+              message: "no executable action",
+            },
+            mutationOccurred: false,
+          }
+        : { status: "completed" as const, mutationOccurred: false };
+    },
+  );
+
+  expect(attempts).toEqual([first.id, second.id]);
+  expect(result.outcome?.status).toBe("completed");
 });

@@ -52,23 +52,11 @@ test("classifies a Spanish-language search request as search", () => {
   expect(task.class).toBe("SEARCH");
 });
 
-// Direct user feedback (screenshot of the live "Explainable Routing" view):
-// "STOP · ASK USER — No eligible route. capability workspace_reader is
-// below required coding_agent", rejecting the only locally installed
-// model. Confirmed live against the real LM Studio runtime
-// (`bun run src/index.ts doctor --agent`): Qwen2.5 Coder 7B Instruct
-// passes conversation, repository read, and multi-turn tool use, and is
-// documented (docs/agent-kernel/MODEL-CAPABILITIES.md) completing a real
-// bounded single-file edit plus a passing test — it lands at
-// `workspace_reader` only because its own harder multi-file/executable-
-// test probe scenario fails. Requiring the full `coding_agent` tier for
-// *any* edit, however small, meant the single most common request shape
-// had no eligible route on the one realistic local setup. A low-
-// complexity, single-file edit only needs `workspace_reader` now — see
-// requiredCapability's own comment for why this is safe (the completion
-// gate independently verifies real evidence before ever reporting
-// success).
-test("a small, bounded edit only requires workspace_reader, not the full coding_agent tier", () => {
+// The analysis target remains useful for score/context shaping, but it is not
+// an eligibility floor. An accessible local model must be attempted when
+// privacy, tools, permissions, and runtime health permit it; completion is
+// decided later from host-owned verification evidence.
+test("a small, bounded edit targets workspace_reader without requiring a hard floor", () => {
   const task = analyzeTask("Fix the typo in the README installation section.");
 
   expect(task.class).toBe("SMALL_EDIT");
@@ -76,7 +64,7 @@ test("a small, bounded edit only requires workspace_reader, not the full coding_
   expect(task.requiredCapability).toBe("workspace_reader");
 });
 
-test("a genuinely complex multi-file edit still requires advanced_coding_agent", () => {
+test("a genuinely complex multi-file edit targets advanced_coding_agent", () => {
   const task = analyzeTask(
     "Rename the getUser function across all files and modules in the repository.",
   );

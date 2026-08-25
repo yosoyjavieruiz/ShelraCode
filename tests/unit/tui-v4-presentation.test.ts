@@ -125,6 +125,159 @@ test("one assistant turn groups prose, one updated activity, tests, and completi
   expect(serialized).not.toContain('"arguments"');
 });
 
+test("model reasoning is represented as safe progress metadata, never hidden text", () => {
+  let state = beginTranscriptTurn(createTranscriptPresentation(), {
+    turnId: "turn-reasoning",
+    text: "Inspect and repair the authentication flow.",
+  });
+  state = presentAppEvent(state, {
+    type: "model.progress",
+    phase: "reasoning",
+    chars: 640,
+    streaming: true,
+  });
+  state = presentAppEvent(state, {
+    type: "model.progress",
+    phase: "reasoning",
+    chars: 960,
+    streaming: false,
+  });
+
+  expect(state.items).toEqual([
+    expect.objectContaining({ kind: "user-turn" }),
+    expect.objectContaining({
+      kind: "model-progress",
+      phase: "reasoning",
+      chars: 960,
+      streaming: false,
+    }),
+  ]);
+  expect(JSON.stringify(state)).not.toContain("private reasoning text");
+});
+
+test("a rejected write is presented as a blocked request with recovery evidence", () => {
+  let state = beginTranscriptTurn(createTranscriptPresentation(), {
+    turnId: "turn-blocked-write",
+    text: "Update the dependency without guessing a file.",
+  });
+  state = presentAppEvent(state, {
+    type: "tool.started",
+    callId: "write-1",
+    tool: "WriteFile",
+    input: { path: "index.html", content: "<html />" },
+    risk: "write",
+  });
+  state = presentAppEvent(state, {
+    type: "tool.finished",
+    callId: "write-1",
+    tool: "WriteFile",
+    result: {
+      tool: "WriteFile",
+      ok: false,
+      code: "CONFLICT",
+      recoverable: true,
+      error: "The write targets index.html, but no host criterion names it.",
+      suggestedAction: "List the parent directory and locate the real target.",
+      durationMs: 2,
+    },
+  });
+  const group = state.items.find((item) => item.kind === "activity-group");
+  const activity =
+    group?.kind === "activity-group" ? group.activities[0] : undefined;
+  expect(activity).toEqual(
+    expect.objectContaining({
+      label: "WRITE BLOCKED",
+      state: "failed",
+      summary: "BLOCKED · CONFLICT",
+      details: [
+        "The write targets index.html, but no host criterion names it.",
+        "Recovery: List the parent directory and locate the real target.",
+      ],
+    }),
+  );
+});
+
+test("mutation rows distinguish create, overwrite, and delete with bounded diffs", () => {
+  let state = beginTranscriptTurn(createTranscriptPresentation(), {
+    turnId: "turn-mutations",
+    text: "Create and remove the document.",
+  });
+  state = presentAppEvent(state, {
+    type: "tool.started",
+    callId: "create-1",
+    tool: "CreateFile",
+    input: { path: "docs/new.md", content: "one\ntwo\n" },
+    risk: "write",
+  });
+  state = presentAppEvent(state, {
+    type: "tool.finished",
+    callId: "create-1",
+    tool: "CreateFile",
+    result: {
+      tool: "CreateFile",
+      ok: true,
+      output: {
+        path: "docs/new.md",
+        bytes: 8,
+        change: {
+          operation: "created",
+          addedLines: 2,
+          removedLines: 0,
+          diffLines: ["+ one", "+ two"],
+        },
+      },
+      durationMs: 4,
+    },
+  });
+  state = presentAppEvent(state, {
+    type: "tool.started",
+    callId: "delete-1",
+    tool: "DeleteFile",
+    input: { path: "docs/old.md" },
+    risk: "destructive",
+  });
+  state = presentAppEvent(state, {
+    type: "tool.finished",
+    callId: "delete-1",
+    tool: "DeleteFile",
+    result: {
+      tool: "DeleteFile",
+      ok: true,
+      output: {
+        path: "docs/old.md",
+        change: {
+          operation: "deleted",
+          addedLines: 0,
+          removedLines: 1,
+          diffLines: ["- old"],
+        },
+      },
+      durationMs: 4,
+    },
+  });
+
+  const group = state.items.find((item) => item.kind === "activity-group");
+  const activities = group?.kind === "activity-group" ? group.activities : [];
+  expect(activities.map((activity) => activity.label)).toEqual([
+    "CREATE",
+    "DELETE",
+  ]);
+  expect(activities[0]).toEqual(
+    expect.objectContaining({
+      operation: "create",
+      summary: "+2 −0",
+      diffLines: ["+ one", "+ two"],
+    }),
+  );
+  expect(activities[1]).toEqual(
+    expect.objectContaining({
+      operation: "delete",
+      pathKind: "missing",
+      diffLines: ["- old"],
+    }),
+  );
+});
+
 test("local route presentation never exposes cloud gates, scores, or runtime as provider", () => {
   let state = beginTranscriptTurn(createTranscriptPresentation(), {
     turnId: "turn-route",

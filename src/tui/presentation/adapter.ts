@@ -126,6 +126,8 @@ function activityMetadata(tool: string, input: unknown) {
     },
     EditFile: { kind: "edit", label: "EDIT", target: path },
     WriteFile: { kind: "write", label: "WRITE", target: path },
+    CreateFile: { kind: "write", label: "CREATE", target: path },
+    DeleteFile: { kind: "write", label: "DELETE", target: path },
     ListFiles: { kind: "list", label: "LIST", target: path ?? "." },
     Shell: {
       kind: "run",
@@ -151,6 +153,31 @@ function activityMetadata(tool: string, input: unknown) {
   };
 }
 
+function requestDetails(tool: string, input: unknown): string[] | undefined {
+  const fields = record(input);
+  if (!fields) return undefined;
+  const details: string[] = [];
+  const path = stringField(fields, "path");
+  if (path) details.push(`Requested path: ${path}`);
+  const content = stringField(fields, "content");
+  if (content !== undefined) {
+    const lines = content ? content.split(/\r?\n/).length : 0;
+    details.push(
+      `Content payload: ${lines} ${lines === 1 ? "line" : "lines"} · ${Buffer.byteLength(content, "utf8")} bytes`,
+    );
+  }
+  const oldText = stringField(fields, "oldText");
+  const newText = stringField(fields, "newText");
+  if (oldText !== undefined || newText !== undefined) {
+    details.push(
+      `Replacement payload: ${oldText?.split(/\r?\n/).length ?? 0} lines → ${newText?.split(/\r?\n/).length ?? 0} lines`,
+    );
+  }
+  if (tool === "DeleteFile")
+    details.push("Destructive deletion requested; host approval is required.");
+  return details.length > 0 ? details : undefined;
+}
+
 function countLines(content: string): number {
   if (!content) return 0;
   const normalized = content.split("\r\n").join("\n");
@@ -163,12 +190,31 @@ function countLines(content: string): number {
 function resultPresentation(result: ToolResult): {
   summary?: string;
   details?: string[];
+  operation?: ToolActivityViewModel["operation"];
+  pathKind?: ToolActivityViewModel["pathKind"];
+  diff?: { added: number; removed: number };
+  diffLines?: string[];
 } {
   const output = record(result.output);
   if (!result.ok) {
+    const pathKind =
+      result.code === "PATH_NOT_FOUND"
+        ? "missing"
+        : result.code === "PATH_IS_FILE"
+          ? "file"
+          : result.code === "PATH_IS_DIRECTORY"
+            ? "directory"
+            : "unknown";
     return {
-      summary: result.error ?? "Failed",
-      details: result.error ? [result.error] : undefined,
+      summary: `BLOCKED · ${result.code ?? "TOOL_ERROR"}`,
+      details: [
+        ...(pathKind !== "unknown" ? [`Path classification: ${pathKind}`] : []),
+        ...(result.error ? [result.error] : []),
+        ...(result.suggestedAction
+          ? [`Recovery: ${result.suggestedAction}`]
+          : []),
+      ],
+      pathKind,
     };
   }
   if (result.tool === "ReadFile") {
@@ -176,6 +222,8 @@ function resultPresentation(result: ToolResult): {
     const lines = countLines(content);
     return {
       summary: `${lines} ${lines === 1 ? "line" : "lines"}`,
+      operation: "read",
+      pathKind: "file",
       details: [
         `${lines} ${lines === 1 ? "line" : "lines"} read${record(output)?.truncated === true ? " · truncated" : ""}`,
       ],
@@ -203,21 +251,111 @@ function resultPresentation(result: ToolResult): {
     };
   }
   if (result.tool === "EditFile") {
-    const replacements = record(output)?.replacements;
-    return typeof replacements === "number"
-      ? {
-          summary: `${replacements} ${replacements === 1 ? "replacement" : "replacements"}`,
-        }
-      : {};
+    const change = record(output)?.change;
+    const changeFields = record(change);
+    const added = changeFields?.addedLines;
+    const removed = changeFields?.removedLines;
+    return {
+      summary:
+        typeof added === "number" && typeof removed === "number"
+          ? `+${added} −${removed}`
+          : `${record(output)?.replacements ?? 0} replacements`,
+      operation: "edit",
+      pathKind: "file",
+      ...(typeof added === "number" && typeof removed === "number"
+        ? { diff: { added, removed } }
+        : {}),
+      ...(Array.isArray(changeFields?.diffLines)
+        ? {
+            diffLines: changeFields.diffLines.filter(
+              (line): line is string => typeof line === "string",
+            ),
+          }
+        : {}),
+      details: [
+        "Operation: edited existing file",
+        ...(Array.isArray(changeFields?.diffLines)
+          ? changeFields.diffLines.filter(
+              (line): line is string => typeof line === "string",
+            )
+          : []),
+      ],
+    };
   }
-  if (result.tool === "WriteFile") {
+  if (
+    result.tool === "WriteFile" ||
+    result.tool === "CreateFile" ||
+    result.tool === "DeleteFile"
+  ) {
+    const change = record(output)?.change;
+    const changeFields = record(change);
+    const operation = changeFields?.operation;
+    const added = changeFields?.addedLines;
+    const removed = changeFields?.removedLines;
+    const operationValue =
+      operation === "created" ||
+      operation === "overwritten" ||
+      operation === "deleted"
+        ? operation
+        : result.tool === "DeleteFile"
+          ? "deleted"
+          : result.tool === "CreateFile"
+            ? "created"
+            : "overwritten";
+    const operationLabel =
+      operationValue === "created"
+        ? "created"
+        : operationValue === "deleted"
+          ? "deleted"
+          : "overwritten";
     const bytes = record(output)?.bytes;
-    return typeof bytes === "number" ? { summary: `${bytes} bytes` } : {};
+    return {
+      summary:
+        typeof added === "number" && typeof removed === "number"
+          ? `${operationLabel} · +${added} −${removed}`
+          : operationLabel,
+      operation:
+        operationValue === "created"
+          ? "create"
+          : operationValue === "deleted"
+            ? "delete"
+            : "overwrite",
+      pathKind: operationValue === "deleted" ? "missing" : "file",
+      ...(typeof added === "number" && typeof removed === "number"
+        ? { diff: { added, removed } }
+        : {}),
+      ...(Array.isArray(changeFields?.diffLines)
+        ? {
+            diffLines: changeFields.diffLines.filter(
+              (line): line is string => typeof line === "string",
+            ),
+          }
+        : {}),
+      details: [
+        `Operation: ${operationLabel}`,
+        ...(typeof bytes === "number" ? [`Payload: ${bytes} bytes`] : []),
+        ...(Array.isArray(changeFields?.diffLines)
+          ? changeFields.diffLines.filter(
+              (line): line is string => typeof line === "string",
+            )
+          : []),
+      ],
+    };
   }
   if (result.tool === "ListFiles") {
     const files = record(output)?.files;
     const count = Array.isArray(files) ? files.length : 0;
-    return { summary: `${count} ${count === 1 ? "file" : "files"}` };
+    return {
+      summary: `${count} ${count === 1 ? "file" : "files"}`,
+      operation: "list",
+      pathKind: "directory",
+      details: [
+        ...(Array.isArray(files) ? files : [])
+          .slice(0, 16)
+          .filter((file): file is string => typeof file === "string"),
+        ...(count > 16 ? [`… ${count - 16} more files`] : []),
+      ],
+    };
   }
   if (result.tool === "RunTests" || result.tool === "Shell") {
     const exitCode = record(output)?.exitCode;
@@ -430,6 +568,35 @@ function appendAssistantText(
   };
 }
 
+function presentModelProgress(
+  state: TranscriptPresentation,
+  event: Extract<AppEvent, { type: "model.progress" }>,
+): TranscriptPresentation {
+  const turnId = currentTurnId(state);
+  const existingIndex = state.items.findIndex(
+    (item) => item.turnId === turnId && item.kind === "model-progress",
+  );
+  const progress: TranscriptItem = {
+    kind: "model-progress",
+    id:
+      existingIndex >= 0
+        ? state.items[existingIndex]!.id
+        : nextId(state, turnId, "model-progress"),
+    turnId,
+    phase: event.phase,
+    chars: event.chars,
+    streaming: event.streaming,
+  };
+  if (existingIndex >= 0)
+    return {
+      ...state,
+      items: state.items.map((item, index) =>
+        index === existingIndex ? progress : item,
+      ),
+    };
+  return { ...state, items: [...state.items, progress] };
+}
+
 function startTool(
   state: TranscriptPresentation,
   event: Extract<AppEvent, { type: "tool.started" }>,
@@ -449,6 +616,7 @@ function startTool(
     id: event.callId,
     ...metadata,
     state: "running",
+    details: requestDetails(event.tool, event.input),
     ...(event.risk ? { risk: event.risk } : {}),
     ...(diff
       ? {
@@ -511,15 +679,29 @@ function finishTool(
               // see startTool) is strictly more informative than the tool
               // result's own "N replacements" — spec §34 wants "+8 −3", not
               // a replacement count.
+              const resolvedDiff = presentation.diff ?? activity.diff;
+              const resolvedDiffLines =
+                presentation.diffLines ?? activity.diffLines;
               const diffOverride =
-                event.result.ok && activity.diff
+                event.result.ok && resolvedDiff
                   ? {
-                      summary: `+${activity.diff.added} −${activity.diff.removed}`,
-                      details: activity.diffLines,
+                      summary: `+${resolvedDiff.added} −${resolvedDiff.removed}`,
+                      details: resolvedDiffLines,
                     }
                   : {};
+              const operationLabel =
+                presentation.operation === "create"
+                  ? "CREATE"
+                  : presentation.operation === "overwrite"
+                    ? "OVERWRITE"
+                    : presentation.operation === "delete"
+                      ? "DELETE"
+                      : undefined;
               return {
                 ...activity,
+                label: event.result.ok
+                  ? (operationLabel ?? activity.label)
+                  : `${activity.label} BLOCKED`,
                 state:
                   event.result.code === "CANCELLED"
                     ? "cancelled"
@@ -572,6 +754,8 @@ export function presentAppEvent(
       ...state,
       agentPhase: isAbstractAgentPhase(event.phase) ? event.phase : undefined,
     };
+  if (event.type === "model.progress")
+    return presentModelProgress(state, event);
   if (event.type === "assistant.delta")
     return appendAssistantText(state, event.text);
   if (event.type === "tool.started")
@@ -737,7 +921,14 @@ export function presentAppEvent(
           id: nextId(state, turnId, "approval-request"),
           turnId,
           description: event.description,
-          risk: "unknown",
+          risk:
+            event.risk === "destructive"
+              ? "destructive"
+              : event.risk === "write"
+                ? "write"
+                : event.risk === "execute"
+                  ? "external"
+                  : "unknown",
         },
       ],
     };

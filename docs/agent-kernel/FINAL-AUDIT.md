@@ -1,5 +1,15 @@
 # LOCALCODE AUTONOMOUS AGENT PROGRAM
 
+## Current routing correction — 2026-08-25
+
+The hard empirical capability-class veto described by the historical audit
+below is no longer active. `chat_only`, `workspace_reader`, or an unmeasured
+probe can influence route score, but cannot alone produce `STOP · ASK USER`.
+An otherwise policy-valid candidate with executable tools is attempted and
+then judged by the host-owned agent loop, verification, permissions, quota,
+and fallback controls. The audit date and its earlier live observations are
+preserved as historical evidence.
+
 Final audit date: 2026-08-24
 
 Release decision: **FAIL for the full live autonomous-coding MVP**. The
@@ -193,17 +203,19 @@ Autonomous coding             NOT READY
 
 ## ROUTING
 
-| Gate                      | Result                                                                                                                |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Capability hard gate      | PASS                                                                                                                  |
-| Stronger local fallback   | PASS in deterministic selection and pre-mutation execution tests; no stronger installed local candidate was available |
-| Free remote fallback      | NO VERIFICABLE; no live remote benchmark was run under current privacy/strict-zero policy                             |
-| LOCAL ONLY hard guarantee | PASS in policy/provider-boundary tests                                                                                |
-| No artificial local quota | PASS; local selection is constrained by fit, capability, runtime, and policy rather than LocalCode usage quota        |
+| Gate                                          | Result                                                                                                                |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Historical capability-class veto (superseded) | PASS in the historical audit; not active in the current router                                                        |
+| Stronger local fallback                       | PASS in deterministic selection and pre-mutation execution tests; no stronger installed local candidate was available |
+| Free remote fallback                          | NO VERIFICABLE; no live remote benchmark was run under current privacy/strict-zero policy                             |
+| LOCAL ONLY hard guarantee                     | PASS in policy/provider-boundary tests                                                                                |
+| No artificial local quota                     | PASS; local selection is constrained by fit, capability, runtime, and policy rather than LocalCode usage quota        |
 
-The current route intentionally returns an explainable `STOP` when the only
-candidate is below `workspace_reader` or `coding_agent`. This is a safe
-failure, not autonomous coding success.
+The historical route intentionally returned an explainable `STOP` when the
+only candidate was below `workspace_reader` or `coding_agent`. That behavior
+is retained as historical evidence only. The current route uses capability as
+a quality signal and relies on executable tools, policy, host verification,
+and recovery to determine whether the selected model can complete the task.
 
 ## FUNCTIONAL E2E
 
@@ -623,10 +635,12 @@ Verification: **PASS**.
 
 ### ROUTING
 
-Capability hard gate: **PASS**
+Historical capability-class veto: **PASS (superseded)**
 
-Stronger local fallback: **PASS**; an actual advanced route selects the
-measured 14B and rejects 7B/1.5B for insufficient capability.
+Stronger local fallback: **PASS**; the historical advanced route selected the
+measured 14B and rejected 7B/1.5B for insufficient capability. The current
+router keeps runnable local candidates eligible and uses that evidence as a
+soft preference before host-owned execution and verification.
 
 Free remote fallback: **PASS structurally / NO VERIFICABLE live**; no remote
 request was made under strict-zero.
@@ -727,3 +741,15 @@ The full repository-wide Prettier command remains a separate known boundary:
 three unrelated pre-existing untracked files under `docs/ui-chat-v2` are not
 parseable by the configured Prettier invocation. The touched source, tests, and
 agent-kernel documentation paths pass the scoped check.
+
+## Current authoritative evidence - 2026-08-25
+
+The later source state supersedes the historical counts above. The current
+deterministic suite reports 474 pass / 1 skip / 0 fail / 1529 expectations,
+and the current typecheck, build and CLI smoke paths pass.
+
+The exact Qwen2.5 Coder 1.5B Instruct / LM Studio / Q8_0 configuration passed
+two consecutive final runs of the bounded three-file fixture, with 10 turns,
+three passing host-controlled verification stages, verified completion and no
+user-worktree mutation per run. This validates the progressive low-resource
+MVP, not unrestricted frontier-level autonomy.

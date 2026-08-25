@@ -38,8 +38,9 @@ Durable settings, sessions, route records, quotas, health, observations and chec
 
 ```text
 user task → task analysis → sensitivity/context → candidate generation
-→ privacy gate → cost gate → capability/context/health/quota gates
-→ score/explain → stream response/tool calls → permission check
+→ privacy gate → cost gate → executable-tool/context/health/quota gates
+→ capability quality signal → score/explain
+→ stream response/tool calls → permission check
 → execute tool → verify → accept, reroute, or stop
 ```
 

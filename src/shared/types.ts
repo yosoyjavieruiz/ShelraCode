@@ -152,9 +152,11 @@ export interface ModelCandidate {
   /**
    * Result of running `probeAgentCapability` against this exact
    * model+runtime combination, if it has been probed. Optional and
-   * opt-in for discovery, but repository routes fail closed when the required
-   * capability has not been measured. Conversation-only routes may still use
-   * candidates without a probe result.
+   * opt-in for discovery. The result is routing evidence and a quality
+   * signal, not an authorization boundary: an otherwise policy-valid local
+   * route remains executable when the probe is weaker or unavailable. Actual
+   * tool support, permissions, workspace boundaries, and verification remain
+   * enforced independently by the host.
    */
   agentProbe?: {
     /** Algorithm revision for persisted capability evidence. */

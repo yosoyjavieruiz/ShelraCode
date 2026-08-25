@@ -18,6 +18,13 @@ export interface RollbackResult {
   conflicts: CheckpointConflict[];
 }
 
+export interface FileMutationSnapshot {
+  path: string;
+  exists: boolean;
+  content: string;
+  contentHash: string;
+}
+
 function hash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -115,6 +122,50 @@ export class CheckpointService {
       path: relativePath,
       contentLength: content.length,
     });
+  }
+
+  async snapshot(relativePath: string): Promise<FileMutationSnapshot> {
+    const file = await readWorkspaceFile(this.root, relativePath);
+    return {
+      path: relativePath,
+      exists: file.exists,
+      content: file.content,
+      contentHash: hash(file.content),
+    };
+  }
+
+  async restoreMutation(
+    checkpointId: string,
+    before: FileMutationSnapshot,
+    expectedCurrentHash: string,
+  ): Promise<boolean> {
+    const current = await this.snapshot(before.path);
+    if (current.contentHash !== expectedCurrentHash) {
+      this.logger?.warn("checkpoint.mutation_restore.conflict", {
+        checkpointId,
+        path: before.path,
+        reason: "changed-external",
+      });
+      return false;
+    }
+    const absolute = safePath(this.root, before.path);
+    if (before.exists) {
+      await mkdir(path.dirname(absolute), { recursive: true });
+      await writeFile(absolute, before.content, "utf8");
+    } else if (current.exists) {
+      await unlink(absolute);
+    }
+    this.db.updateCheckpointFile(
+      checkpointId,
+      before.path,
+      before.contentHash,
+      before.content,
+    );
+    this.logger?.info("checkpoint.mutation_restore.finished", {
+      checkpointId,
+      path: before.path,
+    });
+    return true;
   }
 
   async assertNoExternalChange(

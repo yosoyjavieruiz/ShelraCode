@@ -41,7 +41,9 @@ const READ_ONLY_TOOL_NAMES = [
 const CODING_TOOL_NAMES = [
   ...READ_ONLY_TOOL_NAMES,
   "WriteFile",
+  "CreateFile",
   "EditFile",
+  "DeleteFile",
   "Shell",
   "RunTests",
 ] as const;
@@ -240,7 +242,7 @@ export function resolveTurnPolicy(mode: TurnMode): TurnPolicy {
         shell: true,
         network: false,
         allowedTools: CODING_TOOL_NAMES,
-        toolChoice: "auto",
+        toolChoice: "required",
         systemPromptProfile: "coding",
       });
     case "command":

@@ -1,10 +1,20 @@
 # Capability-Aware Routing
 
+## Current policy — 2026-08-25
+
+The capability class is no longer a hard stop by itself. A measured
+`chat_only`, `workspace_reader`, or missing probe can influence task-fit score
+and fallback preference, but an otherwise policy-valid candidate with the
+required executable tools remains selectable. This keeps accessible 1.5B
+local routes usable while leaving completion, verification, permissions,
+privacy, cost, quota, and runtime health under host control. The historical
+results below are retained as evidence from the previous hard-gate policy.
+
 Routing order is structural:
 
 1. privacy and secret gates;
 2. strict-zero/paid policy;
-3. required task capability;
+3. required executable tools;
 4. context fit, health, circuit breaker, and freshness;
 5. quality/latency/headroom scoring.
 
@@ -15,12 +25,14 @@ context, and the non-progress watchdog.
 
 Task requirements map conversational questions to `chat_only`, repository
 questions to `workspace_reader`, ordinary edits to `coding_agent`, and
-complex refactors/multi-file work to `advanced_coding_agent`. A failed
-capability probe is an eligibility failure, not a reason to escalate blindly.
+complex refactors/multi-file work to `advanced_coding_agent`. These are target
+signals for scoring and context, not unconditional route floors. A failed
+capability probe is execution evidence for fallback/verification, not by
+itself a reason to stop before attempting an executable route.
 
 Deterministic router tests cover stronger-local fallback, no local quota,
-strict-zero remote rejection, capability hard gates, and per-task execution
-fallback. `runWithRouteFallback` is connected to the TUI execution path: it
+strict-zero remote rejection, soft capability preference, and per-task
+execution fallback. `runWithRouteFallback` is connected to the TUI execution path: it
 excludes an attempted candidate after a diagnosed provider/runtime failure and
 will retry only before any mutation. Tool-contract errors, unknown provider
 failures, and post-mutation failures never trigger model switching. A live

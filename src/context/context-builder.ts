@@ -46,6 +46,8 @@ export interface RepositoryContext {
   snapshot?: RepositorySnapshot;
   instructions?: string[];
   files: string[];
+  /** Files whose contents matched meaningful terms from the objective. */
+  relevantMatches?: string[];
   prompt: string;
   containsHighConfidenceSecret: boolean;
   secretPaths: string[];

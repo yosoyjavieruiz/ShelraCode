@@ -70,7 +70,13 @@ function detailColor(
   line: string,
 ): string | undefined {
   const colors = theme.colors;
-  if (activity.kind === "edit" && activity.diff) {
+  if (
+    (activity.kind === "edit" ||
+      activity.operation === "create" ||
+      activity.operation === "overwrite" ||
+      activity.operation === "delete") &&
+    activity.diff
+  ) {
     if (line.startsWith("+ ")) return themeColor(theme, colors.git.added);
     if (line.startsWith("- ")) return themeColor(theme, colors.git.removed);
     return themeColor(theme, colors.text.muted);

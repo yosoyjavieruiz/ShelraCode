@@ -51,6 +51,11 @@ stream can be reconstructed byte-for-byte.
 Provider adapters own protocol translation. The kernel never renders raw
 provider events as assistant prose and never lets a model widen its policy.
 
+Current routing correction (2026-08-25): empirical capability classes are
+score/fallback evidence, not an independent eligibility veto. Required
+executable tools, privacy, cost, context, health, quota, permissions, and
+host-owned verification remain hard boundaries.
+
 ## Explicit success-criteria authority - 2026-08-24
 
 When a caller supplies explicit success criteria, `runAgent` no longer marks

@@ -4,6 +4,7 @@ import type {
   ProviderEvent,
   ToolCall,
 } from "../providers/types.js";
+import type { FileMutationSnapshot } from "../checkpoint/checkpoint.js";
 import { runTestsTool } from "../tools/workspace.js";
 import { ToolError, toolErrorDetails } from "../tools/errors.js";
 import type { ToolDefinition, ToolResult } from "../tools/types.js";
@@ -11,6 +12,7 @@ import { evaluateCompletionGate } from "./completion-gate.js";
 import { independentlyVerifyTask } from "./verifier.js";
 import { compactTaskContext } from "./compaction.js";
 import { recoverTextToolCalls } from "./tool-envelope.js";
+import { extractObjectivePaths } from "./objective-review.js";
 export { recoverTextToolCalls } from "./tool-envelope.js";
 import { normalizeVerificationPlan } from "./verification-plan.js";
 import type { TurnMode } from "./turn-policy.js";
@@ -20,12 +22,13 @@ import {
   createTaskLedger,
   recordTaskAction,
   recordVerificationRun,
-  satisfyTaskCriterion,
+  setTaskCriterion,
   setTaskPlan,
   setTaskPhase,
   terminalPhase,
+  updateTaskPlanStep,
 } from "./task-state.js";
-import type { AgentPhase, AgentTaskLedger } from "./task-state.js";
+import type { AgentPhase, AgentTaskLedger, PlanStep } from "./task-state.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
 import type {
   AgentEvent,
@@ -78,6 +81,19 @@ function summarizeToolResult(result: ToolResult): Record<string, unknown> {
       ? { errorCode: result.code ?? "UNCLASSIFIED_TOOL_ERROR" }
       : {}),
   };
+}
+
+const TOOL_TEXT_SHAPE =
+  /^\s*(?:[\[{<`]|```)[\s\S]*(?:"tool_calls"\s*:|"(?:name|tool)"\s*:\s*"(?:ListFiles|GlobFiles|SearchText|ReadFile|EditFile|WriteFile|CreateFile|DeleteFile|Shell|RunTests|GitStatus|GitDiff)"[\s\S]*(?:"arguments"\s*:|"output"\s*:))/u;
+
+export function sanitizeAssistantTextForCompletion(
+  text: string,
+  fallback: string,
+): string {
+  const trimmed = text.trim();
+  if (!trimmed) return fallback;
+  if (recoverTextToolCalls(trimmed, 0)?.length) return fallback;
+  return TOOL_TEXT_SHAPE.test(trimmed) ? fallback : trimmed;
 }
 
 function summarizeFailure(message: string): string {
@@ -156,6 +172,7 @@ function emit(options: AgentLoopOptions, event: AgentEvent): void {
       break;
     case "tool.output":
     case "assistant.delta":
+    case "model.progress":
       break;
   }
 }
@@ -334,7 +351,7 @@ function toolErrorFields(
   error: unknown,
 ): Pick<
   ToolResult,
-  "code" | "recoverable" | "field" | "path" | "suggestedAction"
+  "code" | "recoverable" | "field" | "path" | "suggestedAction" | "details"
 > {
   const details = toolErrorDetails(error);
   return details
@@ -346,6 +363,7 @@ function toolErrorFields(
         ...(details.suggestedAction === undefined
           ? {}
           : { suggestedAction: details.suggestedAction }),
+        ...(details.details === undefined ? {} : { details: details.details }),
       }
     : {};
 }
@@ -366,9 +384,59 @@ function findTextToolCandidate(text: string): number {
     if (text.startsWith("<xml>", index)) return index;
     if (text.startsWith("<tools>", index)) return index;
     if (text.startsWith("<tool_call>", index)) return index;
+    if (text.startsWith("<tool_response>", index)) return index;
     if (text.startsWith("```", index)) return index;
   }
   return -1;
+}
+
+function normalizeWorkspacePath(value: string): string {
+  const parts: string[] = [];
+  const raw = value.trim().replaceAll("\\", "/").replace(/^\/+/, "");
+  for (const part of raw.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      const previous = parts.at(-1);
+      if (previous && previous !== "..") parts.pop();
+      else parts.push(part);
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.join("/");
+}
+
+function extractWorkspacePathHints(values: readonly string[]): string[] {
+  const pathPattern =
+    /(?:^|[\s("'\/])((?:\.\/)?(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,12})(?=$|[\s)"',.;:])/g;
+  const hints = new Set<string>();
+  for (const value of values) {
+    pathPattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pathPattern.exec(value)) !== null) {
+      const normalized = normalizeWorkspacePath(match[1]!);
+      if (normalized) hints.add(normalized);
+    }
+  }
+  return [...hints].slice(0, 6);
+}
+
+function extractVerificationFailurePaths(value: string): string[] {
+  return extractWorkspacePathHints([value])
+    .map(normalizeWorkspacePath)
+    .map((candidate) => {
+      const marker = candidate.search(
+        /(?:^|\/)(?:test|tests|__tests__|spec|specs)(?:\/|$)/iu,
+      );
+      return marker > 0 ? candidate.slice(marker + 1) : candidate;
+    })
+    .filter(
+      (candidate) =>
+        /(?:^|\/)(?:test|tests|__tests__|spec|specs)(?:\/|$)/iu.test(
+          candidate,
+        ) || /\.(?:test|spec)\.[^/]+$/iu.test(candidate),
+    )
+    .slice(0, 6);
 }
 
 function failureMessage(
@@ -519,10 +587,54 @@ export async function runAgent(
   transitionPhase(ledger, "discover", loopOptions);
   options.persistTask?.(ledger);
   const persistLedger = (): void => options.persistTask?.(ledger);
+  const emitPlan = (): void => {
+    if (!ledger.plan) return;
+    persistLedger();
+    emit(loopOptions, {
+      type: "plan.changed",
+      steps: ledger.plan.steps.map((step) => ({
+        id: step.id,
+        description: step.description,
+        status: step.status,
+      })),
+    });
+  };
+  const objectivePaths = [
+    ...new Set(
+      [...extractObjectivePaths(task.objective), ...(task.stagedPaths ?? [])]
+        .map(normalizeWorkspacePath)
+        .filter((value) => value.length > 0),
+    ),
+  ];
+  const syncTargetPlan = (activePaths: readonly string[] = []): void => {
+    if (!ledger.plan || objectivePaths.length === 0) return;
+    const changed = new Set(ledger.filesChanged.map(normalizeWorkspacePath));
+    const active = new Set(activePaths.map(normalizeWorkspacePath));
+    let changedPlan = false;
+    objectivePaths.slice(0, 8).forEach((target, index) => {
+      const stepId = `step-target-${index + 1}`;
+      const normalized = normalizeWorkspacePath(target);
+      const status = active.has(normalized)
+        ? "active"
+        : changed.has(normalized)
+          ? "done"
+          : "pending";
+      changedPlan = updateTaskPlanStep(ledger, stepId, status) || changedPlan;
+    });
+    if (changedPlan) emitPlan();
+  };
+  let criteriaWritePaths =
+    objectivePaths.length > 0
+      ? [objectivePaths[0]!]
+      : extractWorkspacePathHints([task.objective]).map(normalizeWorkspacePath);
   const contextFallback =
     profile === "minimal"
       ? ""
       : "\n\nNo repository context was provided. Inspect the workspace before editing.";
+  const stagedExecutionInstruction =
+    mode === "coding" && objectivePaths.length > 1
+      ? `\n\nHost execution plan: this is a staged multi-file task. Work on one target at a time. The current mutation target is ${criteriaWritePaths[0] ?? objectivePaths[0]}. Read the target, make only the requested change for that stage, and wait for host verification before editing another target.`
+      : "";
   const messages: NormalizedMessage[] = [
     {
       role: "system",
@@ -531,8 +643,8 @@ export async function runAgent(
     {
       role: "user",
       content: task.context
-        ? `${task.objective}\n\n${task.context}`
-        : `${task.objective}${contextFallback}`,
+        ? `${task.objective}\n\n${task.context}${stagedExecutionInstruction}`
+        : `${task.objective}${contextFallback}${stagedExecutionInstruction}`,
     },
   ];
   const toolRuns: ToolResult[] = [];
@@ -543,6 +655,20 @@ export async function runAgent(
   let verifiedMutationRevision = -1;
   let mutated = false;
   let checkpointId: string | undefined;
+  // Multi-file coding starts as a staged transaction. A small model sees the
+  // full objective, but the host permits mutation in one explicitly named
+  // file at a time; after verification, the criteria verifier advances the
+  // next target. Before host feedback reads remain open for discovery; after
+  // feedback, reads are focused on the current staged target.
+  let criteriaFeedbackActive = false;
+  const pendingMutations: Array<{
+    before: FileMutationSnapshot;
+    after: FileMutationSnapshot;
+    protectedCriterionIds: string[];
+  }> = [];
+  const protectedCriterionIds = new Set<string>();
+  const readRevisions = new Map<string, number>();
+  const rejectedEditPaths = new Set<string>();
   let unresolvedBlockers = 0;
   let finalReviewState: boolean | undefined;
   let checkpointPreservationCheck:
@@ -567,6 +693,14 @@ export async function runAgent(
   persistLedger();
   if (mode === "plan" || (task.successCriteria?.length ?? 0) > 1) {
     transitionPhase(ledger, "plan", loopOptions);
+    const targetSteps: PlanStep[] = objectivePaths
+      .slice(0, 8)
+      .map((target, index) => ({
+        id: `step-target-${index + 1}`,
+        description: `Implement the requested change in ${target}.`,
+        status: index === 0 ? "active" : "pending",
+        evidenceRequired: [`ReadFile ${target}`],
+      }));
     setTaskPlan(ledger, {
       steps: [
         {
@@ -576,12 +710,16 @@ export async function runAgent(
           status: "done",
           evidenceRequired: ["relevant repository evidence"],
         },
-        {
-          id: "step-analyze",
-          description:
-            "Analyze the evidence and identify the smallest safe next action.",
-          status: "active",
-        },
+        ...(targetSteps.length > 0
+          ? targetSteps
+          : [
+              {
+                id: "step-analyze",
+                description:
+                  "Analyze the evidence and identify the smallest safe next action.",
+                status: "active" as const,
+              },
+            ]),
         ...(mode === "coding"
           ? [
               {
@@ -599,15 +737,7 @@ export async function runAgent(
       ],
       updatedAt: new Date().toISOString(),
     });
-    persistLedger();
-    emit(loopOptions, {
-      type: "plan.changed",
-      steps: ledger.plan!.steps.map((step) => ({
-        id: step.id,
-        description: step.description,
-        status: step.status,
-      })),
-    });
+    emitPlan();
   }
   const maxTurns = task.maxTurns ?? 8;
   const maxOutputTokens =
@@ -638,7 +768,7 @@ export async function runAgent(
     const kind =
       tool?.risk === "read"
         ? "read"
-        : tool?.risk === "write"
+        : tool?.risk === "write" || tool?.risk === "destructive"
           ? "write"
           : tool?.risk === "execute"
             ? "execute"
@@ -672,6 +802,30 @@ export async function runAgent(
         relevance: 0.9,
         freshness: 1,
       });
+    if (
+      result.ok &&
+      tool?.name === "ReadFile" &&
+      typeof input === "object" &&
+      input !== null &&
+      "path" in input &&
+      typeof input.path === "string"
+    ) {
+      const normalizedPath = normalizeWorkspacePath(input.path);
+      readRevisions.set(normalizedPath, mutationRevision);
+      rejectedEditPaths.delete(normalizedPath);
+    }
+    if (
+      call.name === "EditFile" &&
+      !result.ok &&
+      typeof input === "object" &&
+      input !== null &&
+      "path" in input &&
+      typeof input.path === "string" &&
+      ["INVALID_ARGUMENT", "NOT_FOUND", "CONFLICT", "STALE_EDIT"].includes(
+        result.code ?? "",
+      )
+    )
+      rejectedEditPaths.add(normalizeWorkspacePath(input.path));
     if (call.name === "RunTests" && output) {
       addTaskEvidence(ledger, {
         id: `${task.id}:test-evidence:${call.id}`,
@@ -703,7 +857,13 @@ export async function runAgent(
               ? "passed"
               : "failed",
         ...(exitCode === undefined ? {} : { exitCode }),
-        summary: result.error,
+        summary:
+          typeof output?.output === "string"
+            ? output.output.slice(0, MODEL_EXECUTION_TEXT_LIMIT)
+            : result.error,
+        ...(executionFailed && typeof output?.output === "string"
+          ? { failurePaths: extractVerificationFailurePaths(output.output) }
+          : {}),
         startedAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
       });
@@ -772,14 +932,27 @@ export async function runAgent(
   const verifySuccessCriteria = async (): Promise<{
     ready: boolean;
     issues: string[];
+    nextPaths: string[];
+    nextActions: string[];
+    satisfiedCriterionIds: string[];
   }> => {
-    if (!explicitSuccessCriteria) return { ready: true, issues: [] };
+    if (!explicitSuccessCriteria)
+      return {
+        ready: true,
+        issues: [],
+        nextPaths: [],
+        nextActions: [],
+        satisfiedCriterionIds: [],
+      };
     if (!options.verifySuccessCriteria)
       return {
         ready: false,
         issues: [
           "No host-owned success-criteria verifier is configured for this coding task.",
         ],
+        nextPaths: [],
+        nextActions: [],
+        satisfiedCriterionIds: [],
       };
 
     let verification: SuccessCriteriaVerification;
@@ -793,10 +966,23 @@ export async function runAgent(
             error instanceof Error ? error.message : String(error)
           }`,
         ],
+        nextPaths: [],
+        nextActions: [],
+        satisfiedCriterionIds: [],
       };
     }
-    for (const criterionId of verification.satisfiedCriterionIds ?? [])
-      satisfyTaskCriterion(ledger, criterionId);
+    const satisfiedCriterionIds = new Set(
+      verification.satisfiedCriterionIds ??
+        (verification.pass
+          ? ledger.successCriteria.map((criterion) => criterion.id)
+          : []),
+    );
+    for (const criterion of ledger.successCriteria)
+      setTaskCriterion(
+        ledger,
+        criterion.id,
+        satisfiedCriterionIds.has(criterion.id),
+      );
     const missing = ledger.successCriteria
       .filter((criterion) => criterion.required && !criterion.satisfied)
       .map((criterion) => criterion.description);
@@ -804,6 +990,17 @@ export async function runAgent(
       ...(verification.issues ?? []),
       ...missing.map((criterion) => `Unsatisfied criterion: ${criterion}`),
     ];
+    const inferredPaths = extractWorkspacePathHints([
+      ...issues,
+      ...missing,
+      task.objective,
+    ]);
+    const nextPaths = (verification.nextPaths ?? inferredPaths)
+      .map(normalizeWorkspacePath)
+      .filter((value) => value.length > 0);
+    const nextActions = (verification.nextActions ?? []).filter(
+      (action) => action.trim().length > 0,
+    );
     logger?.info("agent.criteria.evaluated", {
       pass: verification.pass,
       satisfiedCount: verification.satisfiedCriterionIds?.length ?? 0,
@@ -815,8 +1012,89 @@ export async function runAgent(
       ready: verification.pass && missing.length === 0,
       issues:
         issues.length > 0 ? issues : ["Success criteria are not satisfied."],
+      nextPaths: [...new Set(nextPaths)].slice(0, 6),
+      nextActions: [...new Set(nextActions)].slice(0, 6),
+      satisfiedCriterionIds: verification.satisfiedCriterionIds ?? [],
     };
   };
+
+  const restoreRegressedMutations = async (criteria: {
+    satisfiedCriterionIds: string[];
+  }): Promise<{
+    regressed: boolean;
+    restored: boolean;
+    notice?: string;
+  }> => {
+    const regressed = [...protectedCriterionIds].filter(
+      (criterionId) => !criteria.satisfiedCriterionIds.includes(criterionId),
+    );
+    if (regressed.length === 0) return { regressed: false, restored: false };
+    if (!checkpointId || pendingMutations.length === 0)
+      return {
+        regressed: true,
+        restored: false,
+        notice:
+          "A previously satisfied criterion regressed, but the active mutation checkpoint is unavailable.",
+      };
+
+    const context = await options.createExecutionContext(task);
+    if (!context.checkpoint)
+      return {
+        regressed: true,
+        restored: false,
+        notice:
+          "A previously satisfied criterion regressed, but the active checkpoint service is unavailable.",
+      };
+    if (logger) context.logger = logger;
+    const mutationsToRestore = [...pendingMutations]
+      .reverse()
+      .filter((mutation) =>
+        mutation.protectedCriterionIds.some((criterionId) =>
+          regressed.includes(criterionId),
+        ),
+      );
+    if (mutationsToRestore.length === 0)
+      return {
+        regressed: true,
+        restored: false,
+        notice:
+          "A previously satisfied criterion regressed, but no post-satisfaction mutation can be restored safely.",
+      };
+    for (const mutation of mutationsToRestore) {
+      const restored = await context.checkpoint.restoreMutation(
+        checkpointId,
+        mutation.before,
+        mutation.after.contentHash,
+      );
+      if (!restored)
+        return {
+          regressed: true,
+          restored: false,
+          notice:
+            "A previously satisfied criterion regressed, and the latest file changed externally; no automatic rollback was attempted.",
+        };
+    }
+    for (const mutation of mutationsToRestore) {
+      const index = pendingMutations.indexOf(mutation);
+      if (index >= 0) pendingMutations.splice(index, 1);
+    }
+    protectedCriterionIds.clear();
+    return {
+      regressed: true,
+      restored: true,
+      notice:
+        "Host regression guard restored the last mutation because it invalidated a previously satisfied criterion.",
+    };
+  };
+
+  const requiredFreshReadPath = (
+    paths: readonly string[],
+  ): string | undefined =>
+    paths.find(
+      (candidatePath) =>
+        readRevisions.get(normalizeWorkspacePath(candidatePath)) !==
+        mutationRevision,
+    );
 
   const userWorkPreserved = async (): Promise<boolean> => {
     const check = options.checkUserWorkPreserved ?? checkpointPreservationCheck;
@@ -824,6 +1102,10 @@ export async function runAgent(
   };
 
   const completionFor = async (turns: number): Promise<AgentRunResult> => {
+    finalText = sanitizeAssistantTextForCompletion(
+      finalText,
+      "Changes were applied and verified by the host.",
+    );
     const evidenceCount =
       initialEvidence +
       toolRuns.filter((run) => run.ok && toolMap.get(run.tool)?.risk === "read")
@@ -983,6 +1265,8 @@ export async function runAgent(
     }
     const result = await completionFor(turns);
     if (result.status === "completed") {
+      syncTargetPlan([]);
+      if (updateTaskPlanStep(ledger, "step-verify", "done")) emitPlan();
       transitionPhase(ledger, "complete", loopOptions);
       persistLedger();
       emit(loopOptions, { type: "task.completed", result });
@@ -997,6 +1281,7 @@ export async function runAgent(
         },
       });
     } else {
+      if (updateTaskPlanStep(ledger, "step-verify", "failed")) emitPlan();
       transitionPhase(ledger, "blocked", loopOptions);
       persistLedger();
       emit(loopOptions, {
@@ -1056,6 +1341,8 @@ export async function runAgent(
     const toolCalls: ToolCall[] = [];
     let streamBuffer = "";
     let sawText = false;
+    let reasoningChars = 0;
+    let lastReasoningNotice = 0;
     let done = false;
     const presentAssistantText = (text: string): void => {
       if (!text) return;
@@ -1096,6 +1383,20 @@ export async function runAgent(
               streamBuffer = streamBuffer.slice(safeLength);
             }
           }
+        } else if (event.type === "reasoning.delta") {
+          // Some local runtimes expose a reasoning channel. Keep its content
+          // private, but expose bounded progress metadata so the UI can say
+          // exactly why it is waiting instead of pretending the model is idle.
+          reasoningChars += event.text.length;
+          if (reasoningChars - lastReasoningNotice >= 160) {
+            lastReasoningNotice = reasoningChars;
+            emit(loopOptions, {
+              type: "model.progress",
+              phase: "reasoning",
+              chars: reasoningChars,
+              streaming: true,
+            });
+          }
         } else if (event.type === "tool.call") {
           toolCalls.push(event.call);
         } else if (event.type === "error") {
@@ -1106,6 +1407,14 @@ export async function runAgent(
         } else if (event.type === "done") {
           done = true;
         }
+      }
+      if (reasoningChars > lastReasoningNotice) {
+        emit(loopOptions, {
+          type: "model.progress",
+          phase: "reasoning",
+          chars: reasoningChars,
+          streaming: false,
+        });
       }
     } catch (error) {
       if (
@@ -1135,7 +1444,12 @@ export async function runAgent(
         }
       }
     } else {
-      presentAssistantText(streamBuffer);
+      if (TOOL_TEXT_SHAPE.test(streamBuffer)) {
+        logger?.warn("agent.tool_text.suppressed", {
+          turn,
+          reason: "unrecognized_or_unsafe_tool_shaped_text",
+        });
+      } else presentAssistantText(streamBuffer);
     }
     const presentedAssistantText = assistantTextParts.join("");
     finalText = presentedAssistantText || finalText;
@@ -1371,7 +1685,71 @@ export async function runAgent(
           continue;
         }
         const started = performance.now();
+        let mutationBefore: FileMutationSnapshot | undefined;
+        let mutationProtectedCriterionIds: string[] = [];
         try {
+          const requestedPath =
+            typeof input === "object" &&
+            input !== null &&
+            "path" in input &&
+            typeof input.path === "string"
+              ? normalizeWorkspacePath(input.path)
+              : undefined;
+          if (
+            (tool.risk === "write" ||
+              tool.risk === "destructive" ||
+              (tool.name === "ReadFile" && criteriaFeedbackActive)) &&
+            criteriaWritePaths.length > 0 &&
+            requestedPath &&
+            !criteriaWritePaths.includes(requestedPath)
+          )
+            throw new ToolError(
+              "CONFLICT",
+              "The write targets " +
+                requestedPath +
+                ", but the current host criteria target " +
+                criteriaWritePaths.join(", ") +
+                ".",
+              {
+                path: requestedPath,
+                recoverable: true,
+                suggestedAction:
+                  "Read or edit one of the current host criteria target files: " +
+                  criteriaWritePaths.join(", ") +
+                  ".",
+              },
+            );
+          if (
+            tool.name === "EditFile" &&
+            criteriaFeedbackActive &&
+            requestedPath &&
+            readRevisions.get(requestedPath) !== mutationRevision
+          )
+            throw new ToolError(
+              "CONFLICT",
+              "EditFile requires a fresh ReadFile observation after the latest host feedback or mutation.",
+              {
+                path: requestedPath,
+                recoverable: true,
+                suggestedAction:
+                  "Read the current file with ReadFile, then recompute the exact edit and retry.",
+              },
+            );
+          if (
+            tool.name === "EditFile" &&
+            requestedPath &&
+            rejectedEditPaths.has(requestedPath)
+          )
+            throw new ToolError(
+              "CONFLICT",
+              "EditFile was rejected for this path; a fresh ReadFile observation is required before retrying.",
+              {
+                path: requestedPath,
+                recoverable: true,
+                suggestedAction:
+                  "Read the current file again, then construct a new exact edit from that observation.",
+              },
+            );
           const context = await options.createExecutionContext(task);
           if (logger) context.logger = logger;
           if (context.checkpoint)
@@ -1380,7 +1758,10 @@ export async function runAgent(
                 ? context.checkpoint!.isPreserved(activeCheckpoint)
                 : true;
           if (checkpointId) context.checkpointId = checkpointId;
-          if (tool.risk === "write" && !checkpointId) {
+          if (
+            (tool.risk === "write" || tool.risk === "destructive") &&
+            !checkpointId
+          ) {
             if (!context.checkpoint)
               throw new Error("Mutation tool requires checkpoint service");
             const candidatePath =
@@ -1400,7 +1781,7 @@ export async function runAgent(
             emit(loopOptions, { type: "checkpoint.created", id: checkpointId });
             context.checkpointId = checkpointId;
           } else if (
-            tool.risk === "write" &&
+            (tool.risk === "write" || tool.risk === "destructive") &&
             checkpointId &&
             context.checkpoint
           ) {
@@ -1416,6 +1797,29 @@ export async function runAgent(
           }
           // Live shell/test tail (docs/ui-chat-v2 §36): only Shell/RunTests
           // read this, everything else silently ignores it, unchanged.
+          if (
+            (tool.risk === "write" || tool.risk === "destructive") &&
+            context.checkpoint &&
+            checkpointId
+          ) {
+            const candidatePath =
+              typeof input === "object" &&
+              input !== null &&
+              "path" in input &&
+              typeof input.path === "string"
+                ? input.path
+                : undefined;
+            if (candidatePath) {
+              mutationBefore = await context.checkpoint.snapshot(candidatePath);
+              mutationProtectedCriterionIds = ledger.successCriteria
+                .filter(
+                  (criterion) => criterion.required && criterion.satisfied,
+                )
+                .map((criterion) => criterion.id);
+              for (const criterionId of mutationProtectedCriterionIds)
+                protectedCriterionIds.add(criterionId);
+            }
+          }
           context.onOutput = (chunk) =>
             emit(loopOptions, {
               type: "tool.output",
@@ -1431,9 +1835,22 @@ export async function runAgent(
             output,
             durationMs: Math.round(performance.now() - started),
           };
-          if (tool.risk === "write" && result.ok) {
+          if (
+            (tool.risk === "write" || tool.risk === "destructive") &&
+            result.ok
+          ) {
             mutated = true;
             mutationRevision += 1;
+            if (mutationBefore && context.checkpoint) {
+              const mutationAfter = await context.checkpoint.snapshot(
+                mutationBefore.path,
+              );
+              pendingMutations.push({
+                before: mutationBefore,
+                after: mutationAfter,
+                protectedCriterionIds: mutationProtectedCriterionIds,
+              });
+            }
           }
           toolRuns.push(result);
           observeTool(call, tool, result, input);
@@ -1483,7 +1900,12 @@ export async function runAgent(
         finalText = `Agent made no progress after ${repeatedErrorCount} ${lastErrorCode ?? "recoverable"} errors.`;
         return await finish(turn);
       }
-      continue;
+      if (
+        !mutated ||
+        verificationPlan.length === 0 ||
+        mutationRevision === verifiedMutationRevision
+      )
+        continue;
     }
 
     const verificationNeeded =
@@ -1491,6 +1913,7 @@ export async function runAgent(
       verificationPlan.length > 0 &&
       mutationRevision !== verifiedMutationRevision;
     if (verificationNeeded) {
+      if (updateTaskPlanStep(ledger, "step-verify", "active")) emitPlan();
       transitionPhase(ledger, "verify", loopOptions);
       persistLedger();
       verificationRan = true;
@@ -1550,6 +1973,9 @@ export async function runAgent(
           status: passed ? "passed" : "failed",
           exitCode,
           summary: output,
+          ...(passed
+            ? {}
+            : { failurePaths: extractVerificationFailurePaths(output) }),
           startedAt: verificationStartedAt,
           completedAt: new Date().toISOString(),
         });
@@ -1580,6 +2006,80 @@ export async function runAgent(
       }
       transitionPhase(ledger, "reflect", loopOptions);
       persistLedger();
+      if (explicitSuccessCriteria) {
+        const criteria = await verifySuccessCriteria();
+        const regression = await restoreRegressedMutations(criteria);
+        if (regression.regressed && !regression.restored) {
+          unresolvedBlockers = 1;
+          finalText =
+            regression.notice ??
+            "A criteria regression could not be restored safely.";
+          return await finish(turn);
+        }
+        if (!regression.regressed) {
+          pendingMutations.length = 0;
+          protectedCriterionIds.clear();
+        } else {
+          verified = false;
+          verifiedMutationRevision = -1;
+        }
+        if (verified && criteria.ready && !regression.regressed) {
+          syncTargetPlan([]);
+          if (updateTaskPlanStep(ledger, "step-verify", "done")) emitPlan();
+          criteriaWritePaths = [];
+          criteriaFeedbackActive = false;
+          finalText =
+            finalText.trim() ||
+            "Changes were applied and verified by host verification.";
+          logger?.info("agent.host_completion.short_circuit", {
+            turn,
+            reason: "verification_and_success_criteria_passed",
+          });
+          return await finish(turn);
+        }
+        criteriaFeedbackActive = true;
+        criteriaWritePaths = criteria.nextPaths;
+        syncTargetPlan(criteria.nextPaths);
+        const pendingCriteria = ledger.successCriteria
+          .filter((criterion) => criterion.required && !criterion.satisfied)
+          .map((criterion) => criterion.description);
+        const protectedCriteria = ledger.successCriteria
+          .filter((criterion) => criterion.required && criterion.satisfied)
+          .map((criterion) => criterion.description);
+        const relevantPaths = extractWorkspacePathHints([
+          ...criteria.issues,
+          ...pendingCriteria,
+        ]);
+        const nextActions = criteria.nextActions;
+        const freshReadPath = requiredFreshReadPath(criteria.nextPaths);
+        messages.push({
+          role: "user",
+          content:
+            (regression.notice ? regression.notice + " " : "") +
+            (verified
+              ? "Host verification passed, but the coding objective is not complete."
+              : "Host verification did not pass, and the coding objective is not complete.") +
+            " Host criteria still missing: " +
+            criteria.issues.slice(0, 6).join(" ") +
+            (protectedCriteria.length > 0
+              ? " Already satisfied criteria are protected; do not undo them: " +
+                protectedCriteria.slice(0, 6).join(" ") +
+                "."
+              : "") +
+            (nextActions.length > 0
+              ? " Host next actions: " + nextActions.join(" ") + "."
+              : "") +
+            (freshReadPath
+              ? ` Your next tool MUST be ReadFile on ${freshReadPath} before any EditFile or WriteFile.`
+              : "") +
+            (relevantPaths.length > 0
+              ? " Next relevant files to inspect before editing: " +
+                relevantPaths.join(", ") +
+                "."
+              : "") +
+            " Execute exactly one next workspace tool that addresses those criteria; do not narrate.",
+        });
+      }
       continue;
     }
 
@@ -1592,6 +2092,7 @@ export async function runAgent(
       (!mutated ||
         (verificationPlan.length > 0 &&
           mutationRevision !== verifiedMutationRevision) ||
+        (verificationRan && !verified) ||
         criteria?.ready === false);
     if (codingRequiresAction) {
       noActionCount += 1;
@@ -1625,17 +2126,41 @@ export async function runAgent(
         const criteriaFeedback = criteria?.issues.length
           ? ` Host verification: ${criteria.issues.slice(0, 4).join(" ")}`
           : "";
+        const criteriaActions = criteria?.nextActions.length
+          ? ` Host next actions: ${criteria.nextActions.slice(0, 4).join(" ")}`
+          : "";
+        const freshReadPath = criteria
+          ? requiredFreshReadPath(criteria.nextPaths)
+          : undefined;
+        const freshReadFeedback = freshReadPath
+          ? ` Your next tool MUST be ReadFile on ${freshReadPath} before any EditFile or WriteFile.`
+          : "";
+        const protectedCriteria = ledger.successCriteria
+          .filter((criterion) => criterion.required && criterion.satisfied)
+          .map((criterion) => criterion.description);
+        const protectedFeedback =
+          protectedCriteria.length > 0
+            ? ` Already satisfied criteria are protected; do not undo them: ${protectedCriteria
+                .slice(0, 4)
+                .join(" ")}.`
+            : "";
         messages.push({
           role: "user",
           content: hasReadEvidence
             ? "Host observation: relevant repository evidence is already available." +
               criteriaFeedback +
+              criteriaActions +
+              freshReadFeedback +
+              protectedFeedback +
               " " +
               "Stop narrating and execute exactly one implementation workspace tool " +
               "now; use EditFile or WriteFile with valid arguments for the next " +
               "required change. Do not emit prose or tool-shaped JSON."
             : "Host observation: the previous assistant turn produced no workspace tool action." +
               criteriaFeedback +
+              criteriaActions +
+              freshReadFeedback +
+              protectedFeedback +
               " " +
               "This coding task is not complete. Execute exactly one available workspace tool " +
               "now with valid arguments. Do not explain a future action or emit tool-shaped " +

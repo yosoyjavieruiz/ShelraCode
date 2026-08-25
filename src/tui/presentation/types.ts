@@ -35,6 +35,16 @@ export interface ToolActivityViewModel {
   // " "/"+"/"-" for the expanded view; `diff` is the +/− summary stat.
   diff?: { added: number; removed: number };
   diffLines?: string[];
+  operation?:
+    | "read"
+    | "list"
+    | "search"
+    | "edit"
+    | "create"
+    | "overwrite"
+    | "delete"
+    | "execute";
+  pathKind?: "file" | "directory" | "missing" | "unknown";
 }
 
 export interface RouteViewModel {
@@ -48,6 +58,12 @@ type TurnItem = { id: string; turnId: string };
 
 export type TranscriptItem =
   | (TurnItem & { kind: "user-turn"; text: string })
+  | (TurnItem & {
+      kind: "model-progress";
+      phase: "reasoning";
+      chars: number;
+      streaming: boolean;
+    })
   | (TurnItem & {
       kind: "assistant-text";
       text: string;
@@ -95,7 +111,7 @@ export type TranscriptItem =
   | (TurnItem & {
       kind: "approval-request";
       description: string;
-      risk: "external" | "destructive" | "unknown";
+      risk: "external" | "write" | "destructive" | "unknown";
     })
   | (TurnItem & {
       kind: "completion-notice";

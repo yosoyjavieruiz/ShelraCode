@@ -22,7 +22,10 @@ test("compaction preserves authoritative task state and recent observations", ()
   });
   const messages = [
     { role: "system" as const, content: "You are LocalCode." },
-    { role: "user" as const, content: ledger.objective },
+    {
+      role: "user" as const,
+      content: `${ledger.objective}\nHost context: src/session.ts exports refreshSession.`,
+    },
     ...Array.from({ length: 8 }, (_, index) => ({
       role: "tool" as const,
       toolCallId: `tool-${index}`,
@@ -42,6 +45,11 @@ test("compaction preserves authoritative task state and recent observations", ()
   ).toBe(true);
   expect(
     result.messages.some((message) => message.content.includes("package.json")),
+  ).toBe(true);
+  expect(
+    result.messages.some((message) =>
+      message.content.includes("src/session.ts exports refreshSession"),
+    ),
   ).toBe(true);
 });
 

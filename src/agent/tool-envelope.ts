@@ -58,6 +58,75 @@ function parseJsonToolEnvelope(
     : undefined;
 }
 
+function parseConcatenatedJsonToolEnvelope(
+  text: string,
+  turn: number,
+): ToolCall[] | undefined {
+  const calls: ToolCall[] = [];
+  const whitespace = new Set([" ", "\t", "\r", "\n"]);
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    while (cursor < text.length && whitespace.has(text[cursor] ?? ""))
+      cursor += 1;
+    if (cursor >= text.length) break;
+    if (text[cursor] !== "{") return undefined;
+
+    const start = cursor;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (; cursor < text.length; cursor += 1) {
+      const character = text[cursor] ?? "";
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === "{") depth += 1;
+      else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = cursor + 1;
+          break;
+        }
+        if (depth < 0) return undefined;
+      }
+    }
+    if (end < 0 || inString || depth !== 0) return undefined;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text.slice(start, end));
+    } catch {
+      return undefined;
+    }
+    const call = toolCallFromRecord(parsed, turn, calls.length);
+    if (!call) return undefined;
+    calls.push(call);
+    cursor = end;
+  }
+
+  const readOnlyTextTools = new Set([
+    "ListFiles",
+    "GlobFiles",
+    "SearchText",
+    "ReadFile",
+    "GitStatus",
+    "GitDiff",
+  ]);
+  return calls.length > 1 &&
+    calls.every((call) => readOnlyTextTools.has(call.name))
+    ? calls
+    : undefined;
+}
+
 function parseDelimitedToolEnvelope(
   text: string,
   turn: number,
@@ -83,6 +152,89 @@ function parseDelimitedToolEnvelope(
     calls.push(...call);
     cursor = bodyEnd + end.length;
   }
+  return calls.length > 0 ? calls : undefined;
+}
+
+function parseValidatedToolResponseEnvelope(
+  text: string,
+  turn: number,
+): ToolCall[] | undefined {
+  const calls: ToolCall[] = [];
+  let cursor = 0;
+  const whitespace = new Set([" ", "\t", "\r", "\n"]);
+
+  while (cursor < text.length) {
+    while (cursor < text.length && whitespace.has(text[cursor] ?? ""))
+      cursor += 1;
+    if (!text.startsWith("<tool_response>", cursor)) return undefined;
+
+    const bodyStart = cursor + "<tool_response>".length;
+    const bodyEnd = text.indexOf("</tool_response>", bodyStart);
+    if (bodyEnd < 0) return undefined;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text.slice(bodyStart, bodyEnd).trim());
+    } catch {
+      return undefined;
+    }
+
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      return undefined;
+
+    const response = parsed as Record<string, unknown>;
+    const responseKeys = new Set(["id", "tool", "ok", "output"]);
+    if (Object.keys(response).some((key) => !responseKeys.has(key)))
+      return undefined;
+    if (response.tool !== "EditFile" || response.ok !== true) return undefined;
+
+    if (
+      typeof response.output !== "object" ||
+      response.output === null ||
+      Array.isArray(response.output)
+    )
+      return undefined;
+
+    const output = response.output as Record<string, unknown>;
+    const outputKeys = new Set(["path", "oldText", "newText", "replaceAll"]);
+    if (Object.keys(output).some((key) => !outputKeys.has(key)))
+      return undefined;
+    if (
+      typeof output.path !== "string" ||
+      typeof output.oldText !== "string" ||
+      typeof output.newText !== "string"
+    )
+      return undefined;
+    if (
+      output.replaceAll !== undefined &&
+      typeof output.replaceAll !== "boolean"
+    )
+      return undefined;
+
+    const argumentsValue = {
+      path: output.path,
+      oldText: output.oldText,
+      newText: output.newText,
+      ...(output.replaceAll === undefined
+        ? {}
+        : { replaceAll: output.replaceAll }),
+    };
+    const call = toolCallFromRecord(
+      {
+        ...(typeof response.id === "string" && response.id
+          ? { id: response.id }
+          : {}),
+        name: "EditFile",
+        arguments: argumentsValue,
+      },
+      turn,
+      calls.length,
+    );
+    if (!call) return undefined;
+    calls.push(call);
+    cursor = bodyEnd + "</tool_response>".length;
+  }
+
   return calls.length > 0 ? calls : undefined;
 }
 
@@ -135,6 +287,8 @@ export function recoverTextToolCalls(
   if (!trimmed) return undefined;
   return (
     parseJsonToolEnvelope(trimmed, turn) ??
+    parseConcatenatedJsonToolEnvelope(trimmed, turn) ??
+    parseValidatedToolResponseEnvelope(trimmed, turn) ??
     parseDelimitedToolEnvelope(
       trimmed,
       turn,

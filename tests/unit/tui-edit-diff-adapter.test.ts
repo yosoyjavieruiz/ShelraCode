@@ -74,7 +74,8 @@ test("a failed EditFile keeps the error summary, not a diff", () => {
     },
   });
   const activity = editActivity(state);
-  expect(activity?.summary).toBe("EditFile target text was not found.");
+  expect(activity?.summary).toBe("BLOCKED · TOOL_ERROR");
+  expect(activity?.details).toContain("EditFile target text was not found.");
 });
 
 test("a pure insertion/deletion diffs correctly (not just line-count deltas)", () => {

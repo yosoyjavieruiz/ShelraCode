@@ -100,3 +100,52 @@ test("agent doctor prefers an executable runtime model over an llmfit recommenda
   expect(output).toContain("Model                         qwen");
   expect(output).not.toContain("recommended-coder");
 });
+
+test("agent doctor does not treat a recommendation as an executable local model", () => {
+  const recommendation: ModelCandidate = {
+    ...model,
+    id: "llmfit/recommended-coder",
+    providerId: "llmfit",
+    displayName: "recommended-coder",
+    local: { runtime: "llmfit" },
+    agentProbe: undefined,
+  };
+
+  const output = agentDoctorLines([recommendation]).join("\n");
+
+  expect(output).toContain("Model                         NOT FOUND");
+  expect(output).not.toContain("recommended-coder");
+});
+
+test("agent doctor reports the complete local capability matrix", () => {
+  const chatOnly: ModelCandidate = {
+    ...model,
+    id: "lm-studio/chat-only",
+    displayName: "chat-only",
+    agentProbe: {
+      ...model.agentProbe!,
+      agenticCodingEligible: false,
+      agentCapabilityClass: "chat_only",
+    },
+  };
+  const advanced: ModelCandidate = {
+    ...model,
+    id: "lm-studio/advanced",
+    displayName: "advanced",
+    agentProbe: {
+      ...model.agentProbe!,
+      agenticCodingEligible: true,
+      agentCapabilityClass: "advanced_coding_agent",
+    },
+  };
+
+  const output = agentDoctorLines([chatOnly, advanced]).join("\n");
+
+  expect(output).toContain("Local models detected          2");
+  expect(output).toContain("chat-only");
+  expect(output).toContain("chat_only");
+  expect(output).toContain("advanced");
+  expect(output).toContain("advanced_coding_agent");
+  expect(output).toContain("Progressive coding             READY");
+  expect(output).toContain("Autonomous coding             READY");
+});

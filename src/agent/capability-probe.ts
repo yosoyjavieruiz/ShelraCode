@@ -499,11 +499,17 @@ async function runExecutableCapabilityProbe(
         runOutputExitCode(run) === 0 &&
         index > editAfterFailure,
     );
+    const hostPassedTestAfterEdit =
+      editAfterFailure > failedTestIndex &&
+      testResult.ledger.verificationRuns.some(
+        (run) =>
+          run.stage === "test" && run.status === "passed" && run.exitCode === 0,
+      );
     const testIteration =
       testResult.status === "completed" &&
       failedTestIndex >= 0 &&
       editAfterFailure > failedTestIndex &&
-      passedTestAfterEdit > editAfterFailure;
+      (passedTestAfterEdit > editAfterFailure || hostPassedTestAfterEdit);
     if (!testIteration)
       notes.push(
         "The executable test probe did not demonstrate fail -> inspect/edit -> retest -> pass.",

@@ -12,10 +12,21 @@ pass:
 6. actual `EditFile` mutation in a temporary fixture;
 7. actual fail -> inspect/edit -> retest -> pass iteration in that fixture.
 
+## Current routing policy — 2026-08-25
+
+Probe results remain valuable reproducible evidence, but the resulting class
+is not an unconditional route veto. The router can attempt a policy-valid
+local candidate with executable tools even when the class is `chat_only`,
+`workspace_reader`, or unmeasured. The class affects score and fallback
+preference; the agent loop, host verification, and completion gate decide
+whether the task actually succeeded. The live probe and doctor reports below
+remain model-behavior evidence, not a claim of frontier parity.
+
 The result is persisted on `ModelCandidate.agentProbe` during capability-aware
-discovery and is consumed by the router. Coding routes require an empirically
-eligible capability class; unprobed local candidates are not silently treated
-as coding agents when a repository task is requested.
+discovery and is consumed by the router as a score/fallback signal. Unprobed
+local candidates are reported as unmeasured rather than silently claimed to be
+coding agents, but they are not rejected solely for lacking a probe when their
+tools and policy boundary are executable.
 
 The current probe intentionally distinguishes deterministic harness evidence
 from live-model evidence. It classifies `chat_only`, `workspace_reader`,

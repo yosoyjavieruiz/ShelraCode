@@ -104,5 +104,7 @@ export interface ProviderProfile {
   apiKey?: string;
   fetchImpl?: FetchLike;
   isFreeModel?: (model: unknown) => boolean;
+  /** When true, models rejected by isFreeModel are omitted from discovery. */
+  freeOnly?: boolean;
   logger?: LocalCodeLogger;
 }

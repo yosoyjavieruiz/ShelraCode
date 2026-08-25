@@ -181,6 +181,7 @@ export class OpenAICompatibleLocalRuntime implements LocalRuntimeAdapter {
         state: result.state,
         latencyMs: result.latencyMs,
         errorType: error instanceof Error ? error.name : "unknown",
+        reason: result.detail,
       });
       return result;
     }

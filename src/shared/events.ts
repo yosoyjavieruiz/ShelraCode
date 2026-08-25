@@ -5,6 +5,12 @@ import type { QuotaSnapshot, RouteDecision } from "./types.js";
 
 export type AppEvent =
   | { type: "assistant.delta"; text: string }
+  | {
+      type: "model.progress";
+      phase: "reasoning";
+      chars: number;
+      streaming: boolean;
+    }
   | { type: "phase.changed"; phase: AgentPhase }
   | {
       type: "tool.output";
@@ -51,7 +57,11 @@ export type AppEvent =
   | { type: "route.failed"; error: string; detail?: string }
   | { type: "quota.updated"; quota: QuotaSnapshot }
   | { type: "checkpoint.created"; id: string }
-  | { type: "approval.requested"; description: string }
+  | {
+      type: "approval.requested";
+      description: string;
+      risk: ToolRisk;
+    }
   | { type: "task.completed"; result: unknown }
   | { type: "task.blocked"; error: string; detail?: string }
   | { type: "task.cancelled"; error: string; detail?: string }

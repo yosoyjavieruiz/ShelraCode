@@ -93,12 +93,14 @@ test("a coding task resolves to coding mode with the mutation toolset", () => {
   expect(mode).toBe("coding");
   expect(policy.allowedTools).toContain("ReadFile");
   expect(policy.allowedTools).toContain("EditFile");
+  expect(policy.allowedTools).toContain("CreateFile");
+  expect(policy.allowedTools).toContain("DeleteFile");
   expect(policy.allowedTools).toContain("Shell");
   expect(policy.allowedTools).toContain("RunTests");
   expect(policy.repositoryRead).toBe(true);
   expect(policy.repositoryWrite).toBe(true);
   expect(policy.shell).toBe(true);
-  expect(policy.toolChoice).toBe("auto");
+  expect(policy.toolChoice).toBe("required");
 });
 
 test("a feature-plus-tests request resolves to coding mode", () => {
@@ -118,6 +120,8 @@ test("a plan request stays read-only and exposes repository evidence", () => {
   expect(policy.allowedTools).toContain("SearchText");
   expect(policy.allowedTools).not.toContain("EditFile");
   expect(policy.allowedTools).not.toContain("WriteFile");
+  expect(policy.allowedTools).not.toContain("CreateFile");
+  expect(policy.allowedTools).not.toContain("DeleteFile");
 });
 
 test("a review request remains read-only even when it mentions possible bugs", () => {

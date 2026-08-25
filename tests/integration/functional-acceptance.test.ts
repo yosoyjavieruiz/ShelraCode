@@ -216,6 +216,43 @@ test("project language: uses root evidence and performs no writes", async () => 
   expect(result.toolRuns.some((run) => run.tool === "EditFile")).toBe(false);
 });
 
+test("project language: a hostile EditFile attempt is denied without mutation", async () => {
+  const root = await createFunctionalFixtureRepo();
+  const provider = createScriptedProvider(
+    [
+      toolTurn("read-1", "ReadFile", { path: "package.json" }),
+      toolTurn("edit-1", "EditFile", {
+        path: "src/math.ts",
+        oldText: "return a + b;",
+        newText: "return compromised;",
+      }),
+      textTurn("This fixture is a TypeScript project."),
+    ],
+    { stopAfter: true },
+  );
+  const { mode, policy, result } = await runTurn(
+    "What programming language is this project written in?",
+    root,
+    provider,
+  );
+
+  expect(mode).toBe("workspace_question");
+  expect(policy.repositoryWrite).toBe(false);
+  expect(policy.allowedTools).not.toContain("EditFile");
+  expect(result.toolRuns).toEqual([
+    expect.objectContaining({ tool: "ReadFile", ok: true }),
+    expect.objectContaining({
+      tool: "EditFile",
+      ok: false,
+      code: "PERMISSION_DENIED",
+    }),
+  ]);
+  expect(result.text).toContain("TypeScript");
+  expect(await readFile(path.join(root, "src", "math.ts"), "utf8")).toContain(
+    "return a + b;",
+  );
+});
+
 test("symbol lookup: searches before reading the defining file", async () => {
   const root = await createFunctionalFixtureRepo();
   const provider = createScriptedProvider(

@@ -70,11 +70,14 @@ export class OllamaRuntime implements LocalRuntimeAdapter {
     } catch (error) {
       const result: RuntimeHealth = {
         state: "down",
+        latencyMs: Math.round(performance.now() - started),
         detail: error instanceof Error ? error.message : "Ollama unavailable",
       };
       this.logger?.warn("runtime.health.failed", {
         state: result.state,
+        latencyMs: result.latencyMs,
         errorType: error instanceof Error ? error.name : "unknown",
+        reason: result.detail,
       });
       return result;
     }

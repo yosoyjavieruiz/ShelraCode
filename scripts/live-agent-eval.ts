@@ -7,6 +7,7 @@ import { LocalCodeDatabase } from "../src/storage/database.js";
 import { OpenAICompatibleLocalRuntime } from "../src/runtimes/http.js";
 import { runCommand } from "../src/shared/process.js";
 import { workspaceTools } from "../src/tools/workspace.js";
+import { recommendedAgentContextChars } from "../src/agent/context-budget.js";
 
 const runtime = new OpenAICompatibleLocalRuntime(
   "lm-studio",
@@ -151,6 +152,11 @@ try {
       context:
         "This is a disposable fixture. Use only the exposed workspace tools. Preserve the existing file structure.",
       maxTurns: complex ? 24 : 16,
+      contextBudgetChars: recommendedAgentContextChars(
+        candidate,
+        "coding",
+        complex ? 0.9 : 0.35,
+      ),
       temperature: liveTemperature,
       maxOutputTokens: complex ? 1_024 : 512,
       systemPromptProfile: "coding",
@@ -172,12 +178,13 @@ try {
       async verifySuccessCriteria(_task, ledger) {
         const satisfiedCriterionIds: string[] = [];
         const issues: string[] = [];
-        const testPassed = ledger.verificationRuns.some(
-          (run) =>
-            run.stage === "test" &&
-            run.status === "passed" &&
-            run.exitCode === 0,
-        );
+        const nextActions: string[] = [];
+        const nextPaths: string[] = [];
+        const latestTest = [...ledger.verificationRuns]
+          .reverse()
+          .find((run) => run.stage === "test");
+        const testPassed =
+          latestTest?.status === "passed" && latestTest.exitCode === 0;
         if (complex) {
           const math = await readFile(
             path.join(root, "src", "math.ts"),
@@ -196,13 +203,40 @@ try {
           const multiplyExported = index.includes("multiply");
           const multiplyTested = tests.includes("multiply");
           if (addFixed) satisfiedCriterionIds.push("criterion-1");
-          else issues.push("add(a, b) is not fixed yet.");
+          else {
+            issues.push("add(a, b) is not fixed yet.");
+            nextPaths.push("src/math.ts");
+            nextActions.push(
+              "Read src/math.ts and edit only add(a, b) so it returns a + b; preserve any already-correct multiply implementation.",
+            );
+          }
           if (multiplyImplemented && multiplyExported && multiplyTested)
             satisfiedCriterionIds.push("criterion-2");
-          else
+          else {
             issues.push(
               "multiply is not fully implemented, exported, and tested yet.",
             );
+            if (!multiplyImplemented) nextPaths.push("src/math.ts");
+            if (!multiplyImplemented)
+              nextActions.push(
+                "Read src/math.ts and add multiply(a, b) returning a * b without changing add(a, b).",
+              );
+            if (!multiplyImplemented) {
+              // Keep the next action on the implementation stage until the
+              // function exists; later stages become eligible on the next
+              // host verification.
+            } else if (!multiplyExported) {
+              nextPaths.push("src/index.ts");
+              nextActions.push(
+                "Read src/index.ts and export multiply alongside add from ./math.ts.",
+              );
+            } else if (!multiplyTested) {
+              nextPaths.push("tests/math.test.ts");
+              nextActions.push(
+                "Read tests/math.test.ts and add a focused test asserting multiply(2, 3) equals 6 and import multiply from src/index.ts.",
+              );
+            }
+          }
         } else {
           const message = await readFile(
             path.join(root, "src", "message.ts"),
@@ -210,16 +244,44 @@ try {
           );
           if (message.includes('greeting = "hello world"'))
             satisfiedCriterionIds.push("criterion-1");
-          else issues.push("The requested greeting value is not present yet.");
+          else {
+            issues.push("The requested greeting value is not present yet.");
+            nextPaths.push("src/message.ts");
+            nextActions.push(
+              'Read src/message.ts and change only the greeting value to "hello world".',
+            );
+          }
         }
         if (testPassed)
           satisfiedCriterionIds.push(complex ? "criterion-3" : "criterion-2");
-        else
+        else {
           issues.push("The required bun test verification has not passed yet.");
+          const evidence = (latestTest?.summary ?? "")
+            .split(/\r?\n/u)
+            .map((line) => line.trim())
+            .filter((line) =>
+              /(?:expected:|received:|error:|fail\)|failed|\.test\.)/iu.test(
+                line,
+              ),
+            )
+            .slice(0, 6)
+            .join(" ");
+          if (evidence)
+            nextActions.push(
+              `Latest verification evidence: ${evidence}. Correct the failing assertion and preserve behavior that already passes.`,
+            );
+          if (latestTest?.failurePaths)
+            nextPaths.push(...latestTest.failurePaths);
+          nextActions.push(
+            "Inspect the failing bun test output, repair the relevant implementation, and rerun bun test.",
+          );
+        }
         return {
           pass: issues.length === 0,
           satisfiedCriterionIds,
           issues,
+          nextActions,
+          nextPaths,
         };
       },
       async createExecutionContext() {

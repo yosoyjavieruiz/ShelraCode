@@ -73,6 +73,8 @@ export interface VerificationRun {
   status: "running" | "passed" | "failed" | "cancelled";
   exitCode?: number;
   summary?: string;
+  /** Workspace-relative test/spec paths extracted from a failed run. */
+  failurePaths?: string[];
   startedAt: string;
   completedAt?: string;
 }
@@ -177,6 +179,19 @@ export function setTaskPlan(ledger: AgentTaskLedger, plan: TaskPlan): void {
   ledger.updatedAt = now();
 }
 
+export function updateTaskPlanStep(
+  ledger: AgentTaskLedger,
+  stepId: string,
+  status: PlanStep["status"],
+): boolean {
+  const step = ledger.plan?.steps.find((candidate) => candidate.id === stepId);
+  if (!step || step.status === status) return false;
+  step.status = status;
+  if (ledger.plan) ledger.plan.updatedAt = now();
+  ledger.updatedAt = now();
+  return true;
+}
+
 export function addTaskBlocker(
   ledger: AgentTaskLedger,
   blocker: TaskBlocker,
@@ -190,10 +205,18 @@ export function satisfyTaskCriterion(
   ledger: AgentTaskLedger,
   criterionId: string,
 ): void {
+  setTaskCriterion(ledger, criterionId, true);
+}
+
+export function setTaskCriterion(
+  ledger: AgentTaskLedger,
+  criterionId: string,
+  satisfied: boolean,
+): void {
   const criterion = ledger.successCriteria.find(
     (item) => item.id === criterionId,
   );
-  if (criterion) criterion.satisfied = true;
+  if (criterion) criterion.satisfied = satisfied;
   ledger.updatedAt = now();
 }
 

@@ -47,6 +47,8 @@ export interface AgentTask {
   /** Host-controlled sampling temperature; coding defaults to 0.2. */
   temperature?: number;
   contextBudgetChars?: number;
+  /** Host-selected staged targets for guarded low-capability coding. */
+  stagedPaths?: string[];
   /**
    * Which system-prompt profile to assemble for this turn. Defaults to
    * "coding" (the historical single hardcoded prompt) when unset, so
@@ -59,6 +61,14 @@ export interface AgentTask {
 
 export type AgentEvent =
   | { type: "assistant.delta"; text: string }
+  /** Provider-reported internal progress is exposed only as safe metadata;
+   * private chain-of-thought text is never forwarded to the transcript. */
+  | {
+      type: "model.progress";
+      phase: "reasoning";
+      chars: number;
+      streaming: boolean;
+    }
   // Surfaces AgentTaskLedger.phase (task-state.ts) as it advances through
   // the loop's frame/discover/analyze/plan/act/observe/reflect/verify/
   // review pipeline. This is the structured signal a host UI needs to
@@ -144,6 +154,8 @@ export interface SuccessCriteriaVerification {
   pass: boolean;
   satisfiedCriterionIds?: string[];
   issues?: string[];
+  nextPaths?: string[];
+  nextActions?: string[];
 }
 
 export interface AgentLoopOptions {

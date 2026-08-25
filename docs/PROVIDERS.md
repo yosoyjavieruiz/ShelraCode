@@ -4,11 +4,30 @@ Registered inference adapters use the normalized `ProviderAdapter` contract. Liv
 
 ## Groq
 
-OpenAI-compatible endpoint `https://api.groq.com/openai/v1`. Models are discovered from `/models`; streamed chat uses `/chat/completions`. Current official docs expose rate-limit headers; the adapter parses request/token remaining and reset values. Free and ZDR status require current user confirmation flags; a key alone is unverified.
+OpenAI-compatible endpoint `https://api.groq.com/openai/v1`. Models are discovered from `/models`; streamed chat uses `/chat/completions`. Current official docs expose rate-limit headers; the adapter parses request/token remaining and reset values. A key enables the no-payment Free tier as quota-bearing capacity; privacy/ZDR remains a separate confirmation.
+
+ShelraCode now treats an authenticated Groq account as quota-bearing Free
+capacity by default (`free_quota`). `GROQ_FREE_CONFIRMED=true` may provide a
+stronger local freshness label, but it is not required and it never enables a
+paid route. A rate-limit or exhausted-free-tier response can trigger a
+per-task fallback to another eligible free/local route; it cannot trigger an
+upgrade or paid fallback.
 
 ## OpenRouter
 
 OpenAI-compatible endpoint `https://openrouter.ai/api/v1`. Only explicit `:free` models or the documented free route are eligible for strict-zero, and provider preferences must deny data collection, require ZDR where policy demands it, and disable paid fallback. Endpoint privacy metadata is treated as volatile.
+
+The registry filters the catalog before routing: only IDs ending in `:free`,
+`openrouter/free`, or entries whose prompt and completion prices are both zero
+are exposed. Paid OpenRouter models never enter the ShelraCode candidate set,
+including when the routing mode is `ask-before-paid`; this provider boundary
+is free-only by construction.
+
+The API keys for these providers are read from `GROQ_API_KEY` and
+`OPENROUTER_API_KEY` (including the repository `.env` loaded by Bun). Keys are
+authentication only; they are not printed, persisted in tests, or treated as
+proof of privacy. Remote private-repository use still requires the explicit
+ZDR flags and the matching repository privacy policy.
 
 ## Generic OpenAI-compatible
 

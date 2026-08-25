@@ -121,12 +121,111 @@ async function discoverFiles(
   return filesFromWalk(root);
 }
 
+const OBJECTIVE_STOP_WORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "also",
+  "before",
+  "change",
+  "changes",
+  "code",
+  "complete",
+  "correct",
+  "create",
+  "current",
+  "ensure",
+  "file",
+  "files",
+  "fix",
+  "from",
+  "into",
+  "make",
+  "modify",
+  "only",
+  "project",
+  "repository",
+  "review",
+  "run",
+  "tests",
+  "test",
+  "the",
+  "this",
+  "with",
+  "add",
+  "agrega",
+  "anade",
+  "arregla",
+  "cambia",
+  "corrige",
+  "crea",
+  "implementa",
+  "implement",
+  "modifica",
+  "prueba",
+  "pruebas",
+  "revisa",
+  "actualiza",
+]);
+
 function objectiveTerms(objective: string): string[] {
   return objective
     .toLowerCase()
-    .split(/[^a-z0-9_/-]+/)
-    .filter((term) => term.length >= 4)
-    .slice(0, 12);
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .split(/[^a-z0-9_/-]+/u)
+    .filter(
+      (term) =>
+        term.length >= 4 &&
+        !OBJECTIVE_STOP_WORDS.has(term) &&
+        !/^\d+$/u.test(term),
+    )
+    .slice(0, 10);
+}
+
+async function objectiveSearchMatches(
+  root: string,
+  objective: string,
+  signal?: AbortSignal,
+  logger?: LocalCodeLogger,
+): Promise<string[]> {
+  const terms = objectiveTerms(objective);
+  if (terms.length === 0) return [];
+  const args = [
+    "--files-with-matches",
+    "--hidden",
+    "--no-messages",
+    "--ignore-case",
+    "--fixed-strings",
+    "-g",
+    "!.git/**",
+    "-g",
+    "!node_modules/**",
+    "-g",
+    "!.localcode/**",
+    "-g",
+    "!dist/**",
+    ...terms.flatMap((term) => ["-e", term]),
+    "--",
+    ".",
+  ];
+  const result = await runCommand("rg", args, {
+    cwd: root,
+    timeoutMs: 5_000,
+    signal,
+    logger,
+  });
+  if (result.exitCode !== 0 && result.exitCode !== 1) return [];
+  return result.stdout
+    .split(/\r?\n/u)
+    .map((value) => normalizePath(value.trim()))
+    .filter(
+      (value) =>
+        value.length > 0 &&
+        !isNeverRemotePath(value) &&
+        !isIgnoredContextFile(value),
+    )
+    .slice(0, 32);
 }
 
 function isRootPath(relative: string): boolean {
@@ -224,9 +323,17 @@ async function buildRepositoryContextInternal(
   const files = await discoverFiles(options.root, options.signal, logger);
   const explicit = options.explicitPaths ?? [];
   const factQuestion = isDirectRepositoryFactQuestion(options.objective);
+  const relevantMatches = factQuestion
+    ? []
+    : await objectiveSearchMatches(
+        options.root,
+        options.objective,
+        options.signal,
+        logger,
+      );
   const ordered = orderFiles(
     factQuestion ? rootFactFiles(files, snapshot) : files,
-    explicit,
+    [...explicit, ...relevantMatches],
     options.objective,
   );
   const loadedInstructions = factQuestion
@@ -294,6 +401,7 @@ async function buildRepositoryContextInternal(
 
   const result = {
     files: includedFiles,
+    relevantMatches,
     prompt: [
       `Objective: ${options.objective}`,
       "Host-detected repository facts (authoritative for direct factual questions; do not rediscover these with tools):",
@@ -301,6 +409,12 @@ async function buildRepositoryContextInternal(
       `- Source roots: ${snapshot.sourceRoots.join(", ") || "unknown"}`,
       `- Test roots: ${snapshot.testRoots.join(", ") || "unknown"}`,
       `- Repository files: ${files.length}`,
+      ...(relevantMatches.length > 0
+        ? [
+            "Objective search matches (host-discovered evidence; inspect before editing):",
+            ...relevantMatches.slice(0, 12).map((file) => `- ${file}`),
+          ]
+        : []),
       ...(factQuestion
         ? [
             "Context focus: answer this direct repository fact from the host facts and root manifests below.",
@@ -316,6 +430,7 @@ async function buildRepositoryContextInternal(
   logger?.info("context.discovery.finished", {
     discoveredFileCount: files.length,
     selectedFileCount: includedFiles.length,
+    objectiveMatchCount: relevantMatches.length,
     instructionCount: loadedInstructions.length,
     usedChars,
     maxChars,

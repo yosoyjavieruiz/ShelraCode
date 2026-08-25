@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   runCommand,
@@ -6,7 +6,7 @@ import {
   type ProcessResult,
 } from "../shared/process.js";
 import { assertWorkspacePath, resolveWorkspacePath } from "../shared/paths.js";
-import { isNeverRemotePath } from "../privacy/policy.js";
+import { isNeverRemotePath, scanSecrets } from "../privacy/policy.js";
 import {
   checkPermission,
   classifyShellCommand,
@@ -38,8 +38,149 @@ async function statForTool(
       throw new ToolError(
         "PATH_NOT_FOUND",
         `No such file or directory: ${relativePath}. List the parent directory or search for the correct path instead of guessing.`,
+        {
+          path: relativePath,
+          suggestedAction:
+            "List the parent directory or search for the correct path before retrying.",
+        },
       );
     }
+    throw error;
+  }
+}
+
+export interface FileChangeSummary {
+  operation: "created" | "overwritten" | "edited" | "deleted";
+  beforeExists: boolean;
+  afterExists: boolean;
+  addedLines: number;
+  removedLines: number;
+  diffLines: string[];
+  diffTruncated: boolean;
+}
+
+function contentLines(content: string): string[] {
+  if (!content) return [];
+  const normalized = content.replaceAll("\r\n", "\n");
+  return (
+    normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized
+  ).split("\n");
+}
+
+function changeDiff(
+  filePath: string,
+  before: string,
+  after: string,
+  operation: FileChangeSummary["operation"],
+): FileChangeSummary {
+  const oldLines = contentLines(before);
+  const newLines = contentLines(after);
+  const tooLarge = oldLines.length * newLines.length > 200_000;
+  const lines: string[] = [];
+  let addedLines = 0;
+  let removedLines = 0;
+  if (tooLarge) {
+    addedLines = newLines.length;
+    removedLines = oldLines.length;
+  } else {
+    const matrix: number[][] = Array.from({ length: oldLines.length + 1 }, () =>
+      new Array<number>(newLines.length + 1).fill(0),
+    );
+    for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
+      for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
+        matrix[oldIndex]![newIndex] =
+          oldLines[oldIndex] === newLines[newIndex]
+            ? (matrix[oldIndex + 1]?.[newIndex + 1] ?? 0) + 1
+            : Math.max(
+                matrix[oldIndex + 1]?.[newIndex] ?? 0,
+                matrix[oldIndex]?.[newIndex + 1] ?? 0,
+              );
+      }
+    }
+    let oldIndex = 0;
+    let newIndex = 0;
+    while (oldIndex < oldLines.length && newIndex < newLines.length) {
+      if (oldLines[oldIndex] === newLines[newIndex]) {
+        lines.push(`  ${oldLines[oldIndex]}`);
+        oldIndex += 1;
+        newIndex += 1;
+      } else if (
+        (matrix[oldIndex + 1]?.[newIndex] ?? 0) >=
+        (matrix[oldIndex]?.[newIndex + 1] ?? 0)
+      ) {
+        lines.push(`- ${oldLines[oldIndex]}`);
+        removedLines += 1;
+        oldIndex += 1;
+      } else {
+        lines.push(`+ ${newLines[newIndex]}`);
+        addedLines += 1;
+        newIndex += 1;
+      }
+    }
+    while (oldIndex < oldLines.length) {
+      lines.push(`- ${oldLines[oldIndex]}`);
+      removedLines += 1;
+      oldIndex += 1;
+    }
+    while (newIndex < newLines.length) {
+      lines.push(`+ ${newLines[newIndex]}`);
+      addedLines += 1;
+      newIndex += 1;
+    }
+  }
+  const redacted =
+    isNeverRemotePath(filePath) ||
+    scanSecrets(before).length > 0 ||
+    scanSecrets(after).length > 0;
+  const maxLines = 80;
+  return {
+    operation,
+    beforeExists: before.length > 0 || operation !== "created",
+    afterExists: operation !== "deleted",
+    addedLines,
+    removedLines,
+    diffLines: redacted
+      ? ["[content redacted: secret-shaped or protected path]"]
+      : lines.slice(0, maxLines),
+    diffTruncated: redacted || tooLarge || lines.length > maxLines,
+  };
+}
+
+async function requireParentDirectory(
+  root: string,
+  relativePath: string,
+): Promise<void> {
+  const parent = path.dirname(relativePath).replaceAll("\\", "/") || ".";
+  const absoluteParent = await assertWorkspacePath(root, parent);
+  const info = await statForTool(absoluteParent, parent);
+  if (!info.isDirectory)
+    throw new ToolError(
+      "PATH_IS_FILE",
+      `${parent} is a file, so ${relativePath} has no valid parent directory.`,
+      {
+        path: parent,
+        suggestedAction: "Choose an existing directory returned by ListFiles.",
+      },
+    );
+}
+
+async function readExistingFile(
+  root: string,
+  relativePath: string,
+): Promise<{ exists: boolean; content: string }> {
+  const absolute = await assertWorkspacePath(root, relativePath);
+  try {
+    const info = await statForTool(absolute, relativePath);
+    if (info.isDirectory)
+      throw new ToolError(
+        "PATH_IS_DIRECTORY",
+        `${relativePath} is a directory, not a file. Choose a file path or use ListFiles.`,
+        { path: relativePath },
+      );
+    return { exists: true, content: await readFile(absolute, "utf8") };
+  } catch (error) {
+    if (error instanceof ToolError && error.code === "PATH_NOT_FOUND")
+      return { exists: false, content: "" };
     throw error;
   }
 }
@@ -186,6 +327,7 @@ async function listFallback(
 
 export interface FileReadResult {
   path: string;
+  kind: "file";
   content: string;
   sensitivePath: boolean;
   truncated: boolean;
@@ -294,6 +436,7 @@ export const readFileTool: ToolDefinition<
     const maxChars = input.maxChars ?? 20_000;
     return {
       path: input.path,
+      kind: "file",
       content: (() => {
         const lines = content.split(/\r?\n/);
         const selected =
@@ -319,7 +462,12 @@ export const readFileTool: ToolDefinition<
 
 export const writeFileTool: ToolDefinition<
   { path: string; content: string },
-  { path: string; bytes: number }
+  {
+    path: string;
+    bytes: number;
+    operation: "created" | "overwritten";
+    change: FileChangeSummary;
+  }
 > = {
   name: "WriteFile",
   description: "Write a workspace file after permission and checkpoint checks.",
@@ -363,7 +511,8 @@ export const writeFileTool: ToolDefinition<
       );
     const absolute = await assertWorkspacePath(ctx.root, input.path);
     await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
-    await mkdir(path.dirname(absolute), { recursive: true });
+    await requireParentDirectory(ctx.root, input.path);
+    const before = await readExistingFile(ctx.root, input.path);
     await writeFile(absolute, input.content, "utf8");
     await ctx.checkpoint.recordMutation(
       ctx.checkpointId,
@@ -373,13 +522,107 @@ export const writeFileTool: ToolDefinition<
     return {
       path: input.path,
       bytes: Buffer.byteLength(input.content, "utf8"),
+      operation: before.exists ? "overwritten" : "created",
+      change: changeDiff(
+        input.path,
+        before.content,
+        input.content,
+        before.exists ? "overwritten" : "created",
+      ),
+    };
+  },
+};
+
+export const createFileTool: ToolDefinition<
+  { path: string; content: string },
+  {
+    path: string;
+    bytes: number;
+    operation: "created";
+    change: FileChangeSummary;
+  }
+> = {
+  name: "CreateFile",
+  description:
+    "Create a new workspace text file without overwriting an existing path.",
+  risk: "write",
+  parameters: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description: "Workspace-relative path of the new file.",
+      },
+      content: { type: "string", description: "Full UTF-8 text content." },
+    },
+    required: ["path", "content"],
+    additionalProperties: false,
+  },
+  validate(input) {
+    const value = recordInput(input);
+    if (typeof value.content !== "string")
+      throw new ToolError("INVALID_ARGUMENT", "content must be a string.", {
+        field: "content",
+        recoverable: true,
+      });
+    return { path: inputString(value, "path"), content: value.content };
+  },
+  async execute(input, ctx) {
+    await requirePermission(ctx, "write");
+    if (!ctx.checkpoint || !ctx.checkpointId)
+      throw new ToolError(
+        "CONFLICT",
+        "CreateFile requires an active LocalCode checkpoint.",
+        {
+          recoverable: true,
+          suggestedAction: "Create a checkpoint before creating the file.",
+        },
+      );
+    const absolute = await assertWorkspacePath(ctx.root, input.path);
+    await requireParentDirectory(ctx.root, input.path);
+    const before = await readExistingFile(ctx.root, input.path);
+    if (before.exists)
+      throw new ToolError(
+        "PATH_EXISTS",
+        `${input.path} already exists. Use EditFile or WriteFile only when replacing an existing file is intentional.`,
+        { path: input.path, recoverable: false },
+      );
+    await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
+    try {
+      await writeFile(absolute, input.content, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (isErrnoException(error) && error.code === "EEXIST")
+        throw new ToolError("PATH_EXISTS", `${input.path} already exists.`, {
+          path: input.path,
+          recoverable: false,
+        });
+      throw error;
+    }
+    await ctx.checkpoint.recordMutation(
+      ctx.checkpointId,
+      input.path,
+      input.content,
+    );
+    return {
+      path: input.path,
+      bytes: Buffer.byteLength(input.content, "utf8"),
+      operation: "created",
+      change: changeDiff(input.path, "", input.content, "created"),
     };
   },
 };
 
 export const editFileTool: ToolDefinition<
   { path: string; oldText: string; newText: string; replaceAll?: boolean },
-  { path: string; replacements: number }
+  {
+    path: string;
+    replacements: number;
+    operation: "edited";
+    change: FileChangeSummary;
+  }
 > = {
   name: "EditFile",
   description: "Replace exact text in a workspace file.",
@@ -416,6 +659,17 @@ export const editFileTool: ToolDefinition<
         "oldText and newText must be strings.",
         { recoverable: true },
       );
+    if (value.oldText === value.newText)
+      throw new ToolError(
+        "INVALID_ARGUMENT",
+        "oldText and newText must differ; an identical replacement makes no change.",
+        {
+          field: "newText",
+          recoverable: true,
+          suggestedAction:
+            "Read the current file and provide a different replacement or choose the next missing criterion.",
+        },
+      );
     return {
       path: inputString(value, "path"),
       oldText: value.oldText,
@@ -437,12 +691,39 @@ export const editFileTool: ToolDefinition<
       );
     const absolute = await assertWorkspacePath(ctx.root, input.path);
     await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
-    const current = await readFile(absolute, "utf8");
+    const existing = await readExistingFile(ctx.root, input.path);
+    if (!existing.exists)
+      throw new ToolError(
+        "PATH_NOT_FOUND",
+        `No such file or directory: ${input.path}. Read or list the correct path before editing.`,
+        {
+          path: input.path,
+          suggestedAction:
+            "Use ListFiles or SearchText to locate an existing file before EditFile.",
+        },
+      );
+    const current = existing.content;
     const occurrences = current.split(input.oldText).length - 1;
     if (occurrences === 0)
       throw new ToolError("NOT_FOUND", "EditFile target text was not found.", {
         recoverable: true,
-        suggestedAction: "Read the current file and retry with exact text.",
+        suggestedAction:
+          "Use the currentContentPreview from this error as the canonical file content, or read the file again, then retry with exact text.",
+        ...(isNeverRemotePath(input.path)
+          ? {}
+          : {
+              details: {
+                ...(scanSecrets(current).length === 0
+                  ? {
+                      currentContentPreview: current.slice(0, 16_384),
+                      currentContentTruncated: current.length > 16_384,
+                    }
+                  : {
+                      currentContentPreview:
+                        "[REDACTED: secret-shaped content]",
+                    }),
+              },
+            }),
       });
     if (occurrences > 1 && !input.replaceAll)
       throw new ToolError(
@@ -462,13 +743,76 @@ export const editFileTool: ToolDefinition<
     return {
       path: input.path,
       replacements: input.replaceAll ? occurrences : 1,
+      operation: "edited",
+      change: changeDiff(input.path, current, updated, "edited"),
+    };
+  },
+};
+
+export const deleteFileTool: ToolDefinition<
+  { path: string },
+  { path: string; operation: "deleted"; change: FileChangeSummary }
+> = {
+  name: "DeleteFile",
+  description:
+    "Delete one existing workspace file after explicit destructive approval.",
+  risk: "destructive",
+  parameters: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description: "Workspace-relative file path to delete.",
+      },
+    },
+    required: ["path"],
+    additionalProperties: false,
+  },
+  validate(input) {
+    const value = recordInput(input);
+    return { path: inputString(value, "path") };
+  },
+  async execute(input, ctx) {
+    await requirePermission(
+      ctx,
+      "destructive",
+      `Delete workspace file: ${input.path}`,
+    );
+    if (!ctx.checkpoint || !ctx.checkpointId)
+      throw new ToolError(
+        "CONFLICT",
+        "DeleteFile requires an active LocalCode checkpoint.",
+        {
+          recoverable: true,
+          suggestedAction: "Create a checkpoint before deleting the file.",
+        },
+      );
+    const absolute = await assertWorkspacePath(ctx.root, input.path);
+    const before = await readExistingFile(ctx.root, input.path);
+    if (!before.exists)
+      throw new ToolError(
+        "PATH_NOT_FOUND",
+        `No such file or directory: ${input.path}. List or search before deleting.`,
+        {
+          path: input.path,
+          suggestedAction:
+            "Confirm the exact existing file path before deleting.",
+        },
+      );
+    await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
+    await unlink(absolute);
+    await ctx.checkpoint.recordMutation(ctx.checkpointId, input.path, "");
+    return {
+      path: input.path,
+      operation: "deleted",
+      change: changeDiff(input.path, before.content, "", "deleted"),
     };
   },
 };
 
 export const listFilesTool: ToolDefinition<
   { path?: string },
-  { files: string[] }
+  { path: string; kind: "directory"; files: string[] }
 > = {
   name: "ListFiles",
   description: "List non-generated files in the workspace.",
@@ -527,6 +871,8 @@ export const listFilesTool: ToolDefinition<
         ? result.stdout.split(/\r?\n/).filter(Boolean).slice(0, 1_000)
         : await listFallback(ctx.root, directory);
     return {
+      path: directory,
+      kind: "directory",
       files: files.map((file) =>
         directory === "."
           ? file.replaceAll("\\", "/")
@@ -1084,7 +1430,9 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
 export const workspaceTools = [
   readFileTool,
   writeFileTool,
+  createFileTool,
   editFileTool,
+  deleteFileTool,
   globFilesTool,
   listFilesTool,
   searchTextTool,

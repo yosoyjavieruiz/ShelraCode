@@ -17,7 +17,10 @@ function messageSize(message: NormalizedMessage): number {
   return message.content.length + 80 + (message.toolCalls?.length ?? 0) * 80;
 }
 
-function summarizeMessage(message: NormalizedMessage): NormalizedMessage {
+function summarizeMessage(
+  message: NormalizedMessage,
+  anchor = false,
+): NormalizedMessage {
   return {
     ...message,
     content: clip(
@@ -26,7 +29,9 @@ function summarizeMessage(message: NormalizedMessage): NormalizedMessage {
         ? 1_600
         : message.role === "assistant"
           ? 1_200
-          : 2_000,
+          : anchor
+            ? 6_000
+            : 2_000,
     ),
   };
 }
@@ -73,19 +78,40 @@ export function compactTaskContext(
   const stateMessage: NormalizedMessage = { role: "system", content: state };
   const retained: NormalizedMessage[] = [];
   let size = messageSize(stateMessage) + (system ? messageSize(system) : 0);
-  const candidates = messages
-    .filter((message) => message !== system)
-    .map(summarizeMessage)
-    .reverse();
-  for (const message of candidates) {
+  const nonSystem = messages.filter((message) => message !== system);
+  const anchor = nonSystem[0];
+  const recent = nonSystem.at(-1);
+  const originalIndex = new Map(
+    nonSystem.map((message, index) => [message, index]),
+  );
+  const candidates = [anchor, recent, ...[...nonSystem].reverse()].filter(
+    (message, index, values): message is NormalizedMessage =>
+      Boolean(message) && values.indexOf(message) === index,
+  );
+  const retainedEntries: Array<{
+    message: NormalizedMessage;
+    index: number;
+  }> = [];
+  for (const original of candidates) {
+    const message = summarizeMessage(original, original === anchor);
     const nextSize = size + messageSize(message);
-    if (retained.length > 0 && nextSize > maxChars) break;
+    if (retained.length > 0 && nextSize > maxChars) continue;
     if (nextSize <= maxChars) {
       retained.push(message);
+      retainedEntries.push({
+        message,
+        index: originalIndex.get(original) ?? Number.MAX_SAFE_INTEGER,
+      });
       size = nextSize;
     }
   }
-  retained.reverse();
+  retained.splice(
+    0,
+    retained.length,
+    ...retainedEntries
+      .sort((left, right) => left.index - right.index)
+      .map((entry) => entry.message),
+  );
   const compacted = [...(system ? [system] : []), stateMessage, ...retained];
   return {
     messages: compacted,

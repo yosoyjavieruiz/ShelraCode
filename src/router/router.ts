@@ -20,6 +20,32 @@ function candidateCapability(candidate: ModelCandidate): AgentCapabilityClass {
   return candidate.agentProbe?.agentCapabilityClass ?? "chat_only";
 }
 
+/**
+ * Capability probes describe an observed starting point; they are not a
+ * permission boundary. A model with a weaker or missing probe may still be
+ * the only executable local route, so keep it eligible and let the agent
+ * loop, host tools, and verification provide the real outcome. The signal is
+ * deliberately bounded so it influences quality without creating a second
+ * hard stop before execution.
+ */
+function capabilityFit(
+  candidate: ModelCandidate,
+  request: RouteRequest,
+): number {
+  const required =
+    request.task.requiredCapability ??
+    (request.task.toolNeed ? "workspace_reader" : "chat_only");
+  const actual = candidateCapability(candidate);
+  const gap = CAPABILITY_RANK[required] - CAPABILITY_RANK[actual];
+  if (gap <= 0) return 1;
+
+  // No probe means unknown, not incapable. Give measured shortfalls a little
+  // more weight than unknowns while retaining a usable floor for a sole local
+  // model (including a broadly useful 1.5B configuration).
+  if (!candidate.agentProbe) return 0.5;
+  return Math.max(0.25, 1 - gap * 0.25);
+}
+
 function isStale(candidate: ModelCandidate, now: Date): boolean {
   if (candidate.source === "local") return false;
   if (candidate.free.status === "stale") return true;
@@ -59,14 +85,32 @@ function quotaHeadroom(
     return 0;
   if (quota.requestsRemaining !== undefined && quota.requestsRemaining <= 0)
     return 0;
-  return quota.confidence === "unknown" ? 0 : 0.5;
+  if (quota.confidence === "unknown") {
+    // `/models` commonly omits inference rate-limit headers. A currently
+    // verified free-only candidate may still be attempted safely; a 429 or
+    // free-tier exhaustion is normalized by the adapter and handled by the
+    // per-task fallback path. Unknown billing is rejected earlier.
+    return candidate.source === "free_cloud" &&
+      (candidate.free.status === "verified_free" ||
+        candidate.free.status === "free_quota")
+      ? 0.35
+      : 0;
+  }
+  return 0.5;
 }
 
 function scoreCandidate(
   candidate: ModelCandidate,
   request: RouteRequest,
 ): RouteScoreBreakdown {
-  const taskFit = Math.max(0, Math.min(1, candidate.quality.coding ?? 0.5));
+  const modelTaskFit = Math.max(
+    0,
+    Math.min(1, candidate.quality.coding ?? 0.5),
+  );
+  const taskFit = Math.max(
+    0,
+    Math.min(1, 0.75 * modelTaskFit + 0.25 * capabilityFit(candidate, request)),
+  );
   const predictedSuccess = Math.max(
     0,
     Math.min(1, (taskFit + (candidate.quality.toolUse ?? 0.5)) / 2),
@@ -208,25 +252,25 @@ export function selectRoute(
       continue;
     }
 
-    if (request.task.toolNeed && !candidate.capabilities.tools) {
-      reject(rejections, candidate, "required tool capability is unavailable");
-      continue;
-    }
-
-    const requiredCapability =
-      request.task.requiredCapability ??
-      (request.task.toolNeed ? "workspace_reader" : "chat_only");
+    // A free-cloud provider may expose paid model records in a volatile
+    // catalog. They are never eligible as a disguised free route, even when
+    // the caller is using ask-before-paid; paid approval applies only to an
+    // explicitly paid provider boundary.
     if (
-      CAPABILITY_RANK[candidateCapability(candidate)] <
-      CAPABILITY_RANK[requiredCapability]
+      candidate.source === "free_cloud" &&
+      (candidate.free.status === "paid" ||
+        candidate.free.status === "paid_required")
     ) {
       reject(
         rejections,
         candidate,
-        candidate.agentProbe
-          ? `capability ${candidateCapability(candidate)} is below required ${requiredCapability}`
-          : `capability probe required for ${requiredCapability}`,
+        "paid model excluded from free provider boundary",
       );
+      continue;
+    }
+
+    if (request.task.toolNeed && !candidate.capabilities.tools) {
+      reject(rejections, candidate, "required tool capability is unavailable");
       continue;
     }
 
@@ -325,6 +369,9 @@ export function selectRoute(
       request.routingMode === "strict-zero"
         ? "Cost gate passed: no paid route was evaluated."
         : "Cost policy allows an explicit paid confirmation.",
+      selected.candidate.agentProbe
+        ? `Capability evidence ${candidateCapability(selected.candidate)} influences task fit but does not independently block execution.`
+        : "Capability evidence is unmeasured; tools and verification will determine execution success.",
       `Score ${selected.breakdown.total.toFixed(2)} from task fit ${selected.breakdown.taskFit.toFixed(2)}, reliability ${selected.breakdown.reliability.toFixed(2)}, quota headroom ${selected.breakdown.quotaHeadroom.toFixed(2)}, latency ${selected.breakdown.latency.toFixed(2)}, context ${selected.breakdown.contextHeadroom.toFixed(2)} and tool use ${selected.breakdown.toolReliability.toFixed(2)}.`,
     ].join(" "),
   };
@@ -333,6 +380,7 @@ export function selectRoute(
     candidateId: selected.candidate.id,
     providerId: selected.candidate.providerId,
     modelId: selected.candidate.modelId,
+    capability: candidateCapability(selected.candidate),
     score: selected.breakdown.total,
     rejectionCount: rejections.length,
   });

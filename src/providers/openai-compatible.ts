@@ -121,6 +121,12 @@ export class GenericOpenAICompatibleProvider implements ProviderAdapter {
       const model = asRecord(raw);
       const modelId = stringValue(model?.id);
       if (!modelId) return [];
+      if (
+        this.profile.freeOnly === true &&
+        this.profile.isFreeModel &&
+        !this.profile.isFreeModel(raw)
+      )
+        return [];
       const context =
         numberValue(model?.context_length) ??
         numberValue(model?.max_context_length);

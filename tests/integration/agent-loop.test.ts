@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { CheckpointService } from "../../src/checkpoint/checkpoint.js";
-import { runAgent } from "../../src/agent/loop.js";
+import {
+  runAgent,
+  sanitizeAssistantTextForCompletion,
+} from "../../src/agent/loop.js";
 import type {
   NormalizedModelRequest,
   ProviderAdapter,
@@ -45,6 +48,8 @@ class FakeAgentProvider implements ProviderAdapter {
   readonly requests: NormalizedModelRequest[] = [];
   private turn = 0;
 
+  constructor(private readonly includeReasoning = false) {}
+
   async discoverModels(): Promise<ModelCandidate[]> {
     return [candidate];
   }
@@ -65,6 +70,13 @@ class FakeAgentProvider implements ProviderAdapter {
     this.lastRequest = request;
     this.requests.push(structuredClone(request));
     this.turn += 1;
+    if (this.includeReasoning)
+      yield {
+        type: "reasoning.delta",
+        text: "private model reasoning that must never enter the transcript. ".repeat(
+          8,
+        ),
+      };
     if (this.turn === 1) {
       yield {
         type: "tool.call",
@@ -105,6 +117,21 @@ class FakeAgentProvider implements ProviderAdapter {
 }
 
 describe("agent loop", () => {
+  test("completion text replaces tool-shaped JSON with a safe host summary", () => {
+    expect(
+      sanitizeAssistantTextForCompletion(
+        '{"name":"EditFile","arguments":{"path":"src/math.ts"}}',
+        "Changes were applied and verified.",
+      ),
+    ).toBe("Changes were applied and verified.");
+    expect(
+      sanitizeAssistantTextForCompletion(
+        "The requested change is complete.",
+        "Changes were applied and verified.",
+      ),
+    ).toBe("The requested change is complete.");
+  });
+
   test("reads, edits, verifies and returns a provider-independent result", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "localcode-agent-"));
     await mkdir(path.join(root, "src"));
@@ -122,7 +149,7 @@ describe("agent loop", () => {
     const checkpoint = new CheckpointService(db, root);
     const events: string[] = [];
     const logs: LogRecord[] = [];
-    const provider = new FakeAgentProvider();
+    const provider = new FakeAgentProvider(true);
 
     const result = await runAgent(
       {
@@ -208,6 +235,7 @@ describe("agent loop", () => {
       ]),
     );
     expect(events).toContain("verification.finished");
+    expect(events).toContain("model.progress");
     expect(logs.map((record) => record.event)).toEqual(
       expect.arrayContaining([
         "agent.task.started",
@@ -224,6 +252,748 @@ describe("agent loop", () => {
     expect(
       await readFile(path.join(root, "src", "value.ts"), "utf8"),
     ).toContain("value = 2");
+    db.close();
+  });
+
+  test("does not turn a dependency name into a phantom mutation target", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-path-domain-"),
+    );
+    await writeFile(
+      path.join(root, "index.html"),
+      "<main>old</main>\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    let turn = 0;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Fake local",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" as const };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream(
+        _request: NormalizedModelRequest,
+      ): AsyncIterable<ProviderEvent> {
+        turn += 1;
+        if (turn === 1) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "path-read",
+              name: "ReadFile",
+              arguments: JSON.stringify({ path: "index.html" }),
+            },
+          };
+        } else if (turn === 2) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "path-write",
+              name: "WriteFile",
+              arguments: JSON.stringify({
+                path: "index.html",
+                content: "<main>new</main>\n",
+              }),
+            },
+          };
+        } else {
+          yield { type: "text.delta", text: "Updated index.html." };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "path-domain-task",
+        objective: "Update the Moment.js dependency in the file index.html.",
+        root,
+        candidate,
+        repositoryPolicy: "private",
+        permissionMode: "AUTO",
+        context: "index.html contains the target document.",
+        mode: "coding",
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "AUTO",
+          signal: new AbortController().signal,
+          checkpoint,
+        }),
+      },
+    );
+
+    expect(result.toolRuns.map((run) => run.tool)).toEqual([
+      "ReadFile",
+      "WriteFile",
+    ]);
+    expect(result.toolRuns.every((run) => run.ok)).toBe(true);
+    expect(await readFile(path.join(root, "index.html"), "utf8")).toBe(
+      "<main>new</main>\n",
+    );
+    db.close();
+  });
+
+  test("completes after host verification instead of asking a weak model for another tool", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-host-completion-"),
+    );
+    await mkdir(path.join(root, "src"));
+    await writeFile(
+      path.join(root, "src", "value.ts"),
+      "export const value = 1;\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "test.ts"),
+      "import { expect, test } from 'bun:test'; test('value', async () => expect((await import('./src/value.ts')).value).toBe(2));\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    let turns = 0;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Weak-model completion fixture",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream() {
+        turns += 1;
+        if (turns === 1) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "read-value",
+              name: "ReadFile",
+              arguments: JSON.stringify({ path: "src/value.ts" }),
+            },
+          };
+        } else if (turns === 2) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "edit-value",
+              name: "EditFile",
+              arguments: JSON.stringify({
+                path: "src/value.ts",
+                oldText: "export const value = 1;",
+                newText: "export const value = 2;",
+              }),
+            },
+          };
+        } else {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "unnecessary-" + turns,
+              name: "SearchText",
+              arguments: JSON.stringify({
+                query: "this call should never execute",
+                path: ".",
+              }),
+            },
+          };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-host-completion",
+        objective: "Change value to 2 and verify it.",
+        root,
+        candidate,
+        repositoryPolicy: "local_only",
+        permissionMode: "AUTO",
+        mode: "coding",
+        successCriteria: ["value is changed to 2", "bun test passes"],
+        verificationCommands: [
+          { stage: "test", command: "bun test ./test.ts" },
+        ],
+        maxTurns: 6,
+        systemPromptProfile: "coding",
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        checkUserWorkPreserved: (checkpointId) =>
+          checkpointId ? checkpoint.isPreserved(checkpointId) : true,
+        async verifySuccessCriteria(_task, ledger) {
+          const changed = ledger.filesChanged.includes("src/value.ts");
+          const tested = ledger.verificationRuns.some(
+            (run) => run.status === "passed" && run.exitCode === 0,
+          );
+          return {
+            pass: changed && tested,
+            satisfiedCriterionIds: [
+              ...(changed ? ["criterion-1"] : []),
+              ...(tested ? ["criterion-2"] : []),
+            ],
+            issues: [
+              ...(!changed ? ["The value was not changed."] : []),
+              ...(!tested ? ["The test did not pass."] : []),
+            ],
+          };
+        },
+        async createExecutionContext() {
+          return {
+            root,
+            permissionMode: "AUTO" as const,
+            signal: new AbortController().signal,
+            checkpoint,
+          };
+        },
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.verified).toBe(true);
+    expect(turns).toBe(2);
+    expect(result.toolRuns.map((run) => run.tool)).toEqual([
+      "ReadFile",
+      "EditFile",
+    ]);
+    expect(result.text).toContain("verified by host");
+    expect(result.ledger.plan?.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "step-verify", status: "done" }),
+      ]),
+    );
+    db.close();
+  });
+
+  test("feeds missing success criteria back before asking a weak model for another turn", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-criteria-feedback-"),
+    );
+    await mkdir(path.join(root, "src"));
+    await writeFile(
+      path.join(root, "src", "value.ts"),
+      "export const value = 1;\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "test.ts"),
+      "import { expect, test } from 'bun:test'; test('value', async () => expect((await import('./src/value.ts')).value).toBe(2));\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    const requests: NormalizedModelRequest[] = [];
+    let turns = 0;
+    let wrongReadAttempted = false;
+    let wrongPathAttempted = false;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Criteria-feedback fixture",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream(request) {
+        requests.push(structuredClone(request));
+        turns += 1;
+        const hasMissingCriteriaFeedback = request.messages.some(
+          (message) =>
+            message.role === "user" &&
+            message.content.includes("Host criteria") &&
+            message.content.includes("Next relevant files") &&
+            message.content.includes("src/marker.ts"),
+        );
+        if (turns === 1) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "edit-value",
+              name: "EditFile",
+              arguments: JSON.stringify({
+                path: "src/value.ts",
+                oldText: "export const value = 1;",
+                newText: "export const value = 2;",
+              }),
+            },
+          };
+        } else if (hasMissingCriteriaFeedback && !wrongReadAttempted) {
+          wrongReadAttempted = true;
+          yield {
+            type: "tool.call",
+            call: {
+              id: "read-wrong-target",
+              name: "ReadFile",
+              arguments: JSON.stringify({ path: "src/value.ts" }),
+            },
+          };
+        } else if (hasMissingCriteriaFeedback && !wrongPathAttempted) {
+          wrongPathAttempted = true;
+          yield {
+            type: "tool.call",
+            call: {
+              id: "write-wrong-target",
+              name: "WriteFile",
+              arguments: JSON.stringify({
+                path: "src/value.ts",
+                content: "export const value = 99;\n",
+              }),
+            },
+          };
+        } else if (hasMissingCriteriaFeedback) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "write-marker",
+              name: "WriteFile",
+              arguments: JSON.stringify({
+                path: "src/marker.ts",
+                content: "export const marker = true;\n",
+              }),
+            },
+          };
+        } else {
+          yield { type: "text.delta", text: "I need another instruction." };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-criteria-feedback",
+        objective: "Change value and create the marker file.",
+        root,
+        candidate,
+        repositoryPolicy: "local_only",
+        permissionMode: "AUTO",
+        mode: "coding",
+        successCriteria: [
+          "value is changed to 2",
+          "src/marker.ts exists",
+          "bun test passes",
+        ],
+        verificationCommands: [
+          { stage: "test", command: "bun test ./test.ts" },
+        ],
+        maxTurns: 5,
+        systemPromptProfile: "coding",
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        checkUserWorkPreserved: (checkpointId) =>
+          checkpointId ? checkpoint.isPreserved(checkpointId) : true,
+        async verifySuccessCriteria(_task, ledger) {
+          const changed = ledger.filesChanged.includes("src/value.ts");
+          const marker = ledger.filesChanged.includes("src/marker.ts");
+          const tested = ledger.verificationRuns.some(
+            (run) => run.status === "passed" && run.exitCode === 0,
+          );
+          return {
+            pass: changed && marker && tested,
+            satisfiedCriterionIds: [
+              ...(changed ? ["criterion-1"] : []),
+              ...(marker ? ["criterion-2"] : []),
+              ...(tested ? ["criterion-3"] : []),
+            ],
+            issues: [
+              ...(!changed ? ["The value was not changed."] : []),
+              ...(!marker ? ["The marker file is missing."] : []),
+              ...(!tested ? ["The test did not pass."] : []),
+            ],
+          };
+        },
+        async createExecutionContext() {
+          return {
+            root,
+            permissionMode: "AUTO" as const,
+            signal: new AbortController().signal,
+            checkpoint,
+          };
+        },
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.verified).toBe(true);
+    expect(turns).toBe(4);
+    expect(result.toolRuns.map((run) => run.tool)).toEqual([
+      "EditFile",
+      "ReadFile",
+      "WriteFile",
+      "WriteFile",
+    ]);
+    expect(result.toolRuns[1]?.code).toBe("CONFLICT");
+    expect(result.toolRuns[2]?.code).toBe("CONFLICT");
+    expect(
+      requests[1]?.messages.some(
+        (message) =>
+          message.role === "user" &&
+          message.content.includes("Next relevant files") &&
+          message.content.includes("src/marker.ts") &&
+          message.content.includes(
+            "Already satisfied criteria are protected",
+          ) &&
+          message.content.includes("value is changed to 2"),
+      ),
+    ).toBe(true);
+    expect(
+      await readFile(path.join(root, "src", "value.ts"), "utf8"),
+    ).toContain("value = 2");
+    db.close();
+  });
+
+  test("blocks a first write outside the files named by the coding objective", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-initial-scope-"),
+    );
+    await mkdir(path.join(root, "src"));
+    await writeFile(
+      path.join(root, "src", "value.ts"),
+      "export const value = 1;\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    let turns = 0;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Initial-scope fixture",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream() {
+        turns += 1;
+        if (turns === 1) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "write-unrelated",
+              name: "WriteFile",
+              arguments: JSON.stringify({
+                path: "notes.ts",
+                content: "export const unrelated = true;\n",
+              }),
+            },
+          };
+        } else if (turns === 2) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "edit-value",
+              name: "EditFile",
+              arguments: JSON.stringify({
+                path: "src/value.ts",
+                oldText: "export const value = 1;",
+                newText: "export const value = 2;",
+              }),
+            },
+          };
+        } else {
+          yield { type: "text.delta", text: "The requested file is updated." };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-initial-scope",
+        objective: "Update src/value.ts from 1 to 2.",
+        root,
+        candidate,
+        repositoryPolicy: "local_only",
+        permissionMode: "AUTO",
+        mode: "coding",
+        successCriteria: ["src/value.ts is updated"],
+        maxTurns: 5,
+        systemPromptProfile: "coding",
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        checkUserWorkPreserved: (checkpointId) =>
+          checkpointId ? checkpoint.isPreserved(checkpointId) : true,
+        async verifySuccessCriteria(_task, ledger) {
+          const changed = ledger.filesChanged.includes("src/value.ts");
+          return {
+            pass: changed,
+            satisfiedCriterionIds: changed ? ["criterion-1"] : [],
+            issues: changed ? [] : ["src/value.ts is still unchanged."],
+          };
+        },
+        async createExecutionContext() {
+          return {
+            root,
+            permissionMode: "AUTO" as const,
+            signal: new AbortController().signal,
+            checkpoint,
+          };
+        },
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.toolRuns[0]?.code).toBe("CONFLICT");
+    expect(result.ledger.filesChanged).toEqual(["src/value.ts"]);
+    expect(await readFile(path.join(root, "notes.ts")).catch(() => "")).toBe(
+      "",
+    );
+    db.close();
+  });
+
+  test("rolls back a mutation that regresses an already satisfied criterion", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-regression-rollback-"),
+    );
+    await mkdir(path.join(root, "src"));
+    await writeFile(
+      path.join(root, "src", "value.ts"),
+      "export const value = 1;\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "test.ts"),
+      "import { expect, test } from 'bun:test'; test('value', async () => expect((await import('./src/value.ts')).value).toBe(2));\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    let turns = 0;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Regression rollback fixture",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream() {
+        turns += 1;
+        if (turns === 1) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "edit-value-first",
+              name: "EditFile",
+              arguments: JSON.stringify({
+                path: "src/value.ts",
+                oldText: "export const value = 1;",
+                newText: "export const value = 2;",
+              }),
+            },
+          };
+        } else if (turns === 2) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "read-value-before-regression",
+              name: "ReadFile",
+              arguments: JSON.stringify({ path: "src/value.ts" }),
+            },
+          };
+        } else if (turns === 3) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "edit-value-regression",
+              name: "EditFile",
+              arguments: JSON.stringify({
+                path: "src/value.ts",
+                oldText: "export const value = 2;",
+                newText: "export const value = 3;",
+              }),
+            },
+          };
+        } else {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "write-marker",
+              name: "WriteFile",
+              arguments: JSON.stringify({
+                path: "src/marker.ts",
+                content: "export const marker = true;\n",
+              }),
+            },
+          };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-regression-rollback",
+        objective:
+          "Change the value in src/value.ts to 2 and create src/marker.ts.",
+        root,
+        candidate,
+        repositoryPolicy: "private",
+        permissionMode: "AUTO",
+        mode: "coding",
+        successCriteria: [
+          "value is 2",
+          "src/marker.ts exists",
+          "bun test passes",
+        ],
+        verificationCommands: [
+          { stage: "test", command: "bun test ./test.ts" },
+        ],
+        maxTurns: 5,
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        checkUserWorkPreserved: (checkpointId) =>
+          checkpointId ? checkpoint.isPreserved(checkpointId) : true,
+        async verifySuccessCriteria(_task, ledger) {
+          const value = await readFile(
+            path.join(root, "src", "value.ts"),
+            "utf8",
+          );
+          let marker = false;
+          try {
+            await readFile(path.join(root, "src", "marker.ts"), "utf8");
+            marker = true;
+          } catch {
+            marker = false;
+          }
+          const valueOk = value.includes("value = 2");
+          const tested = ledger.verificationRuns.some(
+            (run) => run.status === "passed" && run.exitCode === 0,
+          );
+          return {
+            pass: valueOk && marker && tested,
+            satisfiedCriterionIds: [
+              ...(valueOk ? ["criterion-1"] : []),
+              ...(marker ? ["criterion-2"] : []),
+              ...(tested ? ["criterion-3"] : []),
+            ],
+            issues: [
+              ...(!valueOk ? ["value is not 2."] : []),
+              ...(!marker ? ["src/marker.ts is missing."] : []),
+              ...(!tested ? ["bun test has not passed."] : []),
+            ],
+          };
+        },
+        async createExecutionContext() {
+          return {
+            root,
+            permissionMode: "AUTO" as const,
+            signal: new AbortController().signal,
+            checkpoint,
+          };
+        },
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.verified).toBe(true);
+    expect(turns).toBe(4);
+    expect(result.toolRuns.map((run) => run.tool)).toEqual([
+      "EditFile",
+      "ReadFile",
+      "EditFile",
+      "WriteFile",
+    ]);
+    expect(result.ledger.verificationRuns.map((run) => run.status)).toEqual([
+      "passed",
+      "failed",
+      "passed",
+    ]);
+    expect(
+      await readFile(path.join(root, "src", "value.ts"), "utf8"),
+    ).toContain("value = 2");
+    expect(
+      await readFile(path.join(root, "src", "marker.ts"), "utf8"),
+    ).toContain("marker = true");
     db.close();
   });
 
@@ -905,6 +1675,92 @@ describe("agent loop", () => {
     expect(assistantDeltas.join("")).not.toContain('"name":"ReadFile"');
   });
 
+  test("recovers a validated LM Studio tool_response EditFile wrapper", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-lmstudio-tool-response-"),
+    );
+    await writeFile(path.join(root, "demo.txt"), "hello response\n", "utf8");
+    const database = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(database, root);
+    const envelope =
+      "<tool_response>\n" +
+      '{"tool":"EditFile","ok":true,"output":{"path":"demo.txt","oldText":"hello response","newText":"hello edited","replaceAll":false}}' +
+      "\n</tool_response>";
+    let turn = 0;
+    const assistantDeltas: string[] = [];
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "LM Studio tool response fixture",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream() {
+        turn += 1;
+        if (turn === 1) {
+          yield { type: "text.delta", text: envelope.slice(0, 8) };
+          yield { type: "text.delta", text: envelope.slice(8) };
+        } else {
+          yield { type: "text.delta", text: "The file was edited." };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-lmstudio-tool-response-envelope",
+        objective: "Edit demo.txt",
+        root,
+        candidate,
+        repositoryPolicy: "private",
+        permissionMode: "AUTO",
+        mode: "coding",
+        maxTurns: 3,
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        onEvent(event) {
+          if (event.type === "assistant.delta")
+            assistantDeltas.push(event.text);
+        },
+        async createExecutionContext() {
+          return {
+            root,
+            permissionMode: "AUTO" as const,
+            signal: new AbortController().signal,
+            checkpoint,
+          };
+        },
+      },
+    );
+
+    expect(result.toolRuns.map((run) => run.tool)).toEqual(["EditFile"]);
+    expect(await readFile(path.join(root, "demo.txt"), "utf8")).toContain(
+      "hello edited",
+    );
+    expect(result.text).toContain("file was edited");
+    expect(assistantDeltas.join("")).not.toContain("<tool_response>");
+    expect(assistantDeltas.join("")).not.toContain('"tool":"EditFile"');
+    database.close();
+  });
+
   test("unknown and invalid tool calls still emit ordered structured failures", async () => {
     const root = await mkdtemp(
       path.join(os.tmpdir(), "localcode-tool-errors-"),
@@ -1515,6 +2371,132 @@ describe("agent loop", () => {
     db.close();
   });
 
+  test("requires a fresh read after a rejected edit before retrying", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-fresh-read-after-edit-"),
+    );
+    await writeFile(
+      path.join(root, "value.ts"),
+      "export const value = 1;\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    let turn = 0;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Fresh-read edit fixture",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream() {
+        turn += 1;
+        if (turn === 1 || turn === 4) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: `read-${turn}`,
+              name: "ReadFile",
+              arguments: JSON.stringify({ path: "value.ts" }),
+            },
+          };
+        } else if (turn === 2 || turn === 3) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: `stale-edit-${turn}`,
+              name: "EditFile",
+              arguments: JSON.stringify({
+                path: "value.ts",
+                oldText: "export const value = 999;",
+                newText: "export const value = 2;",
+              }),
+            },
+          };
+        } else if (turn === 5) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "valid-edit",
+              name: "EditFile",
+              arguments: JSON.stringify({
+                path: "value.ts",
+                oldText: "export const value = 1;",
+                newText: "export const value = 2;",
+              }),
+            },
+          };
+        } else {
+          yield {
+            type: "text.delta",
+            text: "The fresh observation was applied.",
+          };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-fresh-read-after-edit",
+        objective: "Change value.ts from 1 to 2.",
+        root,
+        candidate,
+        repositoryPolicy: "local_only",
+        permissionMode: "AUTO",
+        mode: "coding",
+        maxTurns: 7,
+        systemPromptProfile: "coding",
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        async createExecutionContext() {
+          return {
+            root,
+            permissionMode: "AUTO" as const,
+            signal: new AbortController().signal,
+            checkpoint,
+          };
+        },
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.toolRuns.map((run) => run.tool)).toEqual([
+      "ReadFile",
+      "EditFile",
+      "EditFile",
+      "ReadFile",
+      "EditFile",
+    ]);
+    expect(result.toolRuns[1]?.ok).toBe(false);
+    expect(result.toolRuns[1]?.code).toBe("NOT_FOUND");
+    expect(result.toolRuns[2]?.ok).toBe(false);
+    expect(result.toolRuns[2]?.code).toBe("CONFLICT");
+    expect(await readFile(path.join(root, "value.ts"), "utf8")).toContain(
+      "value = 2",
+    );
+    db.close();
+  });
+
   test("a non-progress watchdog stops a loop that repeats the identical tool call", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "localcode-watchdog-"));
     await writeFile(path.join(root, "a.ts"), "export const a = 1;\n", "utf8");
@@ -1803,8 +2785,10 @@ describe("agent loop", () => {
     expect(result.failure?.message).toContain("runtime crashed");
     expect(
       logs.find((record) => record.event === "agent.task.failed")?.data,
-    ).toEqual(expect.objectContaining({
-      reason: expect.stringContaining("runtime crashed"),
-    }));
+    ).toEqual(
+      expect.objectContaining({
+        reason: expect.stringContaining("runtime crashed"),
+      }),
+    );
   });
 });
