@@ -1,0 +1,51 @@
+ ◈ LocalCode ~/shelra · main                                                                                                                 AUTO LOCAL PRIVATE 
+                                                                                                                                                                
+                                ┌──────────────────────────────────────────────────────────────────────────────────────────────┐                                
+                          ◈     │                                                                                              │                                
+                                │ ⌕Search commands…                                                                            │                                
+                          Intell│g────────────────────────────────────────────────                                             │                                
+                                │ Navigation                                                                                   │                                
+                          Local │ F›eOpenPworkspace  Return to the active conversation                              Ctrl+X C   │                                
+                                │    Command palette  Search every available action                                   Ctrl+P   │                                
+                          PROJEC│  shelra · main                                                                               │                                
+                          HARDWA│ESessioning machine…                                                                          │                                
+                                │    New session  Start with a clean conversation                                              │                                
+                          READY │ATH Sessions  Browse recent workspaces                                             Ctrl+X S   │                                
+                          Local │ Verified free cloud → Stop & ask                                                             │                                
+                          Paid a│tModelsing disabled · 0 free providers connected                                              │                                
+                                │    Open Models  Browse local and free cloud models                                           │                                
+                          TRY   │    Switch model  Choose the model for the next task                               Ctrl+X M   │                                
+                          › Expl│in tProvidersitInspect connections and health                                      Ctrl+X P   │                                
+                          › Find│failing tests                                                                                 │                                
+                          › Revi│wRoutingitted changes                                                                         │                                
+                                │    Routing  Inspect the execution decision                                        Ctrl+X R   │                                
+                          Press └────Usage──View─free─capacity──────────────────────────────────────────────────────Ctrl+X─Q───┘                                
+                                     Privacy  Review repository privacy policy                                      Ctrl+X V                                    
+                                                                                                                                                                
+                                  Project                                                                                                                       
+                                     Context  See what the agent can use                                                                                        
+                                     Plan  Inspect task progress                                                                                                
+                                                                                                                                                                
+                                  ↑↓ navigate Enter run Esc close                                                                                               
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+ ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode anything…                                                                                                                                    │ 
+ │                                                                                                                                                            │ 
+ └─@─context─AUTO─LOCAL-FIRST────────────────────────────────────────────────────────────────────────────────────Enter─send─·─Shift+Enter─newline─·─Esc─clear─┘ 
+ ● Command palette                                                                                             LOCAL · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

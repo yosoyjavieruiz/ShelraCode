@@ -1,0 +1,51 @@
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                     ┌────────────────────────────────────────────────────────────────────────────────────┐                                     
+                                     │                                                                                    │                                     
+                                     │ Approval needed                                                                    │                                     
+                                     │                                                                                    │                                     
+                                     │ Run a repository command                                                           │                                     
+                                     │                                                                                    │                                     
+                                     │ Target bun test --runInBand                                                        │                                     
+                                     │                                                                                    │                                     
+                                     │ Risk reads the workspace and may use local process time                            │                                     
+                                     │                                                                                    │                                     
+                                     │ LocalCode is asking because this workspace uses PLAN permissions.                  │                                     
+                                     │                                                                                    │                                     
+                                     │ Enter approve Esc deny                                                             │                                     
+                                     │                                                                                    │                                     
+                                     └────────────────────────────────────────────────────────────────────────────────────┘                                     
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+

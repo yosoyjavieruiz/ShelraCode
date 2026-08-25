@@ -1,0 +1,51 @@
+ ◈ LocalCode ~/shelra · main                                                                                                             AUTO · LOCAL · PRIVATE 
+                                                                                                                                                                
+            EXPLAINABLE ROUTING                                                                                                                                 
+                                                                                                                                                                
+            Routing                                                                                                                                             
+                                                                                                                                                                
+            TASK → PRIVACY → CAPABILITY →                                                                                                                       
+                                                                                                                                                                
+            COST → QUOTA → SELECTION                                                                                                                            
+                                                                                                                                                                
+                                                                                                                                                                
+             SELECTED                                                                                                                                           
+             lm-studio / Qwen Coder 7B                                                                                                                          
+             Local tool support is healthy and cost is zero.                                                                                                    
+                                                                                                                                                                
+                                                                                                                                                                
+            SIGNALS                                                                                                                                             
+            ██████████████░░ task fit 90%                                                                                                                       
+            ███████████████░ reliability 92%                                                                                                                    
+            ████████████████  quota 100%                                                                                                                        
+                                                                                                                                                                
+            DECISION LOG                                                                                                                                        
+            Task        repository debugging · high confidence                                                                                                  
+            Privacy     private · strict-zero                                                                                                                   
+            Selected    Local / Qwen Coder 7B                                                                                                                   
+            Why         local tool support is healthy and cost is zero                                                                                          
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+ ● Ready · local-first · strict-zero                                                           LOCAL · Qwen Coder 7B · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

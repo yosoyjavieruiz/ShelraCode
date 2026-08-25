@@ -1,0 +1,31 @@
+ ◈ LocalCode ~/shelra                                                        AUTO · LOCAL · PRIVATE 
+                                                                                                    
+            ┌──────────────────────────────────────────────────────────────────────────┐            
+   ◈        │                                                                          │            
+            │ ?Search commands...                                                      │            
+   Intellige│cNAVIGATION-------------------------------------------------------------- │            
+            │  > Open workspaceCtrl+X C                                                │            
+   Local · F│ee ·CommandepaletteCtrl+P                                                 │            
+            │ SESSION                                                                  │            
+   PROJECT  │helrNew session                                                           │            
+   HARDWARE │etecSessionsCtrl+X S                                                      │            
+            │ MODELS                                                                   │            
+   PATH  Loc│l → Open Models· 0 free providers                                         │            
+            │    Switch modelCtrl+X M                                                  │            
+   Ctrl+P co└─Up/Down─navigate─Enter─run─Esc─close─────────────────────────────────────┘            
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ ┌────────────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode...                                                                               │ 
+ │                                                                                                │ 
+ └─Enter─send──Shift+Enter─newline──LOCAL-FIRST───────────────────────────────────────────────────┘ 
+ ● Command palette                                                     LOCAL · $0 · private  Ctrl+P 
+

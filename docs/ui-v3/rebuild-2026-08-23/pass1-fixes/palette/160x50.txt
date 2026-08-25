@@ -1,0 +1,51 @@
+ ◈ LocalCode ~/shelra · main                                                                                                             AUTO · LOCAL · PRIVATE 
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                          ◈                                                                                                                                     
+                                                                                                                                                                
+                          Intelligence that runs your way.                                                                                                      
+                                                                                                                                                                
+                          Local · Free · Private                                                                                                                
+                                                                                                                                                                
+                          PROJECT  shelra · main                                                                                                                
+                          HARDWARE Detecting machine…                                                                                                           
+                                                                                                                                                                
+                          READY PATH                                                                                                                            
+                          Local → Verified free cloud → Stop & ask                                                                                              
+                          Paid auto-routing disabled · 0 free providers connected                                                                               
+                                                                                                                                                                
+                          TRY                                                                                                                                   
+                          › Explain this repository                                                                                                             
+                          › Find failing tests                                                                                                                  
+                          › Review uncommitted changes                                                                                                          
+                                                                                                                                                                
+                          Press Ctrl+P for commands · type / to browse                                                                                          
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐                                               
+ │ Ask LocalCode anything...                                                                                    │                                               
+ │                                                                                                              │                                               
+ │ @ context  AUTO  LOCAL-FIRST    Enter send  Shift+Enter newline                                              │                                               
+ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘                                               
+ ● Command palette                                                                                             LOCAL · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

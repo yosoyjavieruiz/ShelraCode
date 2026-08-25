@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                           LOCAL · PRIVATE 
+  ACTIVE TASK authentication session race                       LOCAL · 0 cost  
+                                                                                
+   You                                                                          
+   Fix the authentication session race and run tests.                           
+                                                                                
+   LocalCode                                                                    
+   I’ll inspect the session lifecycle, then verify the smallest safe change.    
+                                                                                
+   > ✓ READ + SEARCH · 3 actions · Enter to expand                              
+                                                                                
+   Ctrl+Up/Down review · /help commands                                         
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+  ┌──────────────────────────────────────────────────────────────────────────┐  
+  │ Ask LocalCode anything...                                                │  
+  │                                                                          │  
+  │ Enter send  Shift+Enter newline  Esc clear                               │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+ ● Inspecting session lifecycle                    LOCAL · $0 · private  Ctrl+P 
+

@@ -1,0 +1,24 @@
+ ◆ Shelra Code   ~/shelra · main                                Local · Private 
+                                                                                
+              ░░░░ ░░░░ ░░░░ ░░░░ ░░░░ ░░░░ ░░░ ░░░░ ░░░░ ░░░░ ░░░░             
+              ░███ █░░█ ████ █░░░ ███░ ░██░ ░░░ ████ ░██░ ███░ ████             
+              █    █░░█ █    █░░░ █  █ █  █ ░░░ █    █  █ █  █ █                
+               ██░ ████ ███░ █░░░ ███  ████ ░░░ █░░░ █░░█ █░░█ ███░             
+              ░  █ █  █ █  ░ █░░░ █  █ █  █ ░░░ █░░░ █░░█ █░░█ █  ░             
+              ███  █░░█ ████ ████ █░░█ █░░█ ░░░ ████  ██  ███  ████             
+                 ░  ░░             ░░   ░░  ░░░      ░  ░    ░                  
+              ░░░░ ░░░░ ░░░░ ░░░░ ░░░░ ░░░░ ░░░ ░░░░ ░░░░ ░░░░ ░░░░             
+                         Maximum intelligence. Your way.                        
+                                                                                
+                    shelra · main · Local-first routing ready                   
+                                                                                
+                          Try                                                   
+                            Review my current changes                           
+                            Run tests for changed files                         
+                            Find likely regressions                             
+                     ╭─────────────────────────────────────╮                    
+                     │Ask Shelra Code…                     │                    
+                     │                                     │                    
+                     │ @ context   Auto                  ↵ │                    
+                     ╰─────────────────────────────────────╯                    
+ Ready                                                                          

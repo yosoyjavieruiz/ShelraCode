@@ -1,0 +1,50 @@
+ ◆ Shelra Code   ~/shelra · main                                                                                                                Local · Private 
+                                                                                                                                                                
+  You                                                                                                                                                           
+  Fix the token refresh race condition and run the auth tests.                                                                                                  
+                                                                                                                                                                
+  Shelra Code                                                                                                                                                   
+                                                                                                                                                                
+  I'll inspect the session lifecycle first.                                                                                                                     
+                                                                                                                                                                
+  › Updating and verifying changes · 4 actions                                                                                                                  
+   ├─ READ    src/auth/session.ts                                                                                                               3 lines · 14ms  
+   ├─ SEARCH  refreshToken                                                                                                                      1 match · 14ms  
+   ├─ EDIT    src/auth/session.ts                                                                                                         1 replacement · 14ms  
+   └─ TEST    bun test auth                                                                                                                   31 passed · 2.4s  
+                                                                                                                                                                
+  ✓ Tests · 31 passed                                                                                                                                           
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │› Ask Shelra Code…                                                                                                                                          │ 
+ │                                                                                                                                                            │ 
+ │                                                                                                                                                            │ 
+ │ @ context   Auto · local first                                                                                             Shift+Enter newline · Esc clear │ 
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+ Ready                                                                                                                                                          

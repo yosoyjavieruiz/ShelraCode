@@ -71,6 +71,14 @@ Before declaring work done run formatting, typecheck, focused tests, relevant in
 
 The week-one boundary is in `docs/WEEK-ONE.md`. Do not add V1/V2 product ideas before MVP acceptance passes.
 
+## Agent kernel
+
+The agent kernel (turn classification, tool contracts, agent loop, recovery,
+verification) is functional correctness, not a feature — it precedes visual
+work. Status and open gaps live in `docs/agent-kernel/STATUS.md`. Never
+remove or weaken a regression test to make a failure disappear; fix the
+root cause it caught instead.
+
 ## Completion
 
 Types compiling is not proof. Exercise the user-visible command or TUI flow and report exact evidence.

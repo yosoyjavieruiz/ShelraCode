@@ -1,0 +1,25 @@
+ ◆ LocalCode   ~/shelra · main                                  Local · Private 
+                                                                                
+  I’ll trace the refresh lifecycle, make the smallest safe change, then         
+  verify it.                                                                    
+                                                                                
+                                                                                
+                                                                                
+  Inspecting authentication                                                     
+                                                                                
+  │ READ      src/auth/session.ts                         12ms                  
+                                                                                
+  │ SEARCH    refreshToken                               18ms                   
+                                                                                
+  │ EDIT      src/auth/session.ts                       +8 −3                   
+                                                                                
+  └ TEST      auth suite                          running…                      
+                                                                                
+                                                                                
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │ Ask LocalCode…                                                             │ 
+ │                                                                            │ 
+ │ @ context        Auto · Local first             Enter ↵                    │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+ ● Inspecting repository                        Local · Qwen 2.5 Coder   Ctrl+C 
+

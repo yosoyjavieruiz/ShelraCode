@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                           LOCAL · PRIVATE 
+                                                                                
+ FREE CLOUD MESH                                                                
+ Providers  1 configured                                                        
+                                                                                
+                                                                                
+  OpenRouter                                                                    
+  ! degraded · local fallback                                                   
+  openrouter.ai                                                                 
+  Free eligibility: stale · Privacy: unknown                                    
+  Health data needs a fresh verification.                                       
+  Cloud routing paused                                                          
+     Retry provider health                                                      
+     Recheck free capacity and privacy                                          
+     Use local route                                                            
+     Keep inference on the local runtime                                        
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ● Provider health needs attention                 LOCAL · $0 · private  Ctrl+P 
+

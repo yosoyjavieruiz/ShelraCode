@@ -1,0 +1,61 @@
+ ◈ LocalCode ~/shelra · main                                                                                                                                                     AUTO · LOCAL · PRIVATE 
+                                                                                                                                                                                                        
+ WORKSPACE PREFERENCES                                                                                                                                                                                  
+ Settings                                                                                                                                                                                               
+                                                                                                                                                                                                        
+ Obsidian Violet                                                                                                                                                                                        
+                                                                                                                                                                                                        
+ Filter settings…                                                                                                                                                                                       
+                                                                                                                                                                                                        
+ > Appearance          SETTINGS · 11 settings · ↑↓ select · Enter change · ↓ scroll                                                                                                                     
+                                                                                                                                                                                                        
+   Layout              APPEARANCE                                                                                                                                                                       
+                        ● Theme                                                                                                                                                        Obsidian Violet  
+   Interaction                                                                                                                                                                                          
+                          Accent                                                                                                                                                      Violet · #8B5CF6  
+   Policy                                                                                                                                                                                               
+                          Interface density                                                                                                                                                comfortable  
+   Privacy                                                                                                                                                                                              
+                          Motion                                                                                                                                                                System  
+                                                                                                                                                                                                        
+                       POLICY                                                                                                                                                                           
+                          Repository privacy                                                                                                                                                   private  
+                                                                                                                                                                                                        
+                          Routing mode                                                                                                                                                     strict-zero  
+                                                                                                                                                                                                        
+                          Permission mode                                                                                                                                                         EDIT  
+                                                                                                                                                                                                        
+                       LAYOUT                                                                                                                                                                           
+                          Secondary chrome                                                                                                                              Conversation-first · transient  
+                                                                                                                                                                                                        
+                       INTERACTION                                                                                                                                                                      
+                          Tool activity                                                                                                                                 Grouped · collapsed by default  
+                                                                                                                                                                                                        
+                          Keybindings                                                                                                                                         Default · Ctrl+P palette  
+                                                                                                                                                                                                        
+                       PRIVACY                                                                                                                                                                          
+                          Telemetry                                                                                                                                                                Off  
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+ ● Settings ready                                                                                                                                      LOCAL · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

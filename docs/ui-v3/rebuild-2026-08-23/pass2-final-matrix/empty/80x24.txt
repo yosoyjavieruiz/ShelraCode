@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                           LOCAL · PRIVATE 
+                                                                                
+                                                                                
+   ◈                                                                            
+                                                                                
+   Intelligence that runs your way.                                             
+                                                                                
+   Local · Free · Private                                                       
+                                                                                
+   PROJECT  shelra · main                                                       
+   HARDWARE Detecting machine…                                                  
+                                                                                
+   PATH  Local → Free → Ask · 0 free providers                                  
+                                                                                
+   Ctrl+P commands · / slash actions                                            
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ┌────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode anything...                                                  │ 
+ │ Enter send  Shift+Enter newline  Esc clear                                 │ 
+ └────────────────────────────────────────────────────────────────────────────┘ 
+ ● Ready · local-first · strict-zero                                     Ctrl+P 
+

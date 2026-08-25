@@ -1,0 +1,61 @@
+                                                                                                                                                                                                        
+                                                  ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐                                                  
+                                                  │                                                                                                  │                                                  
+                                                  │ M Models · Choose model                                                                          │                                                  
+                                                  │ Search models...                                                                                 │                                                  
+                                                  │ AUTO                                                                                             │                                                  
+                                                  │  > Auto  local first · ask before paid                                                           │                                                  
+                                                  │ LOCAL                                                                                            │                                                  
+                                                  │    Qwen Coder 7B                                                                      LM Studio  │                                                  
+                                                  │    Qwen 2.5 Coder 7B                                                                     Ollama  │                                                  
+                                                  │ FREE CLOUD                                                                                       │                                                  
+                                                  │    Llama 3.3 70B                                                                           groq  │                                                  
+                                                  │ Up/Down select Enter choose Esc close                                                            │                                                  
+                                                  │                                                                                                  │                                                  
+                                                  └──────────────────────────────────────────────────────────────────────────────────────────────────┘                                                  
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+

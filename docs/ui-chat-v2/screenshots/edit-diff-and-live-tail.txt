@@ -1,0 +1,26 @@
+                                                                                                    
+ You                                                                                                
+ Fix the token refresh race and run the auth tests.                                                 
+                                                                                                    
+ Shelra Code                                                                                        
+                                                                                                    
+ I'll patch the refresh guard and verify.                                                           
+                                                                                                    
+ └ Updating and verifying changes · 2 actions                                                       
+  ├─ EDIT    src/auth/session.ts                                                        +2 −1 · 6ms 
+      - if (token.expired) {                                                                        
+      + if (token.expired && !refreshing) {                                                         
+      +   refreshing = true;                                                                        
+          return null;                                                                              
+        }                                                                                           
+        refreshToken();                                                                             
+  └─ TEST    bun test auth                                                                 running… 
+      PASS auth/login                                                                               
+      PASS auth/logout                                                                              
+      RUNS auth/refresh                                                                             
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    

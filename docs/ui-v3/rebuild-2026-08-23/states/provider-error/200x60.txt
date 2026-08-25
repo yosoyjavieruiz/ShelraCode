@@ -1,0 +1,61 @@
+ ◈ LocalCode ~/shelra · main                                                                                                                                                     AUTO · LOCAL · PRIVATE 
+                                                                                                                                                                                                        
+ FREE CLOUD MESH                                                                                                                                                                                        
+ Providers  1 configured                                                                                                                                                                                
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+  OpenRouter                                                                                                                                                                                            
+  ! degraded · local fallback                                                                                                                                                                           
+  openrouter.ai                                                                                                                                                                                         
+  Free eligibility: stale · Privacy: unknown                                                                                                                                                            
+  Health data needs a fresh verification.                                                                                                                                                               
+  Cloud routing paused · Ctrl+P Retry provider health · Ctrl+X M use local                                                                                                                              
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+ ● Provider health needs attention                                                                                                                     LOCAL · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

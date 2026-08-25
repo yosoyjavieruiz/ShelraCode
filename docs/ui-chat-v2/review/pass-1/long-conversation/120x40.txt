@@ -1,0 +1,40 @@
+ ◆ ShelraCode   ~/shelra · main                                                                         Local · Private 
+    ShelraCode                                                                                                          
+                                                                                                                        
+    I'll inspect the session lifecycle first.                                                                           
+                                                                                                                        
+    You                                                                                                                 
+    Follow-up question 1: keep the repository evidence in view.                                                         
+                                                                                                                        
+    ShelraCode                                                                                                          
+                                                                                                                        
+    Turn 1 is complete; the relevant evidence remains stable.                                                           
+                                                                                                                        
+    You                                                                                                                 
+    Follow-up question 2: keep the repository evidence in view.                                                         
+                                                                                                                        
+    ShelraCode                                                                                                          
+                                                                                                                        
+    Turn 2 is complete; the relevant evidence remains stable.                                                           
+                                                                                                                        
+    You                                                                                                                 
+    Follow-up question 3: keep the repository evidence in view.                                                         
+                                                                                                                        
+    ShelraCode                                                                                                          
+                                                                                                                        
+    Turn 3 is complete; the relevant evidence remains stable.                                                           
+                                                                                                                        
+    You                                                                                                                 
+    Follow-up question 4: keep the repository evidence in view.                                                         
+                                                                                                                        
+    ShelraCode                                                                                                          
+                                                                                                                        
+    Turn 4 is complete; the relevant evidence remains stable.                                                           
+                                                                                                                        
+   ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮   
+   │› Ask ShelraCode…                                                                                               │   
+   │                                                                                                                │   
+   │                                                                                                                │   
+   │ @ context   Auto · local first                                                 Shift+Enter newline · Esc clear │   
+   ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯   
+ Ready                                                                                                                  

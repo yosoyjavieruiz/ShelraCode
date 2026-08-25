@@ -1,0 +1,31 @@
+                                                                                                    
+  ┌──────────────────────────────────────────────────────────────────────────┐                      
+  │                                                                          │                      
+  │ M Models · Choose model                                                  │                      
+  │ Search models...                                                         │                      
+  │ AUTO                                                                     │                      
+  │  > Auto  local first · ask before paid                                   │                      
+  │ LOCAL                                                                    │                      
+  │    Qwen Coder 7B                                                       L │                      
+  │    Qwen 2.5 Coder 7B                                                   O │                      
+  │ FREE CLOUD                                                               │                      
+  │    Llama 3.3 70B                                                       g │                      
+  │ Up/Down select Enter choose Esc close                                    │                      
+  │                                                                          │                      
+  └──────────────────────────────────────────────────────────────────────────┘                      
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+

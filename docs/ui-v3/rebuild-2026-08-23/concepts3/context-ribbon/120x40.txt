@@ -1,0 +1,41 @@
+ ◈ LocalCode ~/shelra · main                                                                     AUTO · LOCAL · PRIVATE 
+  ACTIVE TASK authentication session race                                                               LOCAL · 0 cost  
+                                                                                                                        
+   You                                                                                                                  
+   Fix the authentication session race and run tests.                                                                   
+                                                                                                                        
+   LocalCode                                                                                                            
+   I’ll inspect the session lifecycle, then verify the smallest safe change.                                            
+                                                                                                                        
+   > ✓ READ + SEARCH · 3 actions · Enter to expand                                                                      
+                                                                                                                        
+   Focus transcript · PageUp/PageDown review · Ctrl+P commands                                                          
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+  ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐  
+  │ Ask LocalCode anything...                                                                                        │  
+  │                                                                                                                  │  
+  │                                                                                                                  │  
+  └─@─context──AUTO──LOCAL-FIRST────Enter─send──Shift+Enter─newline──────────────────────────────────────────────────┘  
+ ● Inspecting session lifecycle                                        LOCAL · Qwen Coder 7B · ctx 18k/32k · $0 · pr... 
+

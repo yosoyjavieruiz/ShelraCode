@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                           LOCAL · PRIVATE 
+                                                                                
+ Conversation  workspace                                                        
+                                                                                
+  You                                                                           
+  Review the authentication session lifecycle                                   
+                                                                                
+  LocalCode                                                                     
+  I found a refresh-token race to verify next.                                  
+                                                                                
+  > ✓ READ + TEST · 2 actions · Enter to expand                                 
+                                                                                
+  Ctrl+Up/Down review · /help commands                                          
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Theasession lifecycle is still being verified...                               
+                                                                                
+                                                                                
+                                                                                
+ ┌────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode anything...                                                  │ 
+ ● Ready · local-first · strict-zero               LOCAL · $0 · private  Ctrl+P 
+

@@ -1,0 +1,50 @@
+ ◆ LocalCode   ~/shelra · main                                                                                                                  Local · Private 
+                                                                                                                                                                
+                   You                                                                                                                                          
+                   Review the authentication session lifecycle                                                                                                  
+                                                                                                                                                                
+                   LocalCode                                                                                                                                    
+                                                                                                                                                                
+                   I found a refresh-token race to verify next.                                                                                                 
+                                                                                                                                                                
+                   └ READ    src/auth/session.ts                                                                             completed · 12ms                   
+                                                                                                                                                                
+                   └ TEST    auth.test.ts                                                                                           31 passed                   
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                  ›───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────                  
+                   Ask LocalCode…                                                                                                                               
+                                                                                                                                                                
+                                                                                                                                                                
+                   @ context   Auto · local first                                                                                     Enter ↵                   
+ Ready                                                                                                                                                          

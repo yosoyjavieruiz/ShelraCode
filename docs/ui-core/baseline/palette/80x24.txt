@@ -1,0 +1,24 @@
+  COMMAND PALETTE  shelra · conversation                             Esc close  
+                                                                                
+  ┌──────────────────────────────────────────────────────────────────────────┐  
+  │                                                                          │  
+  │ ?  Search commands...                                                    │  
+  │ ------------------------------------------------------------------------ │  
+  │ NAVIGATION                                                               │  
+  │  > Open workspace                                                        │  
+  │    Command palette                                                       │  
+  │ SESSION                                                                  │  
+  │    New session                                                           │  
+  │    Sessions                                                              │  
+  │ MODELS                                                                   │  
+  │    Open Models                                                           │  
+  │                                                                          │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                

@@ -1,0 +1,40 @@
+ ◆ Shelra Code   ~/shelra · main                                                                        Local · Private 
+                                                                                                                        
+  You                                                                                                                   
+  Fix the token refresh race condition and run the auth tests.                                                          
+                                                                                                                        
+  Shelra Code                                                                                                           
+                                                                                                                        
+  I'll trace the refresh flow first.                                                                                    
+                                                                                                                        
+  ● · · Agent · Exploring repository                                                                                    
+  2s · Esc interrupt                                                                                                    
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │› Ask Shelra Code…                                                                                                  │ 
+ │                                                                                                                    │ 
+ │                                                                                                                    │ 
+ │ @ context   Auto · local first                                                                       Esc interrupt │ 
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+ Ready                                                                                                                  

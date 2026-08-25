@@ -1,0 +1,41 @@
+ ◆ LocalCode   ~/shelra · main                                                                          Local · Private 
+     You                                                                                                                
+                                                                                                                        
+     Fix the token refresh race condition and run the auth tests.                                                       
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+     LocalCode                                                                                                          
+                                                                                                                        
+     I’ll trace the refresh lifecycle, make the smallest safe change, then verify it.                                   
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+     Inspecting authentication                                                                                          
+                                                                                                                        
+     │ READ      src/auth/session.ts                         12ms                                                       
+                                                                                                                        
+     │ SEARCH    refreshToken                               18ms                                                        
+                                                                                                                        
+     │ EDIT      src/auth/session.ts                       +8 −3                                                        
+                                                                                                                        
+     └ TEST      auth suite                          running…                                                           
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+    ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────╮    
+    │ Ask LocalCode…                                                                                               │    
+    │                                                                                                              │    
+    │ @ context        Auto · Local first             Enter ↵                                                      │    
+    ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    
+ ● Inspecting repository                                                     Local · Qwen 2.5 Coder ctx 4k/32k   Ctrl+C 
+

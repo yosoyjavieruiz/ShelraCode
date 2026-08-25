@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                           LOCAL · PRIVATE 
+                                                                                
+ Conversation  workspace                                                        
+                                                                                
+  You                                                                           
+  Review the authentication session lifecycle                                   
+                                                                                
+  LocalCode                                                                     
+  I found a refresh-token race to verify next.                                  
+                                                                                
+  v ✓ READ + TEST · 5 actions                                                   
+     READ src/auth/session.ts completed · 12ms                                  
+     TEST auth.test.ts 31 passed                                                
+     READ src/auth/cookies.ts 8ms                                               
+     SEARCH refreshToken 28ms                                                   
+     EDIT src/auth/session.ts +8 -3                                             
+                                                                                
+  Ctrl+Up/Down review · /help commands                                          
+                                                                                
+ ┌────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode anything...                                                  │ 
+ │ Enter send  Shift+Enter newline  Esc clear                                 │ 
+ └────────────────────────────────────────────────────────────────────────────┘ 
+ ● Ready · local-first · strict-zero                                     Ctrl+P 
+

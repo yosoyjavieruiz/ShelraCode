@@ -1,0 +1,26 @@
+                                                                                                    
+ You                                                                                                
+ Show me the refresh guard function.                                                                
+                                                                                                    
+ ShelraCode                                                                                         
+                                                                                                    
+ Here's the guard:                                                                                  
+                                                                                                    
+  ts                                                                                                
+  function refreshGuard(token: Token): boolean {                                                    
+    if (token.expired && !refreshing) {                                                             
+      refreshing = true;                                                                            
+      return false;                                                                                 
+    }                                                                                               
+    return true;                                                                                    
+  }                                                                                                 
+                                                                                                    
+ It checks `token.expired` before continuing.                                                       
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    

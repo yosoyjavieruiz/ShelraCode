@@ -1,0 +1,31 @@
+                                                                                                    
+                                                                                                    
+            ┌──────────────────────────────────────────────────────────────────────────┐            
+            │                                                                          │            
+            │ ?Search commands...                                                      │            
+            │ ------------------------------------------------------------------------ │            
+            │ NAVIGATION                                                               │            
+            │  > Open workspaceCtrl+X C                                                │            
+            │    Command paletteCtrl+P                                                 │            
+            │ SESSION                                                                  │            
+            │    New session                                                           │            
+            │    SessionsCtrl+X S                                                      │            
+            │ MODELS                                                                   │            
+            │    Open Models                                                           │            
+            │    Switch modelCtrl+X M                                                  │            
+            │ Up/Down navigate Enter run Esc close                                     │            
+            │                                                                          │            
+            └──────────────────────────────────────────────────────────────────────────┘            
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+

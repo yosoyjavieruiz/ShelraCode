@@ -1,0 +1,41 @@
+ ◈ LocalCode ~/shelra · main                                                                     AUTO · LOCAL · PRIVATE 
+                                                                                                                        
+ MODEL CENTER                                                                                                           
+ Models  1 discovered                                                                                                   
+                                                                                                                        
+                                                                                                                        
+  Active                                                                                                         LOCAL  
+  Qwen Coder 7B                                                                                                         
+  LM Studio · healthy · 33k context                                                                                     
+                                                                                                                        
+                                                                                                                        
+ RECOMMENDED FOR THIS MACHINE                                                                                           
+                                                                                                                        
+ Active model is the current best fit for this workspace.                                                               
+                                                                                                                        
+ LOCAL                                                                                                                  
+                                                                                                                        
+ Active local model is shown above.                                                                                     
+                                                                                                                        
+ FREE CLOUD                                                                                                             
+                                                                                                                        
+ No verified free-cloud capacity is available right now.                                                                
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ● Models ready                                                 LOCAL · Qwen Coder 7B · ctx 0/32k · $0 · private  Ct... 
+

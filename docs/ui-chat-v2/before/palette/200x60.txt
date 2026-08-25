@@ -1,0 +1,60 @@
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                    ┌──────────────────────────────────────────────────────────────────────────────────────────────┐                                                    
+                                                    │                                                                                              │                                                    
+                                                    │ ?  Search commands...                                                                        │                                                    
+                                                    │ -------------------------------------------------------------------------------------------- │                                                    
+                                                    │ NAVIGATION                                                                                   │                                                    
+                                                    │  > Open workspace · Return to the active conversation                      Ctrl+X C          │                                                    
+                                                    │    Command palette · Search every available action                         Ctrl+P            │                                                    
+                                                    │ SESSION                                                                                      │                                                    
+                                                    │    New session · Start with a clean conversation                                             │                                                    
+                                                    │    Sessions · Browse recent workspaces                                     Ctrl+X S          │                                                    
+                                                    │    Resume selected task · Continue a saved task from the current worksp...                   │                                                    
+                                                    │ MODELS                                                                                       │                                                    
+                                                    │    Open Models · Browse local and free cloud models                                          │                                                    
+                                                    │    Switch model · Choose the model for the next task                       Ctrl+X M          │                                                    
+                                                    │    Providers · Inspect connections and health                              Ctrl+X P          │                                                    
+                                                    │    Retry provider health · Probe configured providers before cloud routing                   │                                                    
+                                                    │ ROUTING                                                                                      │                                                    
+                                                    │    Routing · Inspect the execution decision                                Ctrl+X R          │                                                    
+                                                    │    Usage · View free capacity                                              Ctrl+X Q          │                                                    
+                                                    │    Privacy · Review repository privacy policy                              Ctrl+X V          │                                                    
+                                                    │ Up/Down navigate Enter run Esc close                                                         │                                                    
+                                                    │                                                                                              │                                                    
+                                                    └──────────────────────────────────────────────────────────────────────────────────────────────┘                                                    
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        

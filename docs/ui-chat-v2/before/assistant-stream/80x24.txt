@@ -1,0 +1,24 @@
+ ◆ Shelra Code   ~/shelra · main                                Local · Private 
+                                                                                
+  You                                                                           
+  Fix the token refresh race condition and run the auth tests.                  
+  Shelra Code                                                                   
+  I'll inspect the session lifecycle first. The refresh path is still being     
+  verified…                                                                     
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ╭────────────────────────────────────────────────────────────────────────────╮ 
+ │› Ask Shelra Code…                                                          │ 
+ │                                                                            │ 
+ │ @ context   Auto · local first             Shift+Enter newline · Esc clear │ 
+ ╰────────────────────────────────────────────────────────────────────────────╯ 
+ Ready                                                                          

@@ -1,29 +1,54 @@
 # Week One
 
-## Day 1: foundation and control plane
+The one-week scope was executed as a single vertical slice. The current
+checkout contains the following delivered boundaries.
 
-Done in the initial slice: repository control plane, OpenTUI skill/docs, strict TypeScript/Bun setup, domain contracts, persistence foundation, events, docs, agents, and local test/smoke scripts.
+## Day 1 - foundation and control plane
 
-## Day 2: hardware and local models
+Done: Bun/TypeScript/OpenTUI bootstrap, strict compiler settings, lockfile,
+root and nested instructions, Codex agents, repository skills, docs, SQLite
+migrations, CLI parsing and local smoke scripts.
 
-Implement llmfit JSON integration, fallback system inspection, endpoint discovery, local model normalization, setup/doctor, and local model center.
+## Day 2 - hardware and local models
 
-## Day 3: provider mesh
+Done: llmfit JSON integration with fallback detection, local OpenAI-compatible
+endpoint discovery, Ollama/LM Studio/llama.cpp detection, normalized local
+model candidates and setup/doctor/models views.
 
-Implement normalized OpenAI-compatible/Groq/OpenRouter adapters, quota parsing, health/circuit breaker, freshness, and provider/quota centers. Cloudflare/Gemini remain policy-gated; Zen is paid-only.
+## Day 3 - provider mesh
 
-## Day 4: agent
+Done: normalized OpenAI-compatible transport, Groq/OpenRouter provider
+boundaries, paid-only Zen boundary, streaming/tool-call aggregation, quota
+headers, freshness metadata, provider health and circuit breaker. Cloudflare
+and Gemini remain deferred and are not advertised.
 
-Implement context, tools, permission modes, streaming loop, cancellation, checkpoint and conflict-safe rollback with fake-provider integration coverage.
+## Day 4 - coding agent
 
-## Day 5: routing
+Done: repository context, bounded file/search/shell/Git/test tools, PLAN/EDIT/
+AUTO permission classification, cancellation propagation, streaming agent loop,
+deterministic verification, checkpoints and conflict-safe rollback.
 
-Implement task/sensitivity analysis, path/content scanner, strict-zero gates, scoring, fallback, and route explanations with privacy and zero-spend E2E.
+## Day 5 - intelligent routing
 
-## Day 6: TUI productization
+Done: deterministic task analysis, sensitivity scanning, path/content policy,
+privacy-before-cost gates, strict-zero exclusion, quota headroom, scoring,
+structured explanations and circuit-aware fallback tests.
 
-Implement responsive shell, transcript, composer, dialogs, palette, setup/doctor states, keyboard/focus/cancellation behavior, and real PTY smoke.
+## Day 6 - TUI productization
 
-## Day 7: release proof
+Done: OpenTUI + Solid shell, responsive width behavior, transcript, composer,
+slash-searchable command palette, live models/providers/quota/privacy/doctor/
+context/plan/diff/routing centers, streaming task events, Ctrl+K, Escape and
+Ctrl+C lifecycle behavior.
 
-Run clean install, format, typecheck, unit/integration/E2E/TUI/doctor checks, inspect current-source build, fix failures, update docs and changelog, and report only evidenced capabilities.
+## Day 7 - release proof
+
+Done: frozen-lockfile install, format, typecheck, 51-test suite, source and
+bundle smoke, real PTY source/bundle launch, local Qwen tool journey, terminal
+restoration, docs and changelog.
+
+## Deferred
+
+Standalone native executable packaging, Cloudflare/Gemini adapters, account
+specific live-provider verification, advanced model benchmarking, richer
+dialogs and V1 memory/decomposition remain outside the evidenced v0.1 slice.

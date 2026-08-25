@@ -1,0 +1,31 @@
+ ◈ LocalCode ~/shelra                                                        AUTO · LOCAL · PRIVATE 
+                                                                                                    
+ FREE CLOUD MESH                                                                                    
+ Providers  2 configured                                                                            
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  Groq                                                                                              
+  ✓ connected                                                                                       
+  api.groq.com                                                                                      
+  Free eligibility: verified_free · Privacy: zdr confirmed                                          
+  Free capacity verified recently.                                                                  
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  OpenRouter                                                                                        
+  ! degraded · local fallback                                                                       
+  openrouter.ai                                                                                     
+  Free eligibility: stale · Privacy: unknown                                                        
+  Health data needs a fresh verification.                                                           
+  Cloud routing paused                                                                              
+   › Retry provider health                                                                          
+     Recheck free capacity and privacy                                                              
+     Use local route                                                                                
+     Keep inference on the local runtime                                                            
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ ● Ready · local-first · strict-zero                                            LOCAL · $0 · pri... 
+

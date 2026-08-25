@@ -1,20 +1,32 @@
 # TUI
 
-The interface is calm, dense, keyboard-first, and state-explicit. Spacing and grouping carry hierarchy; colors reinforce but do not define privacy, cost, health, or route state.
+LocalCode's implemented terminal experience is documented in
+[`docs/UI-V2.md`](UI-V2.md). Its visual system is Obsidian Violet: a true-black
+canvas, deep neutral surfaces, amethyst focus and semantic state colors.
 
 ## Layout
 
-Top bar: LocalCode, repository/branch, selected route/model, privacy.  
-Main: transcript and compact tool rows.  
-Composer: focused input with command hint.  
-Status: plan/context/cost/quota/test summary.
+The shell has a top bar, responsive navigation, a conversation/center viewport,
+an optional task inspector, a multiline composer and a quiet status bar.
 
-At narrow widths the top bar shortens metadata, optional side content disappears, transcript rows stack, and the composer remains usable. The smoke matrix is 80x24, 100x30, 120x40, and 160x50.
+The layout profile is tested at 80x24, 100x30, 120x40 and 160x50. It removes
+secondary metadata before hiding task state, model/route, privacy, errors,
+approvals or the composer.
 
 ## Interaction
 
-Enter submits; Ctrl+K opens the command palette; Escape closes the top overlay or cancels an active task; Ctrl+C cancels work and exits only when idle; `/` commands open centers. Dialogs have explicit focus and approval states.
+Enter submits; Shift+Enter creates a composer newline. `Ctrl+P` opens the unified
+command palette. `Ctrl+X` is the timed OpenTUI leader for navigation commands.
+Escape closes the highest overlay or returns to idle. Ctrl+C cancels active work
+and exits only while idle. Slash commands and palette entries share one registry.
 
-## Components
+## Rendering
 
-The current tree uses `AppShell`, `TopBar`, `Transcript`, `ToolCallRow`, `Composer`, `StatusBar`, `CommandPalette`, and center dialogs. Business services remain outside them. Verbose tool output is collapsed by default; streaming text and route events append incrementally.
+The transcript uses OpenTUI `ScrollBox` with sticky-bottom behavior and viewport
+culling. Assistant prose uses OpenTUI Markdown, active streaming remains
+incremental, and Changes uses the OpenTUI Diff renderer. Tool, route,
+verification and error events are compact semantic rows rather than raw logs.
+
+Core services remain outside presentation components. The launcher owns the
+OpenTUI keymap and renderer lifecycle; the renderer is destroyed on exit so the
+terminal is restored.

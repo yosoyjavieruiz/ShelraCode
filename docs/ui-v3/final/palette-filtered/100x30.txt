@@ -1,0 +1,31 @@
+ ◈ LocalCode ~/shelra                                                            AUTO LOCAL PRIVATE 
+                                                                                                    
+  ┌──────────────────────────────────────────────────────────────────────────────────────────────┐  
+  │◈                                                                                             │  
+  │ ⌕model                                                                                       │  
+  │I────────────────────────────────────────────────                                             │  
+  │                                                                                              │  
+  │LModels Free · Private                                                                        │  
+  │  › Open Models                                                                               │  
+  │PROJSwitchhmodel· main                                                             Ctrl+X M   │  
+  │HARDWARE Detecting machine…                                                                   │  
+  └──────────────────────────────────────────────────────────────────────────────────────────────┘  
+   PATH  Local → Free → Ask · 0 free providers                                                      
+                                                                                                    
+   Ctrl+P commands · / slash actions                                                                
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ ┌────────────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode anything…                                                                        │ 
+ │                                                                                                │ 
+ └─@─context─AUTO─LOCAL-FIRST────────────────────────Enter─send─·─Shift+Enter─newline─·─Esc─clear─┘ 
+ ● Command palette                                                     LOCAL · $0 · private  Ctrl+P 
+

@@ -1,0 +1,41 @@
+ ◈ LocalCode ~/shelra · main                                                                         AUTO LOCAL PRIVATE 
+                                                                                                                        
+            ┌──────────────────────────────────────────────────────────────────────────────────────────────┐            
+   ◈        │                                                                                              │            
+            │ ⌕Search commands…                                                                            │            
+   Intellige│c────────────────────────────────────────────────                                             │            
+            │ Navigation                                                                                   │            
+   Local · F│ee›·Openvworkspace  Return to the active conversation                              Ctrl+X C   │            
+            │    Command palette  Search every available action                                   Ctrl+P   │            
+   PROJECT  │helra · main                                                                                  │            
+   HARDWARE │eSession machine…                                                                             │            
+            │    New session  Start with a clean conversation                                              │            
+   READY PAT│    Sessions  Browse recent workspaces                                             Ctrl+X S   │            
+   Local → V│rified free cloud → Stop & ask                                                                │            
+   Paid auto│rModels disabled · 0 free providers connected                                                 │            
+            │    Open Models  Browse local and free cloud models                                           │            
+   TRY      │    Switch model  Choose the model for the next task                               Ctrl+X M   │            
+   › Explain│thisProvidersryInspect connections and health                                      Ctrl+X P   │            
+   › Find fa│ling tests                                                                                    │            
+   › Review │nRoutinged changes                                                                            │            
+            │    Routing  Inspect the execution decision                                        Ctrl+X R   │            
+   Press Ctr└────Usage──View─free─capacity──────────────────────────────────────────────────────Ctrl+X─Q───┘            
+                                                                                                                        
+              ↑↓ navigate Enter run Esc close                                                                           
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode anything…                                                                                            │ 
+ │                                                                                                                    │ 
+ └─@─context─AUTO─LOCAL-FIRST────────────────────────────────────────────Enter─send─·─Shift+Enter─newline─·─Esc─clear─┘ 
+ ● Command palette                                                             LOCAL · ctx 0/32k · $0 · private  Ctrl+P 
+

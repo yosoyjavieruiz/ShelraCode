@@ -1,0 +1,30 @@
+ ◆ ShelraCode   ~/shelra · main                                                     Local · Private 
+                                                                                                    
+    You                                                                                             
+    Fix the token refresh race condition and run the auth tests.                                    
+                                                                                                    
+    ShelraCode                                                                                      
+                                                                                                    
+    I'll inspect the session lifecycle first.                                                       
+                                                                                                    
+    Plan · 1/5                                                                                      
+    ✓ Inspect the current session flow                                                              
+    ● Fix the refresh fallback                                                                      
+    ○ Add a regression test                                                                         
+    ○ Run the relevant validation                                                                   
+    ○ Review the final diff                                                                         
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+   ╭────────────────────────────────────────────────────────────────────────────────────────────╮   
+   │› Ask ShelraCode…                                                                           │   
+   │                                                                                            │   
+   │                                                                                            │   
+   │ @ context   Auto · local first                             Shift+Enter newline · Esc clear │   
+   ╰────────────────────────────────────────────────────────────────────────────────────────────╯   
+ Ready                                                                                              

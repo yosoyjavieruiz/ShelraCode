@@ -46,18 +46,19 @@ export function parseCliArgs(argv: readonly string[]): ParsedCliArgs {
   return { command: first as CliCommand, args: rest };
 }
 
-export const cliUsage = `LocalCode — local-first coding agent
+export const cliUsage = `LocalCode - local-first coding agent
 
 Usage:
   localcode [command]
 
 Commands:
-  setup       inspect hardware, runtimes, providers and policy
+  setup       reopen onboarding intentionally
   doctor      print safe diagnostics
+              use --agent for model/tool capability diagnostics
   models      list normalized model state
   providers   list provider readiness and health
   config      show effective policy configuration
-  (no args)   open the interactive TUI
+  (no args)   onboarding on first run, then open the interactive TUI
 
 Global flags:
   -h, --help       show this help

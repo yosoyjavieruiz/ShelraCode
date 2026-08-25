@@ -1,0 +1,51 @@
+ ◈ LocalCode ~/shelra · main                                                                                                             AUTO · LOCAL · PRIVATE 
+                                                                                                                                                                
+                        Conversation  workspace                                                                                                                 
+                                                                                                                                                                
+                         You                                                                                                                                    
+                         Review the authentication session lifecycle                                                                                            
+                                                                                                                                                                
+                         LocalCode                                                                                                                              
+                         I found a refresh-token race to verify next.                                                                                           
+                                                                                                                                                                
+                         > ✓ READ + TEST · 2 actions · Enter to expand                                                                                          
+                                                                                                                                                                
+                         Focus transcript · PageUp/PageDown review · Ctrl+P commands                                                                            
+                                                                                                                                                                
+                         LocalCode · streaming                                                                                                                  
+                         The session lifecycle is still being verified...                                                                                       
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐                                               
+ │ Ask LocalCode anything...                                                                                    │                                               
+ │ @ context  AUTO  LOCAL-FIRST    Enter send  Shift+Enter newline                                              │                                               
+ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘                                               
+ ● Ready · local-first · strict-zero                                                                           LOCAL · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

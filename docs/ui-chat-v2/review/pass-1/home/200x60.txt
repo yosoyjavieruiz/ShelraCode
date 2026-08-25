@@ -1,0 +1,60 @@
+ ◆ ShelraCode   ~/shelra · main                                                                                                                                                         Local · Private 
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                               ◆ ShelraCode                                                                                             
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                        Local-first coding agent                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                shelra · main · Local-first routing ready                                                                               
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                      Try                                                                                                               
+                                                                                        Review my current changes                                                                                       
+                                                                                        Run tests for changed files                                                                                     
+                                                                                        Find likely regressions                                                                                         
+                                                                               ↑↓ browse · Enter to run · Ctrl+P commands                                                                               
+                              ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮                              
+                              │› Ask ShelraCode…                                                                                                                         │                              
+                              │                                                                                                                                          │                              
+                              │                                                                                                                                          │                              
+                              │ @ context   Auto · local first                                                                           Shift+Enter newline · Esc clear │                              
+                              ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯                              
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+ Ready                                                                                                                                                                                                  

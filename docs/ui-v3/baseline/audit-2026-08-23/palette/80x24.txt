@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                        AUTO LOCAL PRIVATE 
+                                                                                
+  ┌──────────────────────────────────────────────────────────────────────────┐  
+  │◈                                                                         │  
+  │ ⌕Search commands…                                                        │  
+  │I────────────────────────────────────────────────                         │  
+  │ Navigation                                                               │  
+  │Lo›aOpenFworkspacevate                                         Ctrl+X C   │  
+  │    Command palette                                              Ctrl+P   │  
+  │PROJECT  shelra · main                                                    │  
+  │HSession Detecting machine…                                               │  
+  │    New session                                                           │  
+  │PATHSessions→ Free → Ask · 0 free providers                    Ctrl+X S   │  
+  │                                                                          │  
+  │CModelscommands · / slash actions                                         │  
+  │    Open Models                                                           │  
+  │    Switch model                                               Ctrl+X M   │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+ ┌────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode anything…                                                    │ 
+ │                                                                            │ 
+ └─@ctx─·─AUTO─·─LOCAL───────────Enter─send─·─Shift+Enter─newline─·─Esc─clear─┘ 
+ ● Command palette                                 LOCAL · $0 · private  Ctrl+P 
+

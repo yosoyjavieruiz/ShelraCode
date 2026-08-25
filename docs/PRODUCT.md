@@ -14,7 +14,12 @@ Local when possible. Free cloud when useful. Paid only when the user explicitly 
 
 ## MVP promise
 
-`localcode setup` discovers the machine, local runtimes, model fit, provider readiness, privacy policy, and routing mode. `localcode` opens a keyboard-first TUI where the user can inspect the repository, route a task, use safe tools, see route explanations, verify changes, and roll back LocalCode-owned edits safely.
+The first `localcode` launch discovers the machine, local runtimes, model fit,
+provider readiness, privacy policy, and routing mode, then continues directly
+into the keyboard-first TUI. `localcode setup` reopens that onboarding flow
+intentionally. Inside the workspace the user can inspect the repository, route
+a task, use safe tools, see route explanations, verify changes, and roll back
+LocalCode-owned edits safely.
 
 ## Core flows
 

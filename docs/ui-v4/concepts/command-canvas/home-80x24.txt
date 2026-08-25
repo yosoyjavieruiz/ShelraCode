@@ -1,0 +1,25 @@
+ ◆ LocalCode   ~/shelra · main                                  Local · Private 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                       ◆                                        
+                                   LocalCode                                    
+                            Your models. Your code.                             
+                                                                                
+ │                                                                              
+ │ Ask LocalCode…                                                               
+ │                                                                              
+ │ @ context        Auto · Local first             Enter ↵                      
+ │                                                                              
+                                                                                
+  Review changes                                            Find failing tests  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Ready                                                   Local · Qwen 2.5 Coder 
+

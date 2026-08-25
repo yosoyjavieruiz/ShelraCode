@@ -1,0 +1,51 @@
+ ◈ LocalCode ~/shelra · main                                                                                                             AUTO · LOCAL · PRIVATE 
+                                                                                                                                                                
+PREFERENCES                                                                                                                                                     
+                                                                                                                                                                
+                                                                                                                                                                
+iolet                                                                                                                                                           
+                                                                                                                                                                
+tings…                                                                                                                                                          
+                                                                                                                                                                
+ce          SETTINGS · 11 settings · ↑↓ select · Enter change · ↓ scroll                                                                                        
+                                                                                                                                                                
+            APPEARANCE                                                                                                                                          
+             ● Theme                                                                                                                                      Obsidi
+ion                                                                                                                                                             
+               Accent                                                                                                                                    Violet 
+                                                                                                                                                                
+               Interface density                                                                                                                              co
+                                                                                                                                                                
+               Motion                                                                                                                                           
+                                                                                                                                                                
+            POLICY                                                                                                                                              
+               Repository privacy                                                                                                                               
+                                                                                                                                                                
+               Routing mode                                                                                                                                   st
+                                                                                                                                                                
+               Permission mode                                                                                                                                  
+                                                                                                                                                                
+            LAYOUT                                                                                                                                              
+               Secondary chrome                                                                                                            Conversation-first · 
+                                                                                                                                                                
+            INTERACTION                                                                                                                                         
+               Tool activity                                                                                                               Grouped · collapsed b
+                                                                                                                                                                
+               Keybindings                                                                                                                       Default · Ctrl+
+                                                                                                                                                                
+            PRIVACY                                                                                                                                             
+               Telemetry                                                                                                                                        
+                                                                                                                                                                
+            ↓ more settings below                                                                                                                               
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+ ● Settings ready                                                                                              LOCAL · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

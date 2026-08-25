@@ -1,0 +1,50 @@
+ ◆ LocalCode   ~/shelra · main                                                                                                                  Local · Private 
+                                                                                                                                                                
+                                                                                                                                                                
+                   ◆                                                                                                                                            
+                   LocalCode                                                                                                                                    
+                   Maximum intelligence. Your way.                                                                                                              
+                                                                                                                                                                
+                                                                                                                                                                
+                   Local-first routing ready                                                                                                                    
+                                                                                                                                                                
+                                                                                                                                                                
+                     Review my current changes                                                                                                                  
+                     Run tests for changed files                                                                                                                
+                     Find likely regressions                                                                                                                    
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                   Ctrl+J suggestions · Ctrl+P commands                                                                                                         
+                  ›───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────                  
+                   Ask LocalCode…                                                                                                                               
+                                                                                                                                                                
+                                                                                                                                                                
+                   @ context   Auto · local first                                                             Shift+Enter newline · Esc clear                   
+ Ready                                                                                                                                                          

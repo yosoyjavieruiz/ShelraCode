@@ -1,0 +1,24 @@
+ ◆ LocalCode   ~/shelra · main                                  Local · Private 
+                                                                                
+  You                                                                           
+  Fix the token refresh race condition and run the auth tests.                  
+                                                                                
+  LocalCode                                                                     
+                                                                                
+  I'll inspect the session lifecycle first.                                     
+                                                                                
+  ◆ Local · Qwen 2.5 Coder 1.5B                                                 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ›───────────────────────────────────────────────────────────────────────────── 
+  Ask LocalCode…                                                                
+                                                                                
+  @ context   Auto · local first                                       Enter ↵  
+ Ready                                                                          

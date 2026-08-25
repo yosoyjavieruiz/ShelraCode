@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                        AUTO LOCAL PRIVATE 
+                                                                                
+ Conversation  workspace                                                        
+                                                                                
+  You                                                                           
+  Review the authentication session lifecycle                                   
+                                                                                
+  LocalCode                                                                     
+  I found a refresh-token race to verify next.                                  
+                                                                                
+  › ✓ READ SRC/AUTH/SESSION.TS · 2 actions · Enter to expand                    
+                                                                                
+  Type /help for commands.                                                      
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ┌────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode anything…                                                    │ 
+ │                                                                            │ 
+ └─@ctx─·─AUTO─·─LOCAL───────────Enter─send─·─Shift+Enter─newline─·─Esc─clear─┘ 
+ ● Ready · local-first · strict-zero               LOCAL · $0 · private  Ctrl+P 
+

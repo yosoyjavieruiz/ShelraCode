@@ -1,4 +1,13 @@
 import { cliUsage, parseCliArgs } from "./cli/args.js";
+import { hasRepositorySetup } from "./config/settings.js";
+import {
+  runConfig,
+  runAgentDoctor,
+  runDoctor,
+  runModels,
+  runProviders,
+  runSetup,
+} from "./cli/commands.js";
 
 const VERSION = "0.1.0";
 
@@ -14,17 +23,33 @@ async function main(): Promise<void> {
       return;
     case "tui": {
       const { launchTui } = await import("./tui/launch.js");
-      await launchTui();
+      const initialScreen = (await hasRepositorySetup(process.cwd()))
+        ? "conversation"
+        : "setup";
+      await launchTui(initialScreen);
       return;
     }
-    case "setup":
+    case "setup": {
+      if (parsed.args.includes("--non-interactive")) {
+        await runSetup(process.cwd(), parsed.args);
+        return;
+      }
+      const { launchTui } = await import("./tui/launch.js");
+      await launchTui("setup");
+      return;
+    }
     case "doctor":
+      if (parsed.args.includes("--agent")) await runAgentDoctor(process.cwd());
+      else await runDoctor(process.cwd());
+      return;
     case "models":
+      await runModels(process.cwd());
+      return;
     case "providers":
+      await runProviders(process.cwd());
+      return;
     case "config":
-      console.log(
-        `${parsed.command} is being wired into the LocalCode control plane.`,
-      );
+      await runConfig(process.cwd());
       return;
   }
 }

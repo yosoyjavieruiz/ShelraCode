@@ -1,0 +1,50 @@
+ ◆ LocalCode   ~/shelra · main                                                                                                                   Free · Private 
+                                                                                                                                                                
+                   You                                                                                                                                          
+                   Fix the token refresh race condition and run the auth tests.                                                                                 
+                                                                                                                                                                
+                   LocalCode                                                                                                                                    
+                                                                                                                                                                
+                   I'll inspect the session lifecycle first.                                                                                                    
+                                                                                                                                                                
+                   ◆ Free · Groq · Llama 3.3 70B                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                  ›───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────                  
+                   Ask LocalCode…                                                                                                                               
+                                                                                                                                                                
+                                                                                                                                                                
+                   @ context   Auto · free cloud                                                                                      Enter ↵                   
+ Ready                                                                                                                         Free · Llama 3.3 70B   ctx 0/32k 

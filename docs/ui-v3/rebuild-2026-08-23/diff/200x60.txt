@@ -1,0 +1,61 @@
+ ◈ LocalCode ~/shelra · main                                                                                                                                                     AUTO · LOCAL · PRIVATE 
+                                                                                                                                                                                                        
+EVIEW                                                                                                                                                                                                   
+                                                                                                                                                                                                        
+hanges  working tree                                                                                                                                                                                    
+                                                                                                                                                                                                        
+rc/auth/session.ts                                                                                                                                                                   +2 added · -1 remov
+                                                                                                                                                                                                        
+1 - old session token                                                                                                                                                                                   
+1 + new session token                                                                                                                                                                                   
+2 + await refreshToken();                                                                                                                                                                               
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+                                                                                                                                                                                                        
+sc back · Ctrl+P actions                                                                                                                                                                                
+                                                                                                                                                                                                        
+ ● Changes · working tree                                                                                                                              LOCAL · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

@@ -1,0 +1,51 @@
+ ◈ LocalCode ~/shelra · main                                                                                                             AUTO · LOCAL · PRIVATE 
+                                                                                                                                                                
+ FREE CLOUD MESH                                                                                                                                                
+ Providers  2 configured                                                                                                                                        
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+  Groq                                                                                                                                                          
+  ✓ connected                                                                                                                                                   
+  api.groq.com                                                                                                                                                  
+  Free eligibility: verified_free · Privacy: zdr confirmed                                                                                                      
+  Free capacity verified recently.                                                                                                                              
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+  OpenRouter                                                                                                                                                    
+  ! degraded · local fallback                                                                                                                                   
+  openrouter.ai                                                                                                                                                 
+  Free eligibility: stale · Privacy: unknown                                                                                                                    
+  Health data needs a fresh verification.                                                                                                                       
+  Cloud routing paused · Ctrl+P Retry provider health · Ctrl+X M use local                                                                                      
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+ ● Ready · local-first · strict-zero                                                                           LOCAL · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

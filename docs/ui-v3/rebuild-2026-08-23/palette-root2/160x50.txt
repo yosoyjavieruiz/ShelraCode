@@ -1,0 +1,51 @@
+ ◈ LocalCode ~/shelra · main                                                                                                             AUTO · LOCAL · PRIVATE 
+                                                                                                                                                                
+                                ┌──────────────────────────────────────────────────────────────────────────────────────────────┐                                
+                                │                                                                                              │                                
+                                │ ?Search commands...                                                                          │                                
+                                │ -------------------------------------------------------------------------------------------- │                                
+                                │ NAVIGATION                                                                                   │                                
+                                │  > Open workspace  Return to the active conversationCtrl+X C                                 │                                
+                                │    Command palette  Search every available actionCtrl+P                                      │                                
+                                │ SESSION                                                                                      │                                
+                                │    New session  Start with a clean conversation                                              │                                
+                                │    Sessions  Browse recent workspacesCtrl+X S                                                │                                
+                                │ MODELS                                                                                       │                                
+                          ◈     │    Open Models  Browse local and free cloud models                                           │                                
+                                │    Switch model  Choose the model for the next taskCtrl+X M                                  │                                
+                          Intell│gencProvidersnsInspectaconnections and healthCtrl+X P                                         │                                
+                                │    Retry provider health  Probe configured providers before cloud routing                    │                                
+                          Local │ ROUTINGPrivate                                                                               │                                
+                                │    Routing  Inspect the execution decisionCtrl+X R                                           │                                
+                          PROJEC│  shUsage· View free capacityCtrl+X Q                                                         │                                
+                          HARDWA│E DePrivacy mReview…repository privacy policyCtrl+X V                                         │                                
+                                │ PROJECT                                                                                      │                                
+                          READY │ATH Context  See what the agent can use                                                       │                                
+                          Local │ Up/DowndnavigateoEnterSrun Escsclose                                                         │                                
+                          Paid a│to-routing disabled · 0 free providers connected                                              │                                
+                                └──────────────────────────────────────────────────────────────────────────────────────────────┘                                
+                          TRY                                                                                                                                   
+                          › Explain this repository                                                                                                             
+                          › Find failing tests                                                                                                                  
+                          › Review uncommitted changes                                                                                                          
+                                                                                                                                                                
+                          Press Ctrl+P for commands · type / to browse                                                                                          
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                        ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐                        
+                        │ Ask LocalCode...                                                                                             │                        
+                        │                                                                                                              │                        
+                        └─@─context──AUTO──LOCAL-FIRST────Enter─send──Shift+Enter─newline──────────────────────────────────────────────┘                        
+ ● Command palette                                                                                             LOCAL · ctx 0/32k · $0 · private · ready  Ctrl+P 
+

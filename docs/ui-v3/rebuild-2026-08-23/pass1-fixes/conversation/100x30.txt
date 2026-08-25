@@ -1,0 +1,31 @@
+ ◈ LocalCode ~/shelra                                                        AUTO · LOCAL · PRIVATE 
+                                                                                                    
+ Conversation  workspace                                                                            
+                                                                                                    
+  You                                                                                               
+  Review the authentication session lifecycle                                                       
+                                                                                                    
+  LocalCode                                                                                         
+  I found a refresh-token race to verify next.                                                      
+                                                                                                    
+  > ✓ READ + TEST · 2 actions · Enter to expand                                                     
+                                                                                                    
+  Focus transcript · PageUp/PageDown review · Ctrl+P commands                                       
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ ┌────────────────────────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode anything...                                                                      │ 
+ │                                                                                                │ 
+ ● Ready ·elocal-firstn·estrict-zeroLOCAL-FIRST                        LOCAL · $0 · private  Ctrl+P 
+

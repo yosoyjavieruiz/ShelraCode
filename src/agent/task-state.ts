@@ -1,0 +1,226 @@
+import type { TurnMode } from "./turn-policy.js";
+import type { VerificationCommand } from "./verification-plan.js";
+
+export type AgentPhase =
+  | "frame"
+  | "discover"
+  | "analyze"
+  | "plan"
+  | "act"
+  | "observe"
+  | "reflect"
+  | "verify"
+  | "review"
+  | "complete"
+  | "blocked"
+  | "failed"
+  | "cancelled";
+
+export interface SuccessCriterion {
+  id: string;
+  description: string;
+  required: boolean;
+  satisfied: boolean;
+}
+
+export interface TaskConstraint {
+  id: string;
+  description: string;
+}
+
+export interface ContextEvidence {
+  id: string;
+  kind: "manifest" | "file" | "search" | "git" | "test" | "tool-result";
+  source: string;
+  summary: string;
+  relevance: number;
+  freshness: number;
+}
+
+export interface Hypothesis {
+  id: string;
+  statement: string;
+  status: "open" | "supported" | "rejected";
+}
+
+export interface PlanStep {
+  id: string;
+  description: string;
+  status: "pending" | "active" | "done" | "failed" | "skipped";
+  evidenceRequired?: string[];
+  verification?: string[];
+}
+
+export interface TaskPlan {
+  steps: PlanStep[];
+  updatedAt: string;
+}
+
+export interface AgentAction {
+  id: string;
+  kind: "read" | "search" | "write" | "execute" | "verify" | "review";
+  target: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  startedAt?: string;
+  completedAt?: string;
+  summary?: string;
+}
+
+export interface VerificationRun {
+  id: string;
+  stage?: VerificationCommand["stage"];
+  command: string;
+  status: "running" | "passed" | "failed" | "cancelled";
+  exitCode?: number;
+  summary?: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
+export interface TaskBlocker {
+  id: string;
+  summary: string;
+  recoverable: boolean;
+  suggestedAction?: string;
+}
+
+export interface AgentTaskLedger {
+  id: string;
+  objective: string;
+  mode: TurnMode;
+  phase: AgentPhase;
+  successCriteria: SuccessCriterion[];
+  constraints: TaskConstraint[];
+  evidence: ContextEvidence[];
+  hypotheses: Hypothesis[];
+  plan?: TaskPlan;
+  verificationPlan: VerificationCommand[];
+  actions: AgentAction[];
+  filesRead: string[];
+  filesChanged: string[];
+  verificationRuns: VerificationRun[];
+  blockers: TaskBlocker[];
+  startedAt: string;
+  updatedAt: string;
+}
+
+const terminalPhases = new Set<AgentPhase>([
+  "complete",
+  "blocked",
+  "failed",
+  "cancelled",
+]);
+
+export function terminalPhase(phase: AgentPhase): boolean {
+  return terminalPhases.has(phase);
+}
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+export function createTaskLedger(input: {
+  id: string;
+  objective: string;
+  mode: TurnMode;
+  successCriteria?: SuccessCriterion[];
+  constraints?: TaskConstraint[];
+  verificationPlan?: VerificationCommand[];
+}): AgentTaskLedger {
+  const timestamp = now();
+  return {
+    id: input.id,
+    objective: input.objective,
+    mode: input.mode,
+    phase: "frame",
+    successCriteria: input.successCriteria ?? [],
+    constraints: input.constraints ?? [],
+    verificationPlan: input.verificationPlan ?? [],
+    evidence: [],
+    hypotheses: [],
+    actions: [],
+    filesRead: [],
+    filesChanged: [],
+    verificationRuns: [],
+    blockers: [],
+    startedAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+export function setTaskPhase(ledger: AgentTaskLedger, phase: AgentPhase): void {
+  if (terminalPhases.has(ledger.phase))
+    throw new Error(`Cannot transition terminal task phase ${ledger.phase}`);
+  if (
+    phase === "complete" &&
+    ledger.phase !== "review" &&
+    ledger.phase !== "verify"
+  )
+    throw new Error(
+      `Invalid task phase transition ${ledger.phase} -> ${phase}`,
+    );
+  ledger.phase = phase;
+  ledger.updatedAt = now();
+}
+
+export function addTaskEvidence(
+  ledger: AgentTaskLedger,
+  evidence: ContextEvidence,
+): void {
+  if (!ledger.evidence.some((item) => item.id === evidence.id))
+    ledger.evidence.push(evidence);
+  ledger.updatedAt = now();
+}
+
+export function setTaskPlan(ledger: AgentTaskLedger, plan: TaskPlan): void {
+  ledger.plan = plan;
+  ledger.updatedAt = now();
+}
+
+export function addTaskBlocker(
+  ledger: AgentTaskLedger,
+  blocker: TaskBlocker,
+): void {
+  if (!ledger.blockers.some((item) => item.id === blocker.id))
+    ledger.blockers.push(blocker);
+  ledger.updatedAt = now();
+}
+
+export function satisfyTaskCriterion(
+  ledger: AgentTaskLedger,
+  criterionId: string,
+): void {
+  const criterion = ledger.successCriteria.find(
+    (item) => item.id === criterionId,
+  );
+  if (criterion) criterion.satisfied = true;
+  ledger.updatedAt = now();
+}
+
+export function recordTaskAction(
+  ledger: AgentTaskLedger,
+  action: AgentAction,
+): void {
+  const existing = ledger.actions.find((item) => item.id === action.id);
+  if (existing) Object.assign(existing, action);
+  else ledger.actions.push(action);
+  if (action.status === "succeeded" && action.kind === "read")
+    addUnique(ledger.filesRead, action.target);
+  if (action.status === "succeeded" && action.kind === "write")
+    addUnique(ledger.filesChanged, action.target);
+  ledger.updatedAt = now();
+}
+
+export function recordVerificationRun(
+  ledger: AgentTaskLedger,
+  run: VerificationRun,
+): void {
+  const existing = ledger.verificationRuns.find((item) => item.id === run.id);
+  if (existing) Object.assign(existing, run);
+  else ledger.verificationRuns.push(run);
+  ledger.updatedAt = now();
+}
+
+function addUnique(values: string[], value: string): void {
+  if (!values.includes(value)) values.push(value);
+}

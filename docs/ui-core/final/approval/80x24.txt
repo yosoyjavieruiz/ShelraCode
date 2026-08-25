@@ -1,0 +1,24 @@
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+    ┌──────────────────────────────────────────────────────────────────────┐    
+    │                                                                      │    
+    │ Approval required                                                    │    
+    │                                                                      │    
+    │ Run command                                                          │    
+    │                                                                      │    
+    │ npm publish                                                          │    
+    │                                                                      │    
+    │ This creates an external side effect.                                │    
+    │                                                                      │    
+    │ Review the exact action before allowing it once.                     │    
+    │                                                                      │    
+    │ Esc deny Enter allow once                                            │    
+    │                                                                      │    
+    └──────────────────────────────────────────────────────────────────────┘    
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                

@@ -1,0 +1,31 @@
+ ◈ LocalCode ~/shelra                                                        AUTO · LOCAL · PRIVATE 
+                                                                                                    
+ FREE CAPACITY                                                                                      
+ Usage                                                                                              
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  groq                                                                           provider_reported  
+  ████████████████░░░░ 81/100 requests                                                              
+  Reset in 42 min                                                                                   
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  openrouter                                                                               unknown  
+   ░░░░░░░░░░░░░░░░░░░░ 0/0 tokens                                                                  
+  Reset unknown                                                                                     
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ ● Ready · local-first · strict-zero                                   LOCAL · $0 · private  Ctrl+P 
+

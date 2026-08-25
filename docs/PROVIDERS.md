@@ -1,6 +1,6 @@
 # Providers
 
-All providers implement the normalized `ProviderAdapter` contract. Live network calls are optional and never required by CI.
+Registered inference adapters use the normalized `ProviderAdapter` contract. Live network calls are optional and never required by CI. Providers not registered in v0.1 are not shown as available in the product.
 
 ## Groq
 
@@ -16,11 +16,11 @@ Configured local or user-authorized endpoint with explicit source and billing cl
 
 ## Cloudflare Workers AI
 
-REST endpoint requires account ID and token. Current official pricing documents a daily no-charge allocation but also paid-plan overage and models requiring paid billing. The adapter requires a confirmed free allocation before strict-zero eligibility and keeps paid-required distinct from capacity failure.
+The v0.1 registry does not advertise a Cloudflare adapter. Current official pricing documents a daily no-charge allocation but also paid-plan overage and models requiring paid billing. It remains deferred until account eligibility and error/quota behavior have executable contract coverage.
 
 ## Gemini
 
-Official Gemini API adapter is public-only by default. The current free tier is not eligible for private repository routing because its official pricing states content may be used to improve products. It remains visible as public-only only when configured.
+The v0.1 registry does not advertise a Gemini adapter. The current free tier is public-only for LocalCode's default policy because official pricing states free-tier content may be used to improve products. It remains deferred until the adapter can enforce that boundary in code.
 
 ## OpenCode Zen
 

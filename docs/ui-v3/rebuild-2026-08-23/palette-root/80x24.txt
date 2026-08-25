@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                           LOCAL · PRIVATE 
+                                                                                
+  ┌──────────────────────────────────────────────────────────────────────────┐  
+  │◈                                                                         │  
+  │ ?Search commands...                                                      │  
+  │INAVIGATION-------------------------------------------------------------- │  
+  │  > Open workspace                                                        │  
+  │LocaCommandepaletteate                                                    │  
+  │ SESSION                                                                  │  
+  │PROJNew session · main                                                    │  
+  │HARDSessionsecting machine…                                               │  
+  │ MODELS                                                                   │  
+  └────Open─Models───────────────────────────────────────────────────────────┘  
+                                                                                
+   Ctrl+P commands · / slash actions                                            
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ┌────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode...                                                           │ 
+ │                                                                            │ 
+ └─Enter─send──Shift+Enter─newline────────────────────────────────────────────┘ 
+ ● Command palette                                 LOCAL · $0 · private  Ctrl+P 
+

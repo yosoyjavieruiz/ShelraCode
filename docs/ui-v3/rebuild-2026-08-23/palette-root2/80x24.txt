@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                           LOCAL · PRIVATE 
+                                                                                
+  ┌──────────────────────────────────────────────────────────────────────────┐  
+  │◈                                                                         │  
+  │ ?Search commands...                                                      │  
+  │I------------------------------------------------------------------------ │  
+  │ NAVIGATION                                                               │  
+  │Lo>aOpenFworkspacevate                                                    │  
+  │    Command palette                                                       │  
+  │PSESSION shelra · main                                                    │  
+  │HARDNewEsessioning machine…                                               │  
+  │    Sessions                                                              │  
+  │PMODELSocal → Free → Ask · 0 free providers                               │  
+  │    Open Models                                                           │  
+  │Ctrl+P commands · / slash actions                                         │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+                                                                                
+                                                                                
+ ┌────────────────────────────────────────────────────────────────────────────┐ 
+ │ Ask LocalCode...                                                           │ 
+ │                                                                            │ 
+ └─Enter─send──Shift+Enter─newline────────────────────────────────────────────┘ 
+ ● Command palette                                 LOCAL · $0 · private  Ctrl+P 
+

@@ -1,0 +1,24 @@
+ ◆ LocalCode   ~/shelra · main                                  Local · Private 
+                                                                                
+  ◆                                                                             
+  LocalCode                                                                     
+  Maximum intelligence. Your way.                                               
+                                                                                
+  Local-first routing ready                                                     
+                                                                                
+    Review my current changes                                                   
+    Run tests for changed files                                                 
+    Find likely regressions                                                     
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ›───────────────────────────────────────────────────────────────────────────── 
+  Ask LocalCode…                                                                
+                                                                                
+  @ context   Auto · local first               Shift+Enter newline · Esc clear  
+ Ready                                                                          

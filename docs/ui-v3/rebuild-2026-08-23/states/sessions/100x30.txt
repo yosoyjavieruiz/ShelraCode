@@ -1,0 +1,31 @@
+ ◈ LocalCode ~/shelra                                                        AUTO · LOCAL · PRIVATE 
+                                                                                                    
+ WORKSPACE HISTORY                                                                                  
+ Sessions  3 local                                                                                  
+                                                                                                    
+  ● Fix routing fallback                                                                2026-08-23  
+    shelra                                                                                          
+                                                                                                    
+    Redesign terminal interface                                                         2026-08-23  
+    shelra                                                                                          
+                                                                                                    
+    Investigate local model fit                                                         2026-08-22  
+    shelra                                                                                          
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ ↑↓ select · Enter open · Esc return                                                                
+                                                                                                    
+ ● Ready · local-first · strict-zero                                   LOCAL · $0 · private  Ctrl+P 
+

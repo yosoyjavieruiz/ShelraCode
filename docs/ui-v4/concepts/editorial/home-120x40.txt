@@ -1,0 +1,41 @@
+ ◆ LocalCode   ~/shelra · main                                                                          Local · Private 
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                           ◆                                                            
+                                                       LocalCode                                                        
+                                                Your models. Your code.                                                 
+                                                                                                                        
+                                                                                                                        
+                                        Local ready · zero-cost routes available                                        
+                                                                                                                        
+                                                                                                                        
+                                    › Review my current changes                                                         
+                                    › Run tests for changed files                                                       
+                                    › Look for regressions                                                              
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+    ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────╮    
+    │ Ask LocalCode…                                                                                               │    
+    │                                                                                                              │    
+    │ @ context        Auto · Local first             Enter ↵                                                      │    
+    ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    
+ Ready                                                                                Local · Qwen 2.5 Coder ctx 4k/32k 
+

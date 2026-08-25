@@ -1,0 +1,25 @@
+ ◈ LocalCode ~/shelra                                           LOCAL · PRIVATE 
+                                                                                
+ EXPLAINABLE ROUTING                                                            
+                                                                                
+ Routing                                                                        
+                                                                                
+ TASK → PRIVACY → CAPABILITY →                                                  
+                                                                                
+ COST → QUOTA → SELECTION                                                       
+                                                                                
+                                                                                
+  SELECTED                                                                      
+  STOP · ASK USER                                                               
+  Submit a task to create a live route explanation.                             
+                                                                                
+                                                                                
+ DECISION LOG                                                                   
+ Task        repository debugging · high confidence                             
+ Privacy     private · strict-zero                                              
+ Selected    Local / Qwen Coder 7B                                              
+ Why         local tool support is healthy and cost is zero                     
+                                                                                
+                                                                                
+ ● Ready · local-first · strict-zero               LOCAL · $0 · private  Ctrl+P 
+

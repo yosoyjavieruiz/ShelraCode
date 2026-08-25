@@ -1,0 +1,45 @@
+ ◆ LocalCode   ~/shelra · main                                                                                              Local · Private 
+         You                                                                                                                                
+         Review the authentication session lifecycle                                                                                        
+                                                                                                                                            
+         LocalCode                                                                                                                          
+         I found a refresh-token race to verify next.                                                                                       
+                                                                                                                                            
+         > ✓ READ + TEST · 2 actions · Enter to expand                                                                                      
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+        ›───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────        
+         Ask LocalCode…                                                                                                                     
+                                                                                                                                            
+                                                                                                                                            
+         @ context   Auto · local first                                                                                     Enter ↵         
+ Ready                                                                                                                                      

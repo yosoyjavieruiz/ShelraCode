@@ -1,0 +1,31 @@
+ ◈ LocalCode ~/shelra                                                        AUTO · LOCAL · PRIVATE 
+                                                                                                    
+ WORKSPACE PREFERENCES                                                                              
+ Settings                                                                                           
+                                                                                                    
+ Obsidian Violet                                                                                    
+ Filter settings…                                                                                   
+                                                                                                    
+                                                                                                    
+ SETTINGS · 11 settings · ↑↓ select · Enter change · ↓ scroll                                       
+  ● Theme                                                                                           
+    Obsidian Violet                                                                                 
+    Accent                                                                                          
+    Violet · #8B5CF6                                                                                
+    Interface density                                                                               
+    comfortable                                                                                     
+    Motion                                                                                          
+    System                                                                                          
+    Repository privacy                                                                              
+    private                                                                                         
+    Routing mode                                                                                    
+    strict-zero                                                                                     
+    Permission mode                                                                                 
+    EDIT                                                                                            
+    Secondary chrome                                                                                
+    Conversation-first · transient                                                                  
+    Tool activity                                                                                   
+    Grouped · collapsed by default                                                                  
+                                                                                                    
+ ● Settings ready                                                      LOCAL · $0 · private  Ctrl+P 
+

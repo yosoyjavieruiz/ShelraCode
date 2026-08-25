@@ -1,0 +1,25 @@
+ ◆ LocalCode   ~/shelra · main                                  Local · Private 
+  ●  You                                                                        
+     Fix the token refresh race condition and run the auth tests.               
+                                                                                
+  ◆  LocalCode                                                                  
+                                                                                
+     I’ll inspect the session lifecycle and verify the repair.                  
+                                                                                
+      Inspecting authentication · 2/4                                           
+      ✓ Read session.ts                                   12ms                  
+      ✓ Search refreshToken                              18ms                   
+      ● Edit session.ts                                  +8 −3                  
+      ○ Run auth suite                                                          
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ────────────────────────────────────────────────────────────────────────────── 
+  Ask LocalCode…                                                                
+                                                                                
+                                                                                
+  @ context        Auto · Local first             Enter ↵                       
+ ● Inspecting repository                        Local · Qwen 2.5 Coder   Ctrl+C 
+
