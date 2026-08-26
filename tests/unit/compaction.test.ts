@@ -9,6 +9,11 @@ import {
 import { compileTaskGraph } from "../../src/agent/task-graph.js";
 import { compileTaskContract } from "../../src/agent/task-contract.js";
 import { createRecoveryContract } from "../../src/agent/recovery.js";
+import {
+  restoreTaskRuntime,
+  serializeTaskRuntime,
+} from "../../src/agent/task-ledger-codec.js";
+import { createTaskRuntimeSnapshot } from "../../src/agent/task-runtime-state.js";
 
 test("compaction preserves authoritative task state and recent observations", () => {
   const ledger = createTaskLedger({
@@ -124,4 +129,68 @@ test("compaction exposes rehydration text and structural source ids", () => {
   expect(compacted.text).toContain("current-node");
   expect(compacted.text).toContain("missing proof");
   expect(compacted.sourceIds).toContain("src/parser.ts");
+});
+
+test("compaction and restart retain one bounded five-layer rehydration envelope", () => {
+  const ledger = createTaskLedger({
+    id: "compact-rehydration-envelope",
+    objective: "Repair the parser and keep the public API",
+    mode: "coding",
+  });
+  ledger.taskGraph = compileTaskGraph({
+    objective: ledger.objective,
+    mode: ledger.mode,
+    candidateFiles: ["src/parser.ts"],
+  });
+  const rehydration = {
+    contextAnchor: {
+      sourceIds: ["src/parser.ts"],
+      instructionSources: ["AGENTS.md"],
+      memoryIds: ["memory:parser-convention"],
+      proofGapIds: ["proof:parser-api"],
+      activeNodeId: "mutate-parser",
+      repositoryRevision: "fixture-revision",
+    },
+    route: {
+      candidateId: "local/parser-model",
+      providerId: "lm-studio",
+      modelId: "parser-model-q4",
+    },
+  };
+
+  const compacted = compactTaskContext(
+    ledger,
+    [{ role: "tool", content: "tool output secret sk-12345678901234567890" }],
+    1_800,
+    rehydration,
+  );
+  expect(compacted.contextAnchor.instructionSources).toEqual(["AGENTS.md"]);
+  expect(compacted.contextAnchor.memoryIds).toEqual([
+    "memory:parser-convention",
+  ]);
+  expect(compacted.contextAnchor.proofGapIds).toEqual(["proof:parser-api"]);
+  expect(compacted.contextAnchor.activeNodeId).toBe("mutate-parser");
+  expect(compacted.route?.modelId).toBe("parser-model-q4");
+  expect(compacted.text).toContain("AGENTS.md");
+  expect(compacted.text).toContain("memory:parser-convention");
+  expect(compacted.text).toContain("proof:parser-api");
+  expect(compacted.text).not.toContain("sk-12345678901234567890");
+
+  const restored = restoreTaskRuntime(
+    serializeTaskRuntime(
+      createTaskRuntimeSnapshot({
+        ledger,
+        repositoryRoot: "D:/fixture/repository",
+        repositoryRevision: "fixture-revision",
+        route: rehydration.route,
+        contextAnchor: rehydration.contextAnchor,
+      }),
+    ),
+  );
+  expect(restored.ok).toBe(true);
+  if (!restored.ok) return;
+  expect(restored.snapshot.route?.modelId).toBe("parser-model-q4");
+  expect(restored.snapshot.contextAnchor).toEqual(
+    expect.objectContaining(rehydration.contextAnchor),
+  );
 });

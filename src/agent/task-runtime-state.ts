@@ -20,6 +20,16 @@ export interface TaskContextAnchor {
   summary?: string;
 }
 
+/**
+ * The small, non-transcript envelope shared by compaction and restart. It
+ * identifies what must be reloaded; it deliberately does not contain raw
+ * prompts, model output, or tool output.
+ */
+export interface TaskRuntimeRehydration {
+  contextAnchor: TaskContextAnchor;
+  route?: TaskRuntimeRouteIdentity;
+}
+
 export type TaskInFlightKind =
   "model" | "tool" | "mutation" | "verification" | "subagent";
 
@@ -64,7 +74,7 @@ function unique(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
-function defaultContextAnchor(
+export function deriveTaskContextAnchor(
   ledger: AgentTaskLedger,
   repositoryRevision: string | undefined,
 ): TaskContextAnchor {
@@ -76,7 +86,7 @@ function defaultContextAnchor(
     ]),
     instructionSources: [],
     memoryIds: [],
-    proofGapIds: [],
+    proofGapIds: unique(ledger.blockers.map((blocker) => blocker.id)),
     ...(ledger.taskGraph?.currentNodeId
       ? { activeNodeId: ledger.taskGraph.currentNodeId }
       : {}),
@@ -90,7 +100,10 @@ export function createTaskRuntimeSnapshot(
   const repositoryRoot = input.repositoryRoot.trim();
   if (!repositoryRoot)
     throw new Error("runtime snapshot repositoryRoot is required");
-  const anchor = defaultContextAnchor(input.ledger, input.repositoryRevision);
+  const anchor = deriveTaskContextAnchor(
+    input.ledger,
+    input.repositoryRevision,
+  );
   const contextAnchor: TaskContextAnchor = {
     ...anchor,
     ...input.contextAnchor,

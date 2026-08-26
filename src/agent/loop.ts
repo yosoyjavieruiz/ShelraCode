@@ -67,7 +67,11 @@ import {
 } from "./task-state.js";
 import type { AgentPhase, AgentTaskLedger, PlanStep } from "./task-state.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
-import type { TaskInFlightMarker } from "./task-runtime-state.js";
+import {
+  deriveTaskContextAnchor,
+  type TaskInFlightMarker,
+  type TaskRuntimeRehydration,
+} from "./task-runtime-state.js";
 import type {
   AgentEvent,
   AgentLoopOptions,
@@ -1125,6 +1129,36 @@ export async function runAgent(
       });
   }
   persistLedger();
+  const currentRuntimeRehydration = (): TaskRuntimeRehydration => {
+    const baseAnchor =
+      restoredRuntime?.contextAnchor ??
+      deriveTaskContextAnchor(ledger, restoredRuntime?.repositoryRevision);
+    return {
+      contextAnchor: {
+        ...baseAnchor,
+        sourceIds: [
+          ...new Set([
+            ...baseAnchor.sourceIds,
+            ...ledger.evidence.map((item) => item.source),
+            ...ledger.filesRead,
+            ...ledger.filesChanged,
+          ]),
+        ].slice(-128),
+        proofGapIds: [
+          ...new Set([
+            ...baseAnchor.proofGapIds,
+            ...ledger.blockers.map((blocker) => blocker.id),
+          ]),
+        ].slice(-64),
+        ...(ledger.taskGraph?.currentNodeId
+          ? { activeNodeId: ledger.taskGraph.currentNodeId }
+          : {}),
+      },
+      ...(restoredRuntime?.route
+        ? { route: structuredClone(restoredRuntime.route) }
+        : {}),
+    };
+  };
   const currentModelNode = (): TaskNode | undefined => {
     if (planningMode !== "model" || !ledger.taskGraph?.currentNodeId)
       return undefined;
@@ -3060,6 +3094,7 @@ export async function runAgent(
         ledger,
         messages,
         contextBudgetChars,
+        currentRuntimeRehydration(),
       );
       messages.splice(0, messages.length, ...compacted.messages);
     }

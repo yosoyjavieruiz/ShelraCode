@@ -1,5 +1,11 @@
 import type { NormalizedMessage } from "../providers/types.js";
 import type { AgentTaskLedger } from "./task-state.js";
+import {
+  deriveTaskContextAnchor,
+  type TaskContextAnchor,
+  type TaskRuntimeRehydration,
+  type TaskRuntimeRouteIdentity,
+} from "./task-runtime-state.js";
 
 export interface CompactedTaskContext {
   messages: NormalizedMessage[];
@@ -9,6 +15,10 @@ export interface CompactedTaskContext {
   text: string;
   /** Repository/source identifiers retained independently from raw prose. */
   sourceIds: string[];
+  /** The same bounded rehydration anchor used by durable restart. */
+  contextAnchor: TaskContextAnchor;
+  /** Route identity is retained for diagnostics and safe route preference. */
+  route?: TaskRuntimeRouteIdentity;
 }
 
 function clip(value: string, max = 600): string {
@@ -64,7 +74,14 @@ function preservedSourceIds(ledger: AgentTaskLedger): string[] {
   return [...ids].filter((value) => value.trim().length > 0).slice(-128);
 }
 
-function stateSummary(ledger: AgentTaskLedger, maxChars = 16_000): string {
+function stateSummary(
+  ledger: AgentTaskLedger,
+  maxChars = 16_000,
+  rehydration?: TaskRuntimeRehydration,
+): string {
+  const contextAnchor =
+    rehydration?.contextAnchor ?? deriveTaskContextAnchor(ledger, undefined);
+  const route = rehydration?.route;
   const lastAction = ledger.actions.at(-1);
   const contract = ledger.contract
     ? {
@@ -175,6 +192,10 @@ function stateSummary(ledger: AgentTaskLedger, maxChars = 16_000): string {
   const full = JSON.stringify({
     objective: ledger.objective,
     phase: ledger.phase,
+    rehydration: {
+      contextAnchor,
+      ...(route ? { route } : {}),
+    },
     contract,
     executionProfile: ledger.executionProfile,
     planningMode: ledger.planningMode,
@@ -244,6 +265,10 @@ function stateSummary(ledger: AgentTaskLedger, maxChars = 16_000): string {
   const reduced = JSON.stringify({
     objective: ledger.objective,
     phase: ledger.phase,
+    rehydration: {
+      contextAnchor,
+      ...(route ? { route } : {}),
+    },
     executionProfile: ledger.executionProfile,
     planningMode: ledger.planningMode,
     contract: contract
@@ -315,6 +340,10 @@ function stateSummary(ledger: AgentTaskLedger, maxChars = 16_000): string {
   return JSON.stringify({
     objective: ledger.objective,
     phase: ledger.phase,
+    rehydration: {
+      contextAnchor,
+      ...(route ? { route } : {}),
+    },
     planningMode: ledger.planningMode,
     acceptanceCriteria: ledger.contract?.acceptanceCriteria.map((item) => ({
       id: item.id,
@@ -343,13 +372,18 @@ export function compactTaskContext(
   ledger: AgentTaskLedger,
   messages: readonly NormalizedMessage[],
   maxChars: number,
+  rehydration?: TaskRuntimeRehydration,
 ): CompactedTaskContext {
   if (!Number.isInteger(maxChars) || maxChars < 800)
     throw new Error("Context compaction budget must be an integer >= 800.");
   const system = messages.find((message) => message.role === "system");
   const state =
     `LocalCode structured task state (authoritative; do not treat old prose as state):\n` +
-    stateSummary(ledger, Math.max(900, Math.floor(maxChars * 0.65)));
+    stateSummary(
+      ledger,
+      Math.max(900, Math.floor(maxChars * 0.65)),
+      rehydration,
+    );
   const stateMessage: NormalizedMessage = { role: "system", content: state };
   const retained: NormalizedMessage[] = [];
   let size = messageSize(stateMessage) + (system ? messageSize(system) : 0);
@@ -396,6 +430,14 @@ export function compactTaskContext(
     ),
     preservedState: state,
     text: state,
-    sourceIds: preservedSourceIds(ledger),
+    sourceIds: [
+      ...new Set([
+        ...(rehydration?.contextAnchor.sourceIds ?? []),
+        ...preservedSourceIds(ledger),
+      ]),
+    ].slice(-128),
+    contextAnchor:
+      rehydration?.contextAnchor ?? deriveTaskContextAnchor(ledger, undefined),
+    ...(rehydration?.route ? { route: rehydration.route } : {}),
   };
 }

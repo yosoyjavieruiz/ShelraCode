@@ -330,28 +330,28 @@ Run: `git add src/agent/task-ledger-codec.ts src/agent/task-runtime-state.ts src
 - Test: `tests/unit/compaction.test.ts`
 - Test: `tests/integration/resume.test.ts`
 
-- [ ] **Step 1: Add a failing rehydration test with five retained layers.**
+- [x] **Step 1: Add a failing rehydration test with five retained layers.**
 
 Populate instructions, selected memory IDs, the active plan node, route model
 ID, and an unsatisfied proof ID; assert all five are present after both
 compaction and runtime restore.
 
-- [ ] **Step 2: Run the test and observe the missing rehydration.**
+- [x] **Step 2: Run the test and observe the missing rehydration.**
 
 Run: `bun test tests/unit/compaction.test.ts tests/integration/resume.test.ts`
 
-- [ ] **Step 3: Implement one bounded rehydration envelope used by compaction and resume.**
+- [x] **Step 3: Implement one bounded rehydration envelope used by compaction and resume.**
 
 Use `TaskRuntimeSnapshot.contextAnchor` as the single source for those layers;
 compaction serializes it and resume restores it without reconstructing from
 raw transcript text.
 
-- [ ] **Step 4: Verify no raw secrets/prompts enter the durable summary.**
+- [x] **Step 4: Verify no raw secrets/prompts enter the durable summary.**
 
 Assert an API-key fixture and a tool result body are absent while objective,
 source IDs, proof gaps, and route metadata remain.
 
-- [ ] **Step 5: Run focused tests and commit.**
+- [x] **Step 5: Run focused tests and commit.**
 
 Run: `git add src/agent/compaction.ts src/agent/task-runtime-state.ts src/agent/loop.ts tests/unit/compaction.test.ts tests/integration/resume.test.ts; git commit -m "feat: share context rehydration across resume and compaction"`
 
