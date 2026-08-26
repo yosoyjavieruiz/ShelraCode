@@ -170,7 +170,10 @@ test("repository state does not treat LocalCode runtime state as project content
     JSON.stringify({ setup: true }),
   );
   await writeFile(path.join(root, "agent.jsonl"), '{"event":"runtime"}\n');
-  const git = await runCommand("git", ["init", "--quiet"], { cwd: root });
+  const git = await runCommand("git", ["init", "--quiet"], {
+    intent: "execute",
+    cwd: root,
+  });
   expect(git.exitCode).toBe(0);
 
   const context = await buildRepositoryContext({

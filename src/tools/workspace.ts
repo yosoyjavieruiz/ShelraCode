@@ -4,11 +4,13 @@ import {
   runCommand,
   runShellCommand,
   ProcessPolicyError,
+  ProcessIsolationError,
   type ProcessOptions,
   type ProcessResult,
 } from "../shared/process.js";
 import { assertWorkspacePath, resolveWorkspacePath } from "../shared/paths.js";
 import { isNeverRemotePath, scanSecrets } from "../privacy/policy.js";
+import { safeProcessEnvironment } from "../shared/process-policy.js";
 import {
   checkPermission,
   classifyShellCommand,
@@ -250,47 +252,10 @@ function recordInput(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
-const SAFE_CHILD_ENV_NAMES = new Set([
-  "PATH",
-  "PATHEXT",
-  "COMSPEC",
-  "SYSTEMROOT",
-  "WINDIR",
-  "TEMP",
-  "TMP",
-  "TMPDIR",
-  "HOME",
-  "USERPROFILE",
-  "HOMEDRIVE",
-  "HOMEPATH",
-  "LOCALAPPDATA",
-  "APPDATA",
-  "PROGRAMFILES",
-  "PROGRAMFILES(X86)",
-  "PROGRAMW6432",
-  "BUN_INSTALL",
-  "NODE_PATH",
-  "CI",
-  "TERM",
-  "TERM_PROGRAM",
-  "NO_COLOR",
-  "FORCE_COLOR",
-  "LANG",
-  "LC_ALL",
-  "TZ",
-  "LOCALCODE_STATE_DIR",
-  "SHELRACODE_STATE_DIR",
-]);
-
 export function safeExecutionEnvironment(
   env: Record<string, string | undefined> = process.env,
 ): Record<string, string> {
-  const safe: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (value !== undefined && SAFE_CHILD_ENV_NAMES.has(key.toUpperCase()))
-      safe[key] = value;
-  }
-  return safe;
+  return safeProcessEnvironment(env);
 }
 
 async function runToolCommand(
@@ -324,14 +289,34 @@ async function runToolProcess(
   try {
     return await execute();
   } catch (error) {
-    if (error instanceof ProcessPolicyError)
+    if (error instanceof ProcessIsolationError)
       throw new ToolError(
         "PERMISSION_DENIED",
-        "Network-capable process execution is disabled for this turn.",
+        "The command was blocked because OS-enforced process isolation is required but unavailable.",
         {
           recoverable: false,
           suggestedAction:
-            "Use a local command or a turn policy that explicitly permits network access.",
+            "Use a host with an OS isolation adapter or explicitly permit the weaker application policy.",
+          details: {
+            applicationPolicy: error.status.applicationPolicy,
+            osEnforced: error.status.osEnforced,
+            mechanism: error.status.mechanism,
+          },
+        },
+      );
+    if (error instanceof ProcessPolicyError)
+      throw new ToolError(
+        "PERMISSION_DENIED",
+        error.code === "DESTRUCTIVE_PROCESS_DISABLED"
+          ? "Destructive process execution is disabled for this turn."
+          : "Network-capable process execution is disabled for this turn.",
+        {
+          recoverable: false,
+          suggestedAction:
+            error.code === "DESTRUCTIVE_PROCESS_DISABLED"
+              ? "Use a non-destructive command or request explicit approval for the destructive action."
+              : "Use a local command or a turn policy that explicitly permits network access.",
+          details: { processPolicyCode: error.code },
         },
       );
     if (error instanceof DOMException && error.name === "AbortError")
@@ -851,11 +836,7 @@ export const editFileTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
-    await requirePermission(
-      ctx,
-      "write",
-      `Edit workspace file: ${input.path}`,
-    );
+    await requirePermission(ctx, "write", `Edit workspace file: ${input.path}`);
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
         "CONFLICT",
@@ -1018,7 +999,11 @@ export const listFilesTool: ToolDefinition<
     // same way so returned paths read as "package.json", not "/package.json".
     const normalizedPath = (input.path ?? "").replace(/^[/\\]+/, "");
     const directory = normalizedPath || ".";
-    await requirePermission(ctx, "read", `List workspace directory: ${directory}`);
+    await requirePermission(
+      ctx,
+      "read",
+      `List workspace directory: ${directory}`,
+    );
     const absoluteDirectory = await assertWorkspacePath(ctx.root, directory);
     const info = await statForTool(absoluteDirectory, directory);
     if (info.isFile)
@@ -1039,6 +1024,7 @@ export const listFilesTool: ToolDefinition<
         "!.localcode/**",
       ],
       {
+        intent: "read",
         cwd: absoluteDirectory,
         signal: ctx.signal,
         timeoutMs: 5_000,
@@ -1158,6 +1144,7 @@ export const globFilesTool: ToolDefinition<
         input.pattern,
       ],
       {
+        intent: "read",
         cwd: absoluteDirectory,
         signal: ctx.signal,
         timeoutMs: 5_000,
@@ -1351,6 +1338,7 @@ export const searchTextTool: ToolDefinition<
         input.query,
       ],
       {
+        intent: "read",
         cwd,
         signal: ctx.signal,
         timeoutMs: 10_000,
@@ -1443,10 +1431,19 @@ export const shellTool: ToolDefinition<
     );
     const started = performance.now();
     const result = await runToolShellCommand(input.command, {
+      intent:
+        classification === "destructive"
+          ? "destructive"
+          : classification === "read"
+            ? "read"
+            : "execute",
       cwd: ctx.root,
       signal: ctx.signal,
       timeoutMs: 120_000,
+      maxOutputChars: 50_000,
       network: ctx.network === false ? "deny" : "allow",
+      isolation: ctx.osIsolation ?? "best_effort",
+      allowWeakIsolation: ctx.allowWeakProcessIsolation ?? true,
       policyCommand: input.command,
       env: ctx.env,
       onOutput: ctx.onOutput,
@@ -1478,6 +1475,7 @@ export const gitStatusTool: ToolDefinition<
   async execute(_input, ctx) {
     await requirePermission(ctx, "read", "Read Git status");
     const result = await runCommand("git", ["status", "--short", "--branch"], {
+      intent: "read",
       cwd: ctx.root,
       signal: ctx.signal,
       timeoutMs: 10_000,
@@ -1531,6 +1529,7 @@ export const gitDiffTool: ToolDefinition<
       "git",
       input.staged ? ["diff", "--cached", "--"] : ["diff", "--"],
       {
+        intent: "read",
         cwd: ctx.root,
         signal: ctx.signal,
         timeoutMs: 10_000,
@@ -1636,10 +1635,14 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
       );
     const started = performance.now();
     const result = await runToolShellCommand(command, {
+      intent: "test",
       cwd: ctx.root,
       signal: ctx.signal,
       timeoutMs: 120_000,
+      maxOutputChars: 50_000,
       network: ctx.network === false ? "deny" : "allow",
+      isolation: ctx.osIsolation ?? "best_effort",
+      allowWeakIsolation: ctx.allowWeakProcessIsolation ?? true,
       policyCommand: command,
       env: ctx.env,
       onOutput: ctx.onOutput,

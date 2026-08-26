@@ -1,11 +1,21 @@
 import type { LocalCodeLogger } from "./logging.js";
 import {
-  commandRequiresNetwork,
-  ProcessPolicyError,
+  assertProcessPolicy,
+  safeProcessEnvironment,
+  type ProcessIntent,
   type ProcessNetworkPolicy,
 } from "./process-policy.js";
+import {
+  enforceProcessIsolation,
+  type ProcessIsolationMode,
+  type ProcessIsolationStatus,
+} from "./process-isolation.js";
 
 export { ProcessPolicyError } from "./process-policy.js";
+export { ProcessIsolationError } from "./process-isolation.js";
+
+export const DEFAULT_PROCESS_OUTPUT_CHARS = 100_000;
+export const MAX_PROCESS_OUTPUT_CHARS = 1_000_000;
 
 export interface ProcessResult {
   exitCode: number;
@@ -15,6 +25,9 @@ export interface ProcessResult {
   durationMs?: number;
   /** True only when the host timeout terminated the process. */
   timedOut?: boolean;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  isolation: ProcessIsolationStatus;
 }
 
 export interface ProcessOutputChunk {
@@ -23,12 +36,20 @@ export interface ProcessOutputChunk {
 }
 
 export interface ProcessOptions {
+  /** Host-declared operation class required before a child is spawned. */
+  intent: ProcessIntent;
   cwd?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   env?: Record<string, string | undefined>;
   /** Lower-level egress policy for process wrappers. */
   network?: ProcessNetworkPolicy;
+  allowDestructive?: boolean;
+  isolation?: ProcessIsolationMode;
+  /** Explicit opt-in for environments where an OS sandbox is unavailable. */
+  allowWeakIsolation?: boolean;
+  /** Maximum retained characters per output stream. */
+  maxOutputChars?: number;
   /** Original user/model command when `command` is a shell executable. */
   policyCommand?: string;
   /**
@@ -48,12 +69,12 @@ export interface ProcessOptions {
 
 const PORTABLE_SHELL_RUNNER = [
   'import { $ } from "bun";',
-  'const encoded = process.argv[1];',
+  "const encoded = process.argv[1];",
   'if (!encoded) throw new Error("Missing encoded shell command");',
   'const command = Buffer.from(encoded, "base64").toString("utf8");',
-  'const rawCommand = { raw: command };',
-  'const result = await $`${rawCommand}`.nothrow();',
-  'process.exit(result.exitCode);',
+  "const rawCommand = { raw: command };",
+  "const result = await $`${rawCommand}`.nothrow();",
+  "process.exit(result.exitCode);",
 ].join("\n");
 
 function abortError(): DOMException {
@@ -107,25 +128,39 @@ async function readAndTrack(
   stream: ReadableStream<Uint8Array> | null | undefined,
   streamName: ProcessOutputChunk["stream"],
   onOutput: ProcessOptions["onOutput"],
-): Promise<string> {
-  if (!stream) return "";
+  maxChars: number,
+): Promise<{ text: string; truncated: boolean }> {
+  if (!stream) return { text: "", truncated: false };
   const batcher = createOutputBatcher(streamName, onOutput);
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let full = "";
+  let truncated = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       const text = decoder.decode(value, { stream: true });
-      full += text;
-      batcher.push(text);
+      const remaining = Math.max(0, maxChars - full.length);
+      if (remaining > 0) {
+        const accepted = text.slice(0, remaining);
+        full += accepted;
+        batcher.push(accepted);
+        if (accepted.length < text.length) truncated = true;
+      } else truncated = true;
     }
-    full += decoder.decode();
+    const tail = decoder.decode();
+    const remaining = Math.max(0, maxChars - full.length);
+    if (remaining > 0) {
+      const accepted = tail.slice(0, remaining);
+      full += accepted;
+      batcher.push(accepted);
+      if (accepted.length < tail.length) truncated = true;
+    } else if (tail.length > 0) truncated = true;
   } finally {
     batcher.flush();
   }
-  return full;
+  return { text: full, truncated };
 }
 
 function spawnProcess(
@@ -135,7 +170,7 @@ function spawnProcess(
 ) {
   return Bun.spawn([command, ...args], {
     cwd: options.cwd,
-    env: options.env,
+    env: safeProcessEnvironment(options.env),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -144,12 +179,27 @@ function spawnProcess(
 export async function runCommand(
   command: string,
   args: string[] = [],
-  options: ProcessOptions = {},
+  options: ProcessOptions,
 ): Promise<ProcessResult> {
   if (options.signal?.aborted) throw abortError();
   const policyCommand = options.policyCommand ?? [command, ...args].join(" ");
-  if (options.network === "deny" && commandRequiresNetwork(policyCommand))
-    throw new ProcessPolicyError(policyCommand);
+  assertProcessPolicy({
+    command: policyCommand,
+    intent: options.intent,
+    network: options.network,
+    allowDestructive: options.allowDestructive,
+  });
+  const isolation = enforceProcessIsolation({
+    mode: options.isolation,
+    allowWeak: options.allowWeakIsolation,
+  });
+  const requestedOutputChars = options.maxOutputChars;
+  const maxOutputChars = Number.isFinite(requestedOutputChars)
+    ? Math.min(
+        MAX_PROCESS_OUTPUT_CHARS,
+        Math.max(1_024, Math.floor(requestedOutputChars!)),
+      )
+    : DEFAULT_PROCESS_OUTPUT_CHARS;
 
   const started = performance.now();
   options.logger?.debug("process.started", {
@@ -176,6 +226,9 @@ export async function runCommand(
         stderr: `${command}: command not found`,
         durationMs: Math.round(performance.now() - started),
         timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        isolation,
       };
       options.logger?.warn("process.finished", {
         command,
@@ -207,17 +260,20 @@ export async function runCommand(
   try {
     const [exitCode, stdout, stderr] = await Promise.all([
       child.exited,
-      readAndTrack(child.stdout, "stdout", options.onOutput),
-      readAndTrack(child.stderr, "stderr", options.onOutput),
+      readAndTrack(child.stdout, "stdout", options.onOutput, maxOutputChars),
+      readAndTrack(child.stderr, "stderr", options.onOutput, maxOutputChars),
     ]);
     if (timedOut) throw timeoutError();
     if (aborted || options.signal?.aborted) throw abortError();
     const result = {
       exitCode,
-      stdout,
-      stderr,
+      stdout: stdout.text,
+      stderr: stderr.text,
       durationMs: Math.round(performance.now() - started),
       timedOut: false,
+      stdoutTruncated: stdout.truncated,
+      stderrTruncated: stderr.truncated,
+      isolation,
     };
     const data = {
       command,
@@ -226,6 +282,10 @@ export async function runCommand(
       timedOut: false,
       stdoutLength: result.stdout.length,
       stderrLength: result.stderr.length,
+      stdoutTruncated: result.stdoutTruncated,
+      stderrTruncated: result.stderrTruncated,
+      processIntent: options.intent,
+      osIsolation: result.isolation.osEnforced,
     };
     if (result.exitCode === 0) options.logger?.info("process.finished", data);
     else options.logger?.warn("process.finished", data);
@@ -266,12 +326,11 @@ export async function runCommand(
  */
 export async function runShellCommand(
   command: string,
-  options: ProcessOptions = {},
+  options: ProcessOptions,
 ): Promise<ProcessResult> {
   const encoded = Buffer.from(command, "utf8").toString("base64");
-  return runCommand(
-    process.execPath,
-    ["-e", PORTABLE_SHELL_RUNNER, encoded],
-    { ...options, policyCommand: options.policyCommand ?? command },
-  );
+  return runCommand(process.execPath, ["-e", PORTABLE_SHELL_RUNNER, encoded], {
+    ...options,
+    policyCommand: options.policyCommand ?? command,
+  });
 }

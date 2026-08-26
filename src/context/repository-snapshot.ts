@@ -215,6 +215,7 @@ async function gitValue(
   logger?: LocalCodeLogger,
 ): Promise<string | undefined> {
   const result = await runCommand("git", args, {
+    intent: "read",
     cwd: root,
     timeoutMs: 5_000,
     logger,

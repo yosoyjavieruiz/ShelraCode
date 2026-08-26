@@ -15,6 +15,14 @@ describe("llmfit hardware adapter", () => {
             },
           }),
           stderr: "",
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          isolation: {
+            applicationPolicy: "enforced",
+            osEnforced: false,
+            mechanism: "none",
+            reason: "fixture",
+          },
         };
       }
       return {
@@ -23,6 +31,14 @@ describe("llmfit hardware adapter", () => {
           recommendations: [{ id: "qwen", fit: "BEST", memory_gb: 8 }],
         }),
         stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        isolation: {
+          applicationPolicy: "enforced",
+          osEnforced: false,
+          mechanism: "none",
+          reason: "fixture",
+        },
       };
     });
 

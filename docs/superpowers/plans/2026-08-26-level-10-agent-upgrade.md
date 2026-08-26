@@ -368,38 +368,38 @@ Run: `git add src/agent/compaction.ts src/agent/task-runtime-state.ts src/agent/
 - Test: `tests/unit/permissions.test.ts`
 - Test: `tests/integration/privacy-context.test.ts`
 
-- [ ] **Step 1: Write failing process-policy tests.**
+- [x] **Step 1: Write failing process-policy tests.**
 
 Cover `powershell -Command curl ...`, a child process inheriting a denied
 network policy, output above the cap, and an environment containing
 `OPENAI_API_KEY`/`DATABASE_URL`. Assert network denial, bounded output, and
 credential absence.
 
-- [ ] **Step 2: Run the tests and record current policy bypasses.**
+- [x] **Step 2: Run the tests and record current policy bypasses.**
 
 Run: `bun test tests/unit/process.test.ts tests/unit/permissions.test.ts`
 
 Expected: at least the shell-indirection and child-inheritance assertions
 fail against the current regex-only boundary.
 
-- [ ] **Step 3: Implement centralized command intents and bounded process execution.**
+- [x] **Step 3: Implement centralized command intents and bounded process execution.**
 
 Require every process request to declare `read`, `test`, `build`, `package`,
 `network`, or `destructive` intent; apply one policy before spawn, cap both
 streams in the process layer, and propagate `AbortSignal` to children.
 
-- [ ] **Step 4: Add the strongest available Windows isolation adapter and report `application_policy` separately from `os_enforced`.**
+- [x] **Step 4: Add the strongest available Windows isolation adapter and report `application_policy` separately from `os_enforced`.**
 
 Detect whether the host can create a restricted process/token/job boundary;
 when it cannot, return `os_enforced: false` explicitly and keep the command
 blocked unless the selected permission policy permits the weaker mode.
 
-- [ ] **Step 5: Verify all existing tools route through the same boundary.**
+- [x] **Step 5: Verify all existing tools route through the same boundary.**
 
 Instrument the test process factory and assert Shell, RunTests, verification,
 and health probes use the same policy entry point.
 
-- [ ] **Step 6: Run security/privacy/type checks and commit.**
+- [x] **Step 6: Run security/privacy/type checks and commit.**
 
 Run: `bun test tests/unit/process.test.ts tests/unit/permissions.test.ts tests/integration/privacy-context.test.ts`; `bun run typecheck`; `git add src/shared/process-policy.ts src/shared/process.ts src/shared/process-isolation.ts src/tools/workspace.ts src/tools/types.ts tests/unit/process.test.ts tests/unit/permissions.test.ts tests/integration/privacy-context.test.ts; git commit -m "feat: centralize process and network enforcement"`
 

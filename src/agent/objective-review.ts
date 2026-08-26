@@ -603,7 +603,7 @@ export async function reviewCodingObjective(
       const diffResult = await runCommand(
         "git",
         ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--"],
-        { cwd: root, signal, timeoutMs: 10_000 },
+        { intent: "read", cwd: root, signal, timeoutMs: 10_000 },
       );
       diff = `${diffResult.stdout}\n${diffResult.stderr}`;
       const absoluteRoot = path.resolve(root);

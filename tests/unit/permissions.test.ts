@@ -59,7 +59,9 @@ test("ASK requires a fresh approval for every workspace risk", () => {
 
 test("ASK prompts before reading a workspace file and executes after approval", async () => {
   const root = await import("node:fs/promises").then(({ mkdtemp }) =>
-    mkdtemp(`${process.env.TEMP ?? process.env.TMP ?? "."}/localcode-permission-`),
+    mkdtemp(
+      `${process.env.TEMP ?? process.env.TMP ?? "."}/localcode-permission-`,
+    ),
   );
   await import("node:fs/promises").then(({ writeFile }) =>
     writeFile(`${root}/note.txt`, "approved read", "utf8"),
@@ -107,10 +109,7 @@ test("ASK prompts before creating and editing workspace files", async () => {
     signal: new AbortController().signal,
     checkpoint,
     checkpointId,
-    requestApproval: async (request: {
-      description: string;
-      risk: string;
-    }) => {
+    requestApproval: async (request: { description: string; risk: string }) => {
       requests.push(request);
       return true;
     },
@@ -260,6 +259,7 @@ test("RunTests cannot bypass the turn network policy", async () => {
 test("the shared process runner enforces the same lower-level egress policy", async () => {
   await expect(
     runCommand("cmd.exe", ["/c", "echo", "blocked"], {
+      intent: "network",
       network: "deny",
       policyCommand: "bun install",
     }),

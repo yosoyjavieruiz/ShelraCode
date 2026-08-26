@@ -53,7 +53,7 @@ async function filesFromGit(
   const result = await runCommand(
     "git",
     ["ls-files", "--cached", "--others", "--exclude-standard"],
-    { cwd: root, timeoutMs: 5_000, signal, logger },
+    { intent: "read", cwd: root, timeoutMs: 5_000, signal, logger },
   );
   if (result.exitCode !== 0) return [];
   return result.stdout
@@ -79,7 +79,7 @@ async function filesFromRg(
       "-g",
       "!.localcode/**",
     ],
-    { cwd: root, timeoutMs: 5_000, signal, logger },
+    { intent: "read", cwd: root, timeoutMs: 5_000, signal, logger },
   );
   return result.exitCode === 0
     ? result.stdout
@@ -266,6 +266,7 @@ async function objectiveSearchMatches(
     // process bounded, but recover to the deterministic file-list fallback
     // when the optional accelerator is slow.
     result = await runCommand("rg", args, {
+      intent: "read",
       cwd: root,
       timeoutMs: 20_000,
       signal,

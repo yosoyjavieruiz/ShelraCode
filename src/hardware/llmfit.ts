@@ -151,6 +151,7 @@ export class LlmfitHardwareIntelligence implements HardwareIntelligence {
       run ??
       ((command, args, signal) =>
         runCommand(command, args, {
+          intent: "read",
           signal,
           timeoutMs: 2_500,
           logger: this.logger,

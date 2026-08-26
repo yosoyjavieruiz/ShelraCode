@@ -3,6 +3,7 @@ import type { ProcessOutputChunk } from "../shared/process.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
 import type { PermissionMode } from "../shared/types.js";
 import type { ToolErrorCode } from "./errors.js";
+import type { ProcessIsolationMode } from "../shared/process-isolation.js";
 
 export type ToolRisk = "read" | "write" | "execute" | "destructive";
 
@@ -36,6 +37,10 @@ export interface ToolExecutionContext {
   permissionMode: PermissionMode;
   signal: AbortSignal;
   network?: boolean;
+  /** Whether child execution must have a host-provided OS isolation adapter. */
+  osIsolation?: ProcessIsolationMode;
+  /** Explicit host opt-in when only application policy is available. */
+  allowWeakProcessIsolation?: boolean;
   checkpoint?: CheckpointService;
   checkpointId?: string;
   /**

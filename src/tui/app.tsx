@@ -966,6 +966,7 @@ export function AppShell(
         } else if (target === "diff") {
           const { runCommand } = await import("../shared/process.js");
           const result = await runCommand("git", ["diff", "--"], {
+            intent: "read",
             cwd: process.cwd(),
             timeoutMs: 5_000,
             logger: controlPlane.logger,
@@ -1745,6 +1746,12 @@ export function AppShell(
                     permissionMode: currentTask.permissionMode,
                     signal,
                     network: executionPolicy.network,
+                    osIsolation:
+                      controlPlane.settings.permissionMode === "AUTO"
+                        ? "required"
+                        : "best_effort",
+                    allowWeakProcessIsolation:
+                      controlPlane.settings.permissionMode !== "AUTO",
                     checkpoint,
                     env: process.env,
                     requestApproval: (request) =>
@@ -3136,10 +3143,12 @@ export function AppShell(
       .then(async ({ runCommand }) => {
         const [branchResult, statusResult] = await Promise.all([
           runCommand("git", ["branch", "--show-current"], {
+            intent: "read",
             cwd: process.cwd(),
             timeoutMs: 1_000,
           }),
           runCommand("git", ["status", "--porcelain"], {
+            intent: "read",
             cwd: process.cwd(),
             timeoutMs: 1_000,
           }),

@@ -624,6 +624,7 @@ export async function openControlPlane(
 export async function commandAvailable(command: string): Promise<boolean> {
   try {
     const result = await runCommand(command, ["--version"], {
+      intent: "read",
       timeoutMs: 3_000,
     });
     return result.exitCode === 0;

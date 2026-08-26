@@ -101,6 +101,7 @@ try {
   }
 
   const gitInit = await runCommand("git", ["init", "-q"], {
+    intent: "execute",
     cwd: root,
     timeoutMs: 10_000,
   });
@@ -115,6 +116,7 @@ try {
     ["commit", "-qm", "fixture baseline"],
   ]) {
     const result = await runCommand("git", args, {
+      intent: "execute",
       cwd: root,
       timeoutMs: 10_000,
     });

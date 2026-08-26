@@ -38,12 +38,14 @@ export async function reviewWorkspaceChange(
   try {
     [diff, status] = await Promise.all([
       runCommand("git", ["diff", "--"], {
+        intent: "read",
         cwd: input.root,
         signal: input.signal,
         timeoutMs: 10_000,
         logger: input.logger,
       }),
       runCommand("git", ["status", "--short"], {
+        intent: "read",
         cwd: input.root,
         signal: input.signal,
         timeoutMs: 10_000,

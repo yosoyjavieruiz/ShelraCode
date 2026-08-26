@@ -81,6 +81,7 @@ export async function runCodeReview(
   if (!input.signal?.aborted) {
     try {
       const result = await runCommand("git", ["diff", "--check", "--"], {
+        intent: "read",
         cwd: input.root,
         signal: input.signal,
         timeoutMs: 10_000,

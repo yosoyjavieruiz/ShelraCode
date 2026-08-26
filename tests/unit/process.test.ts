@@ -1,17 +1,27 @@
 import { expect, test } from "bun:test";
-import { runCommand } from "../../src/shared/process.js";
+import {
+  runCommand,
+  runShellCommand,
+  ProcessIsolationError,
+  ProcessPolicyError,
+  type ProcessOutputChunk,
+} from "../../src/shared/process.js";
 import { createLogger, type LogRecord } from "../../src/shared/logging.js";
 
 test("a missing executable resolves with a shell-style 127 exit code instead of throwing", async () => {
-  const result = await runCommand("localcode-definitely-not-a-real-binary", [
-    "--version",
-  ]);
+  const result = await runCommand(
+    "localcode-definitely-not-a-real-binary",
+    ["--version"],
+    { intent: "read" },
+  );
   expect(result.exitCode).toBe(127);
   expect(result.stderr).toContain("localcode-definitely-not-a-real-binary");
 });
 
 test("a real command still resolves normally", async () => {
-  const result = await runCommand(process.execPath, ["--version"]);
+  const result = await runCommand(process.execPath, ["--version"], {
+    intent: "read",
+  });
   expect(result.exitCode).toBe(0);
 });
 
@@ -23,6 +33,7 @@ test("process lifecycle logs expose command outcome without command output", asy
   });
 
   const result = await runCommand(process.execPath, ["--version"], {
+    intent: "read",
     logger,
   });
 
@@ -46,6 +57,7 @@ test("an aborted process reports an AbortError and terminates the child", async 
     process.execPath,
     ["-e", "setTimeout(() => {}, 10000)"],
     {
+      intent: "execute",
       signal: controller.signal,
     },
   );
@@ -56,6 +68,7 @@ test("an aborted process reports an AbortError and terminates the child", async 
 test("a timed out process is distinguishable from user cancellation", async () => {
   await expect(
     runCommand(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], {
+      intent: "execute",
       timeoutMs: 1,
     }),
   ).rejects.toMatchObject({ name: "TimeoutError" });
@@ -74,17 +87,106 @@ test("onOutput chunks concatenate to exactly the same text runCommand itself ret
       "-e",
       "process.stdout.write('first-'); setTimeout(() => { process.stdout.write('second'); }, 30);",
     ],
-    { onOutput: (chunk) => chunks.push(chunk.text) },
+    { intent: "read", onOutput: (chunk) => chunks.push(chunk.text) },
   );
   expect(result.stdout).toBe("first-second");
   expect(chunks.join("")).toBe("first-second");
 });
 
 test("an omitted onOutput changes nothing about the resolved result", async () => {
-  const result = await runCommand(process.execPath, [
-    "-e",
-    "process.stdout.write('ok')",
-  ]);
+  const result = await runCommand(
+    process.execPath,
+    ["-e", "process.stdout.write('ok')"],
+    { intent: "read" },
+  );
   expect(result.stdout).toBe("ok");
   expect(result.exitCode).toBe(0);
+});
+
+test("the central policy rejects network indirection before spawning PowerShell", async () => {
+  await expect(
+    runCommand(
+      "powershell.exe",
+      ["-NoProfile", "-Command", "curl https://example.com"],
+      {
+        intent: "network",
+        network: "deny",
+      },
+    ),
+  ).rejects.toBeInstanceOf(ProcessPolicyError);
+});
+
+test("the central policy rejects destructive command text even when intent is mislabeled", async () => {
+  await expect(
+    runCommand("git", ["reset", "--hard"], { intent: "execute" }),
+  ).rejects.toBeInstanceOf(ProcessPolicyError);
+});
+
+test("the process layer bounds both returned output and live output", async () => {
+  const chunks: ProcessOutputChunk[] = [];
+  const result = await runCommand(
+    process.execPath,
+    [
+      "-e",
+      "process.stdout.write('x'.repeat(10000)); process.stderr.write('y'.repeat(10000))",
+    ],
+    {
+      intent: "test",
+      maxOutputChars: 1_024,
+      onOutput: (chunk) => chunks.push(chunk),
+    },
+  );
+
+  expect(result.stdout.length).toBeLessThanOrEqual(1_024);
+  expect(result.stdoutTruncated).toBe(true);
+  expect(result.stderr.length).toBeLessThanOrEqual(1_024);
+  expect(result.stderrTruncated).toBe(true);
+  expect(
+    chunks
+      .filter((chunk) => chunk.stream === "stdout")
+      .map((chunk) => chunk.text)
+      .join("").length,
+  ).toBeLessThanOrEqual(1_024);
+  expect(
+    chunks
+      .filter((chunk) => chunk.stream === "stderr")
+      .map((chunk) => chunk.text)
+      .join("").length,
+  ).toBeLessThanOrEqual(1_024);
+  expect(result.isolation.applicationPolicy).toBe("enforced");
+  expect(result.isolation.osEnforced).toBe(false);
+});
+
+test("child processes receive no credential variables", async () => {
+  const result = await runCommand(
+    process.execPath,
+    [
+      "-e",
+      "console.log(JSON.stringify({openai:process.env.OPENAI_API_KEY ?? null,database:process.env.DATABASE_URL ?? null}))",
+    ],
+    {
+      intent: "read",
+      env: {
+        PATH: process.env.PATH,
+        OPENAI_API_KEY: "secret-openai-key",
+        DATABASE_URL: "postgres://secret",
+      },
+    },
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain('"openai":null');
+  expect(result.stdout).toContain('"database":null');
+  expect(result.stdout).not.toContain("secret-openai-key");
+  expect(result.stdout).not.toContain("postgres://secret");
+});
+
+test("required OS isolation fails closed when no native adapter is available", async () => {
+  await expect(
+    runShellCommand("echo isolated", {
+      intent: "execute",
+      isolation: "required",
+      allowWeakIsolation: false,
+    }),
+  ).rejects.toBeInstanceOf(ProcessIsolationError);
 });
