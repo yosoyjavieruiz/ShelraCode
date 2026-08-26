@@ -25,7 +25,12 @@ import type { HardwareInspection } from "../hardware/types.js";
 import type { ProviderStatus } from "../providers/registry.js";
 import type { SessionSummary } from "../storage/database.js";
 import { verifyStructuralCodingCriteria } from "../agent/verification-criteria.js";
+import type { AgentTask } from "../agent/types.js";
 import type { AgentTaskLedger } from "../agent/task-state.js";
+import {
+  createSubagentDelegationTool,
+  ForegroundSubagentCoordinator,
+} from "../agent/subagents/coordinator.js";
 import {
   createTaskRuntimeSnapshot,
   type TaskInFlightMarker,
@@ -1453,7 +1458,7 @@ export function AppShell(
             executionMode,
             objective,
           );
-          const executionTools =
+          const baseExecutionTools =
             strategy === "discovery" && !selected.capabilities.tools
               ? []
               : workspaceTools.filter((tool) =>
@@ -1475,6 +1480,9 @@ export function AppShell(
             setNotice("Route selected · adapter unavailable");
             return;
           }
+          const readOnlyChildTools = workspaceTools.filter(
+            (tool) => tool.risk === "read",
+          );
           setNotice(
             `Running ${selected.providerId} · ${selected.displayName}…`,
           );
@@ -1614,64 +1622,124 @@ export function AppShell(
               sessionId,
             );
           };
+          const agentTask: AgentTask = {
+            id: runtimeTaskId,
+            objective,
+            root: process.cwd(),
+            candidate: selected,
+            mode: executionMode,
+            executionProfile: adaptiveProfile,
+            planningMode: modelPlanning ? "model" : "none",
+            enforceTaskContract: executionMode === "coding",
+            ...(executionMode === "coding" && boundedScope.length > 0
+              ? { stagedPaths: [...boundedScope] }
+              : {}),
+            repositoryPolicy: controlPlane.settings.privacy,
+            permissionMode: controlPlane.settings.permissionMode,
+            context: agentContext.prompt || undefined,
+            instructions: agentContext.trustedInstructions?.map(
+              (instruction) => ({
+                source: instruction.sourceId,
+                text: instruction.text,
+                trust: instruction.trust,
+                precedence: instruction.precedence,
+                scope: instruction.scope,
+                relevance: 1,
+              }),
+            ),
+            contextEvidenceState: agentContext.evidenceState,
+            repositoryState: repositoryIsEmpty ? "empty" : "non_empty",
+            greenfieldIntent,
+            containsHighConfidenceSecret:
+              agentContext.containsHighConfidenceSecret,
+            verificationCommand:
+              executionMode === "coding"
+                ? verificationPlan[0]?.command
+                : undefined,
+            verificationCommands:
+              executionMode === "coding" ? verificationPlan : [],
+            verificationPolicy:
+              executionMode === "coding"
+                ? verificationPlan.length > 0
+                  ? "required"
+                  : "not_required"
+                : "not_required",
+            ...(resumeRuntime ? { runtimeSnapshot: resumeRuntime } : {}),
+            maxTurns:
+              executionMode === "coding"
+                ? Math.max(16, Math.ceil(analyzedTask.complexity * 32))
+                : 8,
+            contextBudgetChars: activeContextBudget,
+            systemPromptProfile: executionPolicy.systemPromptProfile,
+          };
+          const createExecutionContext = async (
+            currentTask: AgentTask,
+          ): Promise<import("../tools/types.js").ToolExecutionContext> => ({
+            root: currentTask.root,
+            permissionMode: currentTask.permissionMode,
+            signal,
+            network: executionPolicy.network,
+            osIsolation:
+              controlPlane.settings.permissionMode === "AUTO"
+                ? "required"
+                : "best_effort",
+            allowWeakProcessIsolation:
+              controlPlane.settings.permissionMode !== "AUTO",
+            checkpoint,
+            env: process.env,
+            requestApproval: (request) =>
+              new Promise<boolean>((resolve) => {
+                if (signal.aborted) {
+                  resolve(false);
+                  return;
+                }
+                const denyOnAbort = () => resolveApproval(false);
+                signal.addEventListener("abort", denyOnAbort, {
+                  once: true,
+                });
+                setActiveApproval({
+                  description: request.description,
+                  impact:
+                    request.risk === "destructive"
+                      ? "This action can change or remove workspace state."
+                      : "This action requires explicit permission.",
+                  resolve: (allowed) => {
+                    signal.removeEventListener("abort", denyOnAbort);
+                    resolve(allowed);
+                  },
+                });
+                appEvents.emit({
+                  type: "approval.requested",
+                  description: request.description,
+                  risk: request.risk,
+                });
+                setOverlay("approval");
+                setNotice("Approval required");
+              }),
+          });
+          const subagentCoordinator = new ForegroundSubagentCoordinator({
+            provider,
+            tools: readOnlyChildTools,
+            maxTurns: 4,
+            maxContextChars: Math.min(12_000, activeContextBudget),
+            logger: taskLogger,
+          });
+          const delegationTool = createSubagentDelegationTool(
+            subagentCoordinator,
+            {
+              task: agentTask,
+              signal,
+              createExecutionContext,
+            },
+          );
+          const executionTools =
+            baseExecutionTools.length > 0
+              ? [...baseExecutionTools, delegationTool]
+              : baseExecutionTools;
           let result: Awaited<ReturnType<typeof runAgent>>;
           try {
             result = await runAgent(
-              {
-                id: runtimeTaskId,
-                objective,
-                root: process.cwd(),
-                candidate: selected,
-                mode: executionMode,
-                executionProfile: adaptiveProfile,
-                planningMode: modelPlanning ? "model" : "none",
-                enforceTaskContract: executionMode === "coding",
-                ...(executionMode === "coding" && boundedScope.length > 0
-                  ? { stagedPaths: [...boundedScope] }
-                  : {}),
-                repositoryPolicy: controlPlane.settings.privacy,
-                permissionMode: controlPlane.settings.permissionMode,
-                context: agentContext.prompt || undefined,
-                instructions: agentContext.trustedInstructions?.map(
-                  (instruction) => ({
-                    source: instruction.sourceId,
-                    text: instruction.text,
-                    trust: instruction.trust,
-                    precedence: instruction.precedence,
-                    scope: instruction.scope,
-                    relevance: 1,
-                  }),
-                ),
-                contextEvidenceState: agentContext.evidenceState,
-                repositoryState: repositoryIsEmpty ? "empty" : "non_empty",
-                greenfieldIntent,
-                containsHighConfidenceSecret:
-                  agentContext.containsHighConfidenceSecret,
-                verificationCommand:
-                  executionMode === "coding"
-                    ? verificationPlan[0]?.command
-                    : undefined,
-                verificationCommands:
-                  executionMode === "coding" ? verificationPlan : [],
-                verificationPolicy:
-                  executionMode === "coding"
-                    ? verificationPlan.length > 0
-                      ? "required"
-                      : "not_required"
-                    : "not_required",
-                ...(resumeRuntime ? { runtimeSnapshot: resumeRuntime } : {}),
-                // Coding work is a multi-step execution, not a single chat
-                // response. Keep conversation/read-only turns short, while
-                // giving staged local agents enough turns to read, mutate,
-                // verify, recover, and review without imposing an inference
-                // quota on the user.
-                maxTurns:
-                  executionMode === "coding"
-                    ? Math.max(16, Math.ceil(analyzedTask.complexity * 32))
-                    : 8,
-                contextBudgetChars: activeContextBudget,
-                systemPromptProfile: executionPolicy.systemPromptProfile,
-              },
+              agentTask,
               {
                 provider,
                 tools: executionTools,
@@ -1751,51 +1819,7 @@ export function AppShell(
                       },
                     }
                   : {}),
-                async createExecutionContext(currentTask) {
-                  return {
-                    root: currentTask.root,
-                    permissionMode: currentTask.permissionMode,
-                    signal,
-                    network: executionPolicy.network,
-                    osIsolation:
-                      controlPlane.settings.permissionMode === "AUTO"
-                        ? "required"
-                        : "best_effort",
-                    allowWeakProcessIsolation:
-                      controlPlane.settings.permissionMode !== "AUTO",
-                    checkpoint,
-                    env: process.env,
-                    requestApproval: (request) =>
-                      new Promise<boolean>((resolve) => {
-                        if (signal.aborted) {
-                          resolve(false);
-                          return;
-                        }
-                        const denyOnAbort = () => resolveApproval(false);
-                        signal.addEventListener("abort", denyOnAbort, {
-                          once: true,
-                        });
-                        setActiveApproval({
-                          description: request.description,
-                          impact:
-                            request.risk === "destructive"
-                              ? "This action can change or remove workspace state."
-                              : "This action requires explicit permission.",
-                          resolve: (allowed) => {
-                            signal.removeEventListener("abort", denyOnAbort);
-                            resolve(allowed);
-                          },
-                        });
-                        appEvents.emit({
-                          type: "approval.requested",
-                          description: request.description,
-                          risk: request.risk,
-                        });
-                        setOverlay("approval");
-                        setNotice("Approval required");
-                      }),
-                  };
-                },
+                createExecutionContext,
               },
               signal,
             );

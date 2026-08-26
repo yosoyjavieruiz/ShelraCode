@@ -1802,6 +1802,33 @@ export async function runAgent(
             ? "execute"
             : "execute";
     const output = objectOutput(result.output);
+    if (
+      call.name === "DelegateSubagent" &&
+      result.ok &&
+      output?.status === "completed" &&
+      Array.isArray(output.evidence)
+    ) {
+      for (const item of output.evidence.slice(0, 32)) {
+        const evidence = objectOutput(item);
+        if (
+          typeof evidence?.sourceId !== "string" ||
+          typeof evidence.summary !== "string"
+        )
+          continue;
+        addTaskEvidence(ledger, {
+          id: `${task.id}:subagent-evidence:${call.id}:${ledger.evidence.length}`,
+          kind: "decision",
+          source: evidence.sourceId.slice(0, 300),
+          summary: `Fresh child evidence: ${evidence.summary.slice(0, 1_000)}`,
+          relevance: 0.8,
+          freshness: 1,
+        });
+      }
+      logger?.info("agent.subagent.evidence", {
+        callId: call.id,
+        evidenceCount: output.evidence.length,
+      });
+    }
     const executionFailed =
       (call.name === "Shell" || call.name === "RunTests") &&
       typeof output?.exitCode === "number" &&

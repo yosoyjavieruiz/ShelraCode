@@ -455,34 +455,34 @@ Run: `bun test tests/unit/scoped-instructions.test.ts tests/unit/skills.test.ts 
 - Test: `tests/unit/subagents.test.ts`
 - Test: `tests/integration/subagents.test.ts`
 
-- [ ] **Step 1: Write the failing child contract test.**
+- [x] **Step 1: Write the failing child contract test.**
 
 Submit `{ objective: "find callers", allowedTools: ["SearchText"], context:
 { sourceIds: ["src/parser.ts"] } }` and assert the child receives no parent
 transcript, cannot call `EditFile`, returns evidence source IDs, and stops when
 the parent signal aborts.
 
-- [ ] **Step 2: Run the test and confirm delegation is missing.**
+- [x] **Step 2: Run the test and confirm delegation is missing.**
 
 Run: `bun test tests/unit/subagents.test.ts tests/integration/subagents.test.ts`
 
-- [ ] **Step 3: Implement a single-child foreground coordinator with no parallel mutation.**
+- [x] **Step 3: Implement a single-child foreground coordinator with no parallel mutation.**
 
 Use a fresh provider request and a child `AgentTask` with an allowlisted tool
 set. The child result must be `completed`, `blocked`, or `failed` with
 structured evidence; no child may directly mark the parent complete.
 
-- [ ] **Step 4: Integrate parent incorporation only after child evidence validates against the parent task scope.**
+- [x] **Step 4: Integrate parent incorporation only after child evidence validates against the parent task scope.**
 
 Reject evidence outside the parent root or scope, record the child result as a
 ledger action, and require the parent to make the next decision.
 
-- [ ] **Step 5: Add disposable worktree support and conflict refusal before any parallel path.**
+- [x] **Step 5: Add disposable worktree support and conflict refusal before any parallel path.**
 
 Create a worktree only for a child explicitly marked isolated; refuse merge
 when the parent or user changed the same path and surface a recovery contract.
 
-- [ ] **Step 6: Run focused integration/security/type checks and commit.**
+- [x] **Step 6: Run focused integration/security/type checks and commit.**
 
 Run: `bun test tests/unit/subagents.test.ts tests/integration/subagents.test.ts`; `bun run typecheck`; `git add src/agent/subagents src/agent/types.ts src/agent/loop.ts tests/unit/subagents.test.ts tests/integration/subagents.test.ts; git commit -m "feat: add bounded fresh-context child agents"`
 
