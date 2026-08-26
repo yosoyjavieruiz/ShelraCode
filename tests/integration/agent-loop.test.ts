@@ -17,6 +17,7 @@ import { LocalCodeDatabase } from "../../src/storage/database.js";
 import { workspaceTools } from "../../src/tools/workspace.js";
 import type { VerificationCommand } from "../../src/agent/verification-plan.js";
 import { createLogger, type LogRecord } from "../../src/shared/logging.js";
+import { compileTaskContract } from "../../src/agent/task-contract.js";
 
 const candidate: ModelCandidate = {
   id: "local/fake-coder",
@@ -253,6 +254,70 @@ describe("agent loop", () => {
       await readFile(path.join(root, "src", "value.ts"), "utf8"),
     ).toContain("value = 2");
     db.close();
+  });
+
+  test("blocks a model completion when a contract deliverable was never changed", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "localcode-proof-loop-"));
+    await mkdir(path.join(root, "src"));
+    await writeFile(
+      path.join(root, "src", "value.ts"),
+      "export const value = 1;\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    const provider = new FakeAgentProvider();
+    const contract = compileTaskContract({
+      id: "contract-proof-loop",
+      originalRequest: "Change src/value.ts and src/other.ts as requested.",
+      mode: "coding",
+      explicitPaths: ["src/value.ts", "src/other.ts"],
+    });
+
+    const result = await runAgent(
+      {
+        id: "task-proof-loop",
+        objective: contract.objective,
+        root,
+        candidate,
+        repositoryPolicy: "local_only",
+        permissionMode: "EDIT",
+        mode: "coding",
+        context: "src/value.ts is the current implementation.",
+        taskContract: contract,
+        enforceTaskContract: true,
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        verifySuccessCriteria: (_task, ledger) => ({
+          pass: true,
+          satisfiedCriterionIds: ledger.successCriteria.map(
+            (criterion) => criterion.id,
+          ),
+        }),
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "EDIT",
+          signal: new AbortController().signal,
+          checkpoint,
+        }),
+      },
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.verified).toBe(false);
+    expect(result.completion.reasons).toEqual(
+      expect.arrayContaining([
+        "required objective proof is missing: deliverable-path-2",
+      ]),
+    );
+    expect(result.objectiveProof?.missingRequirements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ requirementId: "deliverable-path-2" }),
+      ]),
+    );
   });
 
   test("does not turn a dependency name into a phantom mutation target", async () => {

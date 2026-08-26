@@ -17,6 +17,8 @@ export interface Deliverable {
   id: string;
   description: string;
   kind: string;
+  /** Host-normalized artifacts that must be proven for this deliverable. */
+  targetPaths?: string[];
   required: boolean;
   dependencies: string[];
   evidence: string[];
@@ -129,6 +131,7 @@ export function cloneTaskContract(contract: TaskContract): TaskContract {
     ...contract,
     deliverables: contract.deliverables.map((item) => ({
       ...item,
+      ...(item.targetPaths ? { targetPaths: [...item.targetPaths] } : {}),
       dependencies: [...item.dependencies],
       evidence: [...item.evidence],
     })),
@@ -275,6 +278,7 @@ export function compileTaskContract(
         id: `deliverable-path-${index + 1}`,
         description: `The requested outcome is reflected in the approved path ${pathValue}.`,
         kind: "repository_artifact",
+        targetPaths: [pathValue],
         required: true,
         dependencies: [],
         evidence: [`scope:${pathValue}`],

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { evaluateCompletionGate } from "../../src/agent/completion-gate.js";
+import type { ObjectiveProofAssessment } from "../../src/agent/objective-proof.js";
 
 const base = {
   objectiveSatisfied: true,
@@ -94,4 +95,59 @@ test("coding work cannot claim verification when the host found no check", () =>
   expect(decision.reasons).toContain(
     "required verification is unavailable; completion cannot be claimed as verified",
   );
+});
+
+test("coding work cannot complete when a required objective proof is missing", () => {
+  const objectiveProof: ObjectiveProofAssessment = {
+    pass: false,
+    confidence: 0.5,
+    proofs: [],
+    missingRequirements: [
+      {
+        requirementId: "deliverable-path-2",
+        description: "src/b.ts must be changed",
+        kind: "deliverable",
+        reason: "No successful mutation was recorded.",
+        nextAction: "Edit src/b.ts.",
+      },
+    ],
+    nextActions: ["Edit src/b.ts."],
+  };
+  const decision = evaluateCompletionGate({
+    ...base,
+    mode: "coding",
+    mutationOccurred: true,
+    verificationRequired: true,
+    verificationPerformed: true,
+    verificationPassed: true,
+    evidenceCount: 2,
+    objectiveProof,
+  } as Parameters<typeof evaluateCompletionGate>[0]);
+
+  expect(decision.canComplete).toBe(false);
+  expect(decision.reasons).toContain(
+    "required objective proof is missing: deliverable-path-2",
+  );
+});
+
+test("coding work can complete when the host objective proof passes", () => {
+  const objectiveProof: ObjectiveProofAssessment = {
+    pass: true,
+    confidence: 1,
+    proofs: [],
+    missingRequirements: [],
+    nextActions: [],
+  };
+  const decision = evaluateCompletionGate({
+    ...base,
+    mode: "coding",
+    mutationOccurred: true,
+    verificationRequired: true,
+    verificationPerformed: true,
+    verificationPassed: true,
+    evidenceCount: 2,
+    objectiveProof,
+  } as Parameters<typeof evaluateCompletionGate>[0]);
+
+  expect(decision.canComplete).toBe(true);
 });

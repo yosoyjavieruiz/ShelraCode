@@ -35,6 +35,7 @@ evaluation fixtures and release evidence scripts.
 ### Task 1: Establish the objective-proof contract (Phase 1)
 
 **Files:**
+
 - Create: `src/agent/objective-proof.ts`
 - Modify: `src/agent/task-contract.ts`
 - Modify: `src/agent/task-state.ts`
@@ -42,12 +43,13 @@ evaluation fixtures and release evidence scripts.
 - Test: `tests/unit/task-contract.test.ts`
 
 **Interfaces:**
+
 - `ObjectiveProofStatus = "unproven" | "proven" | "failed" | "not_applicable"`.
 - `ObjectiveProof` contains `id`, `requirementId`, `kind`, `source`, `summary`, `observedAt`, `status`, and optional `revision`.
 - `assessObjectiveProof(contract, ledger, evidence)` returns required deliverables/criteria with proof status, missing requirements, and bounded recovery actions.
 - The assessment is deterministic and may use only host ledger/evidence and explicitly supplied artifact facts; it never treats model prose as proof.
 
-- [ ] **Step 1: Write the failing proof-assessment tests.**
+- [x] **Step 1: Write the failing proof-assessment tests.**
 
 Add tests proving that an explicit two-file coding contract fails when only one
 file changed, passes only when both files have fresh read/change evidence and
@@ -55,14 +57,14 @@ the required verification proof exists, and rejects a model completion claim
 without a host proof. Use `createTaskLedger`, `recordTaskAction`, and
 `recordVerificationRun`; do not mock the proof evaluator.
 
-- [ ] **Step 2: Run the focused test and confirm the expected missing-module or behavior failure.**
+- [x] **Step 2: Run the focused test and confirm the expected missing-module or behavior failure.**
 
 Run: `bun test tests/unit/objective-proof.test.ts`
 
 Expected: FAIL because `objective-proof.ts` and its assessment behavior do not
 exist yet.
 
-- [ ] **Step 3: Implement the minimal typed proof model and assessment.**
+- [x] **Step 3: Implement the minimal typed proof model and assessment.**
 
 Keep the proof evaluator independent of TUI/provider code. Link explicit path
 deliverables to normalized `filesRead`/`filesChanged`; link required project
@@ -70,14 +72,14 @@ criteria to passed verification runs; link final-review requirements to the
 ledger review evidence. Return every missing requirement instead of a single
 boolean.
 
-- [ ] **Step 4: Run the focused proof and contract tests.**
+- [x] **Step 4: Run the focused proof and contract tests.**
 
 Run: `bun test tests/unit/objective-proof.test.ts tests/unit/task-contract.test.ts`
 
 Expected: PASS with the new assessment and all existing contract behavior
 preserved.
 
-- [ ] **Step 5: Commit the phase-1 proof model.**
+- [x] **Step 5: Commit the phase-1 proof model.**
 
 Run:
 
@@ -89,6 +91,7 @@ git commit -m "feat: add host-owned objective proof assessment"
 ### Task 2: Make completion consume objective proof (Phase 1)
 
 **Files:**
+
 - Modify: `src/agent/completion-gate.ts`
 - Modify: `src/agent/verifier.ts`
 - Modify: `src/agent/loop.ts`
@@ -98,12 +101,13 @@ git commit -m "feat: add host-owned objective proof assessment"
 - Test: `tests/integration/agent-loop.test.ts`
 
 **Interfaces:**
+
 - `CompletionGateInput.objectiveProof?: ObjectiveProofAssessment`.
 - `CompletionDecision` exposes stable missing-proof reasons.
 - `AgentRunResult` and `AgentEvent` retain the structured proof outcome without
   exposing private model reasoning.
 
-- [ ] **Step 1: Add failing false-success and false-block tests.**
+- [x] **Step 1: Add failing false-success and false-block tests.**
 
 Prove that a coding task with mutation, green project tests, and non-empty
 model text still blocks when a required deliverable lacks proof. Prove that a
@@ -111,27 +115,28 @@ task with no applicable project command can complete only when its contract
 explicitly marks project checks `not_required` and objective/final-review proof
 passes.
 
-- [ ] **Step 2: Run the focused tests and observe the old behavior fail.**
+- [x] **Step 2: Run the focused tests and observe the old behavior fail.**
 
 Run: `bun test tests/unit/completion-gate.test.ts tests/unit/verifier.test.ts tests/integration/agent-loop.test.ts`
 
-- [ ] **Step 3: Integrate the host proof assessment into the terminal path.**
+- [x] **Step 3: Integrate the host proof assessment into the terminal path.**
 
 Make `runAgent` evaluate proof before `complete`; a failed assessment creates
 bounded recovery work or `blocked`, never `completed`. Preserve legacy callers
 by deriving a compatibility assessment only when no contract is supplied.
 
-- [ ] **Step 4: Run focused, integration, and type checks.**
+- [x] **Step 4: Run focused, integration, and type checks.**
 
 Run: `bun test tests/unit/completion-gate.test.ts tests/unit/verifier.test.ts tests/integration/agent-loop.test.ts`; `bun run typecheck`
 
-- [ ] **Step 5: Commit the authoritative completion gate.**
+- [x] **Step 5: Commit the authoritative completion gate.**
 
 Run: `git add src/agent src/agent/types.ts tests/unit tests/integration/agent-loop.test.ts; git commit -m "feat: gate completion on objective proof"`
 
 ### Task 3: Build the bounded repository intelligence index (Phase 2)
 
 **Files:**
+
 - Create: `src/context/repository-intelligence.ts`
 - Create: `src/context/repository-language.ts`
 - Modify: `src/context/repository.ts`
@@ -140,6 +145,7 @@ Run: `git add src/agent src/agent/types.ts tests/unit tests/integration/agent-lo
 - Test: `tests/integration/context-relevance.test.ts`
 
 **Interfaces:**
+
 - `RepositorySymbol`, `RepositoryImport`, `RepositoryReference`, and
   `RepositoryIntelligence` are bounded serializable domain types.
 - `buildRepositoryIntelligence(root, snapshot, options)` accepts an
@@ -180,6 +186,7 @@ Run: `git add src/context tests/unit/repository-intelligence.test.ts tests/integ
 ### Task 4: Compile a fresh context packet per model decision (Phase 2)
 
 **Files:**
+
 - Modify: `src/context/context-compiler.ts`
 - Modify: `src/agent/loop.ts`
 - Modify: `src/agent/types.ts`
@@ -189,6 +196,7 @@ Run: `git add src/context tests/unit/repository-intelligence.test.ts tests/integ
 - Test: `tests/integration/agent-loop.test.ts`
 
 **Interfaces:**
+
 - `ContextDecisionInput` identifies turn, node, objective, constraints,
   instructions, memory, repository evidence, observations, and legal actions.
 - `compileDecisionContext(input)` returns a bounded packet plus source IDs and
@@ -253,6 +261,7 @@ Run: `git add src/context/context-compiler.ts src/agent/loop.ts src/agent/types.
 ### Task 5: Version, persist, and rehydrate the complete task ledger (Phase 3)
 
 **Files:**
+
 - Create: `src/agent/task-ledger-codec.ts`
 - Create: `src/agent/task-runtime-state.ts`
 - Modify: `src/storage/database.ts`
@@ -263,6 +272,7 @@ Run: `git add src/context/context-compiler.ts src/agent/loop.ts src/agent/types.
 - Test: `tests/integration/resume.test.ts`
 
 **Interfaces:**
+
 - `TaskRuntimeSnapshot` contains schema version, ledger, route identity,
   context anchor, active node, in-flight marker, and updated revision.
 - `serializeTaskRuntime` validates and redacts before storage.
@@ -313,6 +323,7 @@ Run: `git add src/agent/task-ledger-codec.ts src/agent/task-runtime-state.ts src
 ### Task 6: Make compaction and restart share one rehydration path (Phase 3)
 
 **Files:**
+
 - Modify: `src/agent/compaction.ts`
 - Modify: `src/agent/task-runtime-state.ts`
 - Modify: `src/agent/loop.ts`
@@ -347,6 +358,7 @@ Run: `git add src/agent/compaction.ts src/agent/task-runtime-state.ts src/agent/
 ### Task 7: Centralize child-process/network policy (Phase 4)
 
 **Files:**
+
 - Modify: `src/shared/process-policy.ts`
 - Modify: `src/shared/process.ts`
 - Modify: `src/tools/workspace.ts`
@@ -394,6 +406,7 @@ Run: `bun test tests/unit/process.test.ts tests/unit/permissions.test.ts tests/i
 ### Task 8: Implement scoped Skills and instruction precedence (Phase 5)
 
 **Files:**
+
 - Create: `src/instructions/instruction-loader.ts`
 - Create: `src/instructions/skill-loader.ts`
 - Create: `src/instructions/trust-policy.ts`
@@ -433,6 +446,7 @@ Run: `bun test tests/unit/scoped-instructions.test.ts tests/unit/skills.test.ts 
 ### Task 9: Add bounded child-agent delegation (Phase 6)
 
 **Files:**
+
 - Create: `src/agent/subagents/types.ts`
 - Create: `src/agent/subagents/coordinator.ts`
 - Create: `src/agent/subagents/context.ts`
@@ -475,6 +489,7 @@ Run: `bun test tests/unit/subagents.test.ts tests/integration/subagents.test.ts`
 ### Task 10: Add heterogeneous agent evaluations and release proof (Phase 7)
 
 **Files:**
+
 - Create: `tests/evals/agent-journeys.ts`
 - Create: `tests/evals/fixtures/`
 - Create: `scripts/evaluate-agent.ts`

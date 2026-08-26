@@ -11,6 +11,7 @@ import { ToolError, toolErrorDetails } from "../tools/errors.js";
 import type { ToolDefinition, ToolResult, ToolRisk } from "../tools/types.js";
 import { evaluateCompletionGate } from "./completion-gate.js";
 import { independentlyVerifyTask } from "./verifier.js";
+import { assessObjectiveProof } from "./objective-proof.js";
 import { compactTaskContext } from "./compaction.js";
 import {
   MAX_TOOL_CALLS_PER_RESPONSE,
@@ -2328,6 +2329,11 @@ export async function runAgent(
     return (await check?.(checkpointId)) ?? true;
   };
 
+  const objectiveProofForLedger = () =>
+    contractCriteriaEnabled
+      ? assessObjectiveProof(taskContract, ledger, ledger.evidence)
+      : undefined;
+
   const completionFor = async (turns: number): Promise<AgentRunResult> => {
     finalText = sanitizeAssistantTextForCompletion(
       finalText,
@@ -2351,6 +2357,7 @@ export async function runAgent(
         .every((criterion) => criterion.satisfied);
     const finalReviewPerformed = await reviewFinalDiff();
     const preserved = await userWorkPreserved();
+    const objectiveProof = objectiveProofForLedger();
     let completion = evaluateCompletionGate({
       mode,
       objectiveSatisfied:
@@ -2367,6 +2374,7 @@ export async function runAgent(
       finalReviewPerformed,
       unresolvedBlockers,
       userWorkPreserved: preserved,
+      ...(objectiveProof ? { objectiveProof } : {}),
     });
     if (!modelPlanIsComplete())
       completion = {
@@ -2392,6 +2400,7 @@ export async function runAgent(
       verified: completion.canComplete,
       status: completion.canComplete ? "completed" : "blocked",
       completion,
+      ...(objectiveProof ? { objectiveProof } : {}),
       evidenceCount,
       ledger,
       turns,
@@ -2517,6 +2526,7 @@ export async function runAgent(
       });
       persistLedger();
     }
+    const objectiveProof = objectiveProofForLedger();
     const independent = options.independentVerifier
       ? await options.independentVerifier(task, ledger)
       : independentlyVerifyTask({
@@ -2535,6 +2545,7 @@ export async function runAgent(
               : verificationPolicy,
           finalReviewPerformed,
           userWorkPreserved: preserved,
+          ...(objectiveProof ? { objectiveProof } : {}),
         });
     if (!independent.pass) {
       unresolvedBlockers = Math.max(1, unresolvedBlockers);

@@ -4,6 +4,7 @@ import {
   type EvidenceSufficiency,
 } from "../context/evidence-sufficiency.js";
 import type { ContextEvidence } from "./task-state.js";
+import type { ObjectiveProofAssessment } from "./objective-proof.js";
 
 export interface CompletionGateInput {
   mode: TurnMode;
@@ -21,6 +22,8 @@ export interface CompletionGateInput {
   finalReviewPerformed: boolean;
   unresolvedBlockers: number;
   userWorkPreserved: boolean;
+  /** Host-owned proof of the requested objective, when a contract is active. */
+  objectiveProof?: ObjectiveProofAssessment;
 }
 
 export interface CompletionDecision {
@@ -51,6 +54,14 @@ export function evaluateCompletionGate(
     );
   if (!input.objectiveSatisfied)
     reasons.push("success criteria are not satisfied");
+  if (input.objectiveProof && !input.objectiveProof.pass)
+    for (const requirement of input.objectiveProof.missingRequirements.slice(
+      0,
+      8,
+    ))
+      reasons.push(
+        `required objective proof is missing: ${requirement.requirementId}`,
+      );
   if (input.successCriteriaSatisfied === false)
     reasons.push("success criteria are not satisfied");
   if (EVIDENCE_MODES.has(input.mode) && evidenceState !== "SUFFICIENT")

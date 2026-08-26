@@ -1,6 +1,7 @@
 import type { AgentTaskLedger } from "./task-state.js";
 import type { TurnMode } from "./turn-policy.js";
 import type { VerificationCommand } from "./verification-plan.js";
+import type { ObjectiveProofAssessment } from "./objective-proof.js";
 
 export interface VerificationIssue {
   code:
@@ -12,7 +13,8 @@ export interface VerificationIssue {
     | "FINAL_REVIEW_MISSING"
     | "FINAL_REVIEW_FAILED"
     | "BLOCKER_PRESENT"
-    | "USER_WORK_CHANGED";
+    | "USER_WORK_CHANGED"
+    | "OBJECTIVE_PROOF_MISSING";
   message: string;
   severity: "error" | "warning";
 }
@@ -26,6 +28,7 @@ export interface IndependentVerificationInput {
   verificationState?: "not_required" | "available" | "unavailable";
   finalReviewPerformed: boolean;
   userWorkPreserved: boolean;
+  objectiveProof?: ObjectiveProofAssessment;
 }
 
 export interface IndependentVerificationResult {
@@ -139,6 +142,16 @@ export function independentlyVerifyTask(
         "A checkpointed file changed outside the task's latest known content.",
       severity: "error",
     });
+  if (input.objectiveProof && !input.objectiveProof.pass)
+    for (const requirement of input.objectiveProof.missingRequirements.slice(
+      0,
+      8,
+    ))
+      issues.push({
+        code: "OBJECTIVE_PROOF_MISSING",
+        message: `Required objective proof is missing: ${requirement.requirementId}. ${requirement.reason}`,
+        severity: "error",
+      });
   const errors = issues.filter((issue) => issue.severity === "error").length;
   return {
     pass: errors === 0,

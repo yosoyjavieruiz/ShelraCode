@@ -6,6 +6,7 @@ import {
   recordVerificationRun,
 } from "../../src/agent/task-state.js";
 import { independentlyVerifyTask } from "../../src/agent/verifier.js";
+import type { ObjectiveProofAssessment } from "../../src/agent/objective-proof.js";
 
 test("independent verifier rejects a claimed coding completion without mutation or verification", () => {
   const ledger = createTaskLedger({
@@ -134,5 +135,56 @@ test("independent verifier reports unavailable coding verification explicitly", 
   expect(result.pass).toBe(false);
   expect(result.issues.map((issue) => issue.code)).toContain(
     "VERIFICATION_UNAVAILABLE",
+  );
+});
+
+test("independent verifier rejects completion when objective proof is incomplete", () => {
+  const ledger = createTaskLedger({
+    id: "verify-objective-proof",
+    objective: "Update two files",
+    mode: "coding",
+  });
+  addTaskEvidence(ledger, {
+    id: "evidence-1",
+    kind: "file",
+    source: "src/a.ts",
+    summary: "The first file was inspected.",
+    relevance: 1,
+    freshness: 1,
+  });
+  recordTaskAction(ledger, {
+    id: "write-1",
+    kind: "write",
+    target: "src/a.ts",
+    status: "succeeded",
+  });
+  const objectiveProof: ObjectiveProofAssessment = {
+    pass: false,
+    confidence: 0,
+    proofs: [],
+    missingRequirements: [
+      {
+        requirementId: "deliverable-path-2",
+        description: "src/b.ts",
+        kind: "deliverable",
+        reason: "The second file was not changed.",
+        nextAction: "Edit src/b.ts.",
+      },
+    ],
+    nextActions: ["Edit src/b.ts."],
+  };
+  const result = independentlyVerifyTask({
+    objective: ledger.objective,
+    mode: "coding",
+    ledger,
+    verificationRequired: false,
+    finalReviewPerformed: true,
+    userWorkPreserved: true,
+    objectiveProof,
+  } as Parameters<typeof independentlyVerifyTask>[0]);
+
+  expect(result.pass).toBe(false);
+  expect(result.issues.map((issue) => issue.code)).toContain(
+    "OBJECTIVE_PROOF_MISSING",
   );
 });

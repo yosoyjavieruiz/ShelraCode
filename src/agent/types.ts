@@ -25,6 +25,7 @@ import type { VerificationCommand } from "./verification-plan.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
 import type { AdaptiveExecutionProfile } from "./execution-profile.js";
 import type { TaskContract } from "./task-contract.js";
+import type { ObjectiveProofAssessment } from "./objective-proof.js";
 
 export interface AgentTask {
   id: string;
@@ -161,6 +162,8 @@ export interface AgentRunResult {
   /** Structured provider/runtime evidence when execution failed before completion. */
   failure?: ProviderFailure;
   completion: CompletionDecision;
+  /** Host-owned objective proof used by the completion decision. */
+  objectiveProof?: ObjectiveProofAssessment;
   evidenceCount: number;
   ledger: AgentTaskLedger;
   turns: number;
