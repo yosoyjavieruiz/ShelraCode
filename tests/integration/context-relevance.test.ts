@@ -46,6 +46,49 @@ test("context discovery promotes source files matching the objective text", asyn
   expect(context.prompt).toContain("refreshTokenLifecycle");
 });
 
+test("context includes bounded structural evidence for the objective neighborhood", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "localcode-context-"));
+  temporaryRoots.push(root);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await mkdir(path.join(root, "tests"), { recursive: true });
+  await writeFile(
+    path.join(root, "src", "parser.ts"),
+    "export function parse(input: string) { return input; }\n",
+  );
+  await writeFile(
+    path.join(root, "src", "service.ts"),
+    'import { parse } from "./parser";\nexport function handle(input: string) { return parse(input); }\n',
+  );
+  await writeFile(
+    path.join(root, "tests", "parser.test.ts"),
+    'import { parse } from "../src/parser";\ntest("parse", () => parse("ok"));\n',
+  );
+
+  const context = await buildRepositoryContext({
+    root,
+    objective: "Fix the parser service",
+    maxChars: 16_000,
+  });
+
+  expect(context.intelligence?.symbols).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ name: "parse", path: "src/parser.ts" }),
+    ]),
+  );
+  expect(context.intelligenceSources).toEqual(
+    expect.arrayContaining([
+      "src/parser.ts",
+      "src/service.ts",
+      "tests/parser.test.ts",
+    ]),
+  );
+  expect(context.prompt).toContain("Repository structural intelligence");
+  expect(context.prompt).toContain(
+    "src/service.ts:1 ./parser -> src/parser.ts",
+  );
+  expect(context.prompt).toContain("Related tests:");
+});
+
 test("context relevance does not promote ignored credential paths", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "localcode-context-"));
   temporaryRoots.push(root);

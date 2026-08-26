@@ -15,6 +15,10 @@ import { loadScopedInstructions } from "./instructions.js";
 import { isDirectRepositoryFactQuestion } from "../shared/repository-facts.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
 import { selectRelevantMemory } from "../shared/memory.js";
+import {
+  buildRepositoryIntelligence,
+  selectRelatedRepositoryEvidence,
+} from "./repository-intelligence.js";
 
 const priorityNames = new Set([
   "README",
@@ -355,6 +359,57 @@ function orderFiles(
   });
 }
 
+function structuralPrompt(
+  selection: ReturnType<typeof selectRelatedRepositoryEvidence>,
+): string[] {
+  const lines: string[] = [
+    "Repository structural intelligence (bounded host evidence; verify before mutation):",
+  ];
+  if (selection.symbols.length > 0) {
+    lines.push(
+      "- Symbols:",
+      ...selection.symbols
+        .slice(0, 48)
+        .map(
+          (symbol) =>
+            `  - ${symbol.path}:${symbol.line} ${symbol.kind} ${symbol.name}`,
+        ),
+    );
+  }
+  if (selection.imports.length > 0) {
+    lines.push(
+      "- Imports:",
+      ...selection.imports
+        .slice(0, 48)
+        .map(
+          (item) =>
+            `  - ${item.path}:${item.line} ${item.source}${item.resolvedPath ? ` -> ${item.resolvedPath}` : ""}`,
+        ),
+    );
+  }
+  if (selection.references.length > 0) {
+    lines.push(
+      "- References:",
+      ...selection.references
+        .slice(0, 48)
+        .map(
+          (reference) =>
+            `  - ${reference.path}:${reference.line} ${reference.kind} ${reference.name}${reference.targetPath ? ` -> ${reference.targetPath}` : ""}`,
+        ),
+    );
+  }
+  if (selection.relatedTests.length > 0) {
+    lines.push(
+      "- Related tests:",
+      ...selection.relatedTests
+        .slice(0, 32)
+        .map((pair) => `  - ${pair.sourcePath} <-> ${pair.testPath}`),
+    );
+  }
+  if (lines.length === 1) return [];
+  return [lines.join("\n").slice(0, 6_000)];
+}
+
 export async function listRepositoryFiles(
   root: string,
   signal?: AbortSignal,
@@ -404,9 +459,23 @@ async function buildRepositoryContextInternal(
         logger,
       );
   const relevantMatches = objectiveSearch.matches;
+  const intelligence =
+    !factQuestion && options.buildIntelligence !== false
+      ? await buildRepositoryIntelligence({
+          root: options.root,
+          files,
+          signal: options.signal,
+        })
+      : undefined;
+  const intelligenceSelection = intelligence
+    ? selectRelatedRepositoryEvidence(intelligence, options.objective, [
+        ...explicit,
+        ...relevantMatches,
+      ])
+    : undefined;
   const ordered = orderFiles(
     factQuestion ? rootFactFiles(files, snapshot) : files,
-    [...explicit, ...relevantMatches],
+    [...explicit, ...relevantMatches, ...(intelligenceSelection?.files ?? [])],
     options.objective,
   );
   const loadedInstructions = factQuestion
@@ -487,9 +556,15 @@ async function buildRepositoryContextInternal(
       includedFiles.includes(normalizePath(candidate)),
     );
   const evidenceState: RepositoryContext["evidenceState"] =
-    relevantMatches.length > 0 || hasDirectFactEvidence || hasExplicitEvidence
+    relevantMatches.length > 0 ||
+    Boolean(intelligenceSelection?.files.length) ||
+    hasDirectFactEvidence ||
+    hasExplicitEvidence
       ? "SUFFICIENT"
       : "INSUFFICIENT";
+  const structuralEvidence = intelligenceSelection
+    ? structuralPrompt(intelligenceSelection)
+    : [];
   const result = {
     files: includedFiles,
     relevantMatches,
@@ -515,6 +590,7 @@ async function buildRepositoryContextInternal(
             ...relevantMatches.slice(0, 12).map((file) => `- ${file}`),
           ]
         : []),
+      ...structuralEvidence,
       ...(factQuestion
         ? [
             "Context focus: answer this direct repository fact from the host facts and root manifests below.",
@@ -529,11 +605,16 @@ async function buildRepositoryContextInternal(
     evidenceState,
     searchBackend: objectiveSearch.backend,
     memoryFacts,
+    intelligence,
+    intelligenceSources: intelligenceSelection?.sourceIds,
+    intelligenceSelection,
   };
   logger?.info("context.discovery.finished", {
     discoveredFileCount: files.length,
     selectedFileCount: includedFiles.length,
     objectiveMatchCount: relevantMatches.length,
+    structuralSourceCount: intelligenceSelection?.sourceIds.length ?? 0,
+    indexedFileCount: intelligence?.indexedFiles.length ?? 0,
     instructionCount: loadedInstructions.length,
     usedChars,
     maxChars,

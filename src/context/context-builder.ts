@@ -1,6 +1,10 @@
 import type { RepositorySnapshot } from "./repository-snapshot.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
 import type { MemoryFact } from "../shared/memory.js";
+import type {
+  RepositoryIntelligence,
+  RepositoryIntelligenceSelection,
+} from "./repository-intelligence.js";
 
 export interface ContextBudgetInput {
   advertisedContext: number;
@@ -42,6 +46,8 @@ export interface RepositoryContextOptions {
   snapshot?: RepositorySnapshot;
   /** Historical facts used only as bounded retrieval hints. */
   memoryFacts?: readonly MemoryFact[];
+  /** Build bounded structural repository evidence for the current objective. */
+  buildIntelligence?: boolean;
   logger?: LocalCodeLogger;
 }
 
@@ -58,6 +64,12 @@ export interface RepositoryContext {
   evidenceState: "SUFFICIENT" | "INSUFFICIENT" | "CONFLICTING";
   /** Bounded memory hints included in the compiled context, never authority. */
   memoryFacts?: MemoryFact[];
+  /** Host-built structural index; it is evidence, not an objective oracle. */
+  intelligence?: RepositoryIntelligence;
+  /** Objective-selected files/symbol sources included in the packet. */
+  intelligenceSources?: string[];
+  /** Structured selection retained for host-side consumers and diagnostics. */
+  intelligenceSelection?: RepositoryIntelligenceSelection;
   searchBackend:
     "rg" | "fallback" | "no_matches" | "unavailable" | "not_needed";
 }
