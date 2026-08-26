@@ -4,6 +4,15 @@ import type { ModelCandidate } from "../shared/types.js";
 import type { AgentTaskLedger } from "../agent/task-state.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
 import type { MemoryFact, MemoryKind } from "../shared/memory.js";
+import {
+  restoreTaskRuntime,
+  serializeTaskRuntime,
+  type RuntimeRestoreResult,
+} from "../agent/task-ledger-codec.js";
+import type {
+  TaskRuntimeSnapshot,
+  TaskRuntimeSnapshotInput,
+} from "../agent/task-runtime-state.js";
 
 const CURRENT_SCHEMA_VERSION = 4;
 type StoredAgentProbe = NonNullable<ModelCandidate["agentProbe"]>;
@@ -347,13 +356,103 @@ export class LocalCodeDatabase {
     });
   }
 
+  /**
+   * Persist the versioned runtime envelope used by durable resume. The
+   * historical saveAgentTask method remains available for legacy callers;
+   * new task execution should use this method so route/context/in-flight
+   * state is not discarded.
+   */
+  saveAgentRuntime(
+    input: TaskRuntimeSnapshot | TaskRuntimeSnapshotInput,
+    sessionId?: string,
+  ): void {
+    const encoded = serializeTaskRuntime(input);
+    const restored = restoreTaskRuntime(encoded);
+    if (!restored.ok)
+      throw new Error(
+        `Cannot persist invalid runtime snapshot: ${restored.error.reason}`,
+      );
+    const snapshot = restored.snapshot;
+    const effectiveSessionId = sessionId ?? snapshot.sessionId;
+    this.db
+      .query(
+        `INSERT INTO agent_tasks
+          (id, session_id, objective, mode, phase, ledger_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           session_id = excluded.session_id,
+           objective = excluded.objective,
+           mode = excluded.mode,
+           phase = excluded.phase,
+           ledger_json = excluded.ledger_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        snapshot.taskId,
+        effectiveSessionId ?? null,
+        snapshot.ledger.objective,
+        snapshot.ledger.mode,
+        snapshot.ledger.phase,
+        encoded,
+        snapshot.ledger.startedAt,
+        snapshot.updatedAt,
+      );
+    if (effectiveSessionId)
+      this.db
+        .query("UPDATE sessions SET updated_at = ? WHERE id = ?")
+        .run(snapshot.updatedAt, effectiveSessionId);
+    this.logger?.debug("storage.runtime.persisted", {
+      taskId: snapshot.taskId,
+      sessionId: effectiveSessionId,
+      phase: snapshot.ledger.phase,
+      updatedRevision: snapshot.updatedRevision,
+      inFlight: snapshot.inFlight?.kind,
+    });
+  }
+
+  getAgentRuntime(taskId: string): RuntimeRestoreResult | undefined {
+    const row = this.db
+      .query<{ ledger_json: string }, [string]>(
+        "SELECT ledger_json FROM agent_tasks WHERE id = ?",
+      )
+      .get(taskId);
+    if (!row) return undefined;
+    const restored = restoreTaskRuntime(row.ledger_json);
+    if (restored.ok) return restored;
+    const legacy = parseTaskLedger(row.ledger_json);
+    return legacy
+      ? {
+          ok: false,
+          error: {
+            code: "INVALID_RUNTIME_SNAPSHOT",
+            reason:
+              "task record is a legacy ledger without a versioned runtime snapshot",
+          },
+        }
+      : restored;
+  }
+
+  getLatestAgentRuntime(sessionId: string): RuntimeRestoreResult | undefined {
+    const row = this.db
+      .query<{ ledger_json: string }, [string]>(
+        "SELECT ledger_json FROM agent_tasks WHERE session_id = ? ORDER BY updated_at DESC LIMIT 1",
+      )
+      .get(sessionId);
+    if (!row) return undefined;
+    return restoreTaskRuntime(row.ledger_json);
+  }
+
   getAgentTask(taskId: string): AgentTaskLedger | undefined {
     const row = this.db
       .query<{ ledger_json: string }, [string]>(
         "SELECT ledger_json FROM agent_tasks WHERE id = ?",
       )
       .get(taskId);
-    return row ? parseTaskLedger(row.ledger_json) : undefined;
+    if (!row) return undefined;
+    const runtime = restoreTaskRuntime(row.ledger_json);
+    return runtime.ok
+      ? runtime.snapshot.ledger
+      : parseTaskLedger(row.ledger_json);
   }
 
   listAgentTasks(sessionId?: string, limit = 20): AgentTaskLedger[] {
@@ -369,7 +468,10 @@ export class LocalCodeDatabase {
           )
           .all(limit);
     return rows.flatMap((row) => {
-      const ledger = parseTaskLedger(row.ledger_json);
+      const runtime = restoreTaskRuntime(row.ledger_json);
+      const ledger = runtime.ok
+        ? runtime.snapshot.ledger
+        : parseTaskLedger(row.ledger_json);
       return ledger ? [ledger] : [];
     });
   }

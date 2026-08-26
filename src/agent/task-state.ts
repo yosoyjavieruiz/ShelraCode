@@ -148,6 +148,19 @@ export function terminalPhase(phase: AgentPhase): boolean {
   return terminalPhases.has(phase);
 }
 
+/**
+ * Reopen a persisted non-complete task for a new user-controlled resume.
+ * Completed work is intentionally immutable; blocked/failed/cancelled work
+ * resumes through the reflective recovery phase instead of replaying an
+ * in-flight mutation.
+ */
+export function reopenTaskForResume(ledger: AgentTaskLedger): void {
+  if (ledger.phase === "complete")
+    throw new Error("A completed task cannot be resumed as active work.");
+  if (terminalPhases.has(ledger.phase)) ledger.phase = "reflect";
+  ledger.updatedAt = now();
+}
+
 function now(): string {
   return new Date().toISOString();
 }

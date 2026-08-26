@@ -153,33 +153,33 @@ Run: `git add src/agent src/agent/types.ts tests/unit tests/integration/agent-lo
 - `selectRelatedRepositoryEvidence(index, objective, explicitPaths)` ranks
   exact paths, symbols, imports, references, and tests before lexical fallback.
 
-- [ ] **Step 1: Write failing heterogeneous fixture tests.**
+- [x] **Step 1: Write failing heterogeneous fixture tests.**
 
 Create disposable TypeScript, Python, and Go files in the test fixture and
 assert that exported symbols, relative imports, references, and test partners
 are indexed and ranked ahead of unrelated lexical matches.
 
-- [ ] **Step 2: Run the focused test and confirm the index is absent.**
+- [x] **Step 2: Run the focused test and confirm the index is absent.**
 
 Run: `bun test tests/unit/repository-intelligence.test.ts`
 
-- [ ] **Step 3: Implement bounded language-aware extraction.**
+- [x] **Step 3: Implement bounded language-aware extraction.**
 
 Use existing filesystem/process abstractions and deterministic regex/token
 parsers for supported languages; preserve unknown-language lexical fallback.
 Canonicalize all paths under the workspace, cap files/symbols/references, and
 never execute package scripts as part of indexing.
 
-- [ ] **Step 4: Integrate ranked intelligence into context construction.**
+- [x] **Step 4: Integrate ranked intelligence into context construction.**
 
 Add the index as a bounded context section and record its sources as
 `ContextEvidence`; do not expose unbounded repository content or private files.
 
-- [ ] **Step 5: Run focused context tests, typecheck, and the fixture integration.**
+- [x] **Step 5: Run focused context tests, typecheck, and the fixture integration.**
 
 Run: `bun test tests/unit/repository-intelligence.test.ts tests/integration/context-relevance.test.ts`; `bun run typecheck`
 
-- [ ] **Step 6: Commit repository intelligence.**
+- [x] **Step 6: Commit repository intelligence.**
 
 Run: `git add src/context tests/unit/repository-intelligence.test.ts tests/integration/context-relevance.test.ts; git commit -m "feat: add bounded repository intelligence"`
 
@@ -202,7 +202,7 @@ Run: `git add src/context tests/unit/repository-intelligence.test.ts tests/integ
 - `compileDecisionContext(input)` returns a bounded packet plus source IDs and
   omitted-section reasons.
 
-- [ ] **Step 1: Write the failing decision-context test.**
+- [x] **Step 1: Write the failing decision-context test.**
 
 Add a test equivalent to:
 
@@ -224,14 +224,14 @@ expect(packet.text).not.toContain("unrelated-large-output");
 expect(packet.sourceIds).toContain("src/parser.ts");
 ```
 
-- [ ] **Step 2: Run the focused test and observe the missing compiler export.**
+- [x] **Step 2: Run the focused test and observe the missing compiler export.**
 
 Run: `bun test tests/unit/context-compiler.test.ts -t "decision context"`
 
 Expected: FAIL because `compileDecisionContext` and its bounded source contract
 do not exist.
 
-- [ ] **Step 3: Implement the bounded compiler and replace only the next-decision input path.**
+- [x] **Step 3: Implement the bounded compiler and replace only the next-decision input path.**
 
 Keep `compileContextPacket` backward-compatible. Add explicit section budgets,
 source IDs, and omitted-section reasons; have `runAgent` compile the next
@@ -239,7 +239,7 @@ request from the active node/evidence instead of blindly appending every old
 tool output. Do not remove the recent-message window until the new packet is
 present in an integration assertion.
 
-- [ ] **Step 4: Add the compaction retention assertion.**
+- [x] **Step 4: Add the compaction retention assertion.**
 
 Extend `tests/unit/compaction.test.ts` with:
 
@@ -250,11 +250,11 @@ expect(compacted.text).toContain("missing proof");
 expect(compacted.sourceIds).toContain("src/parser.ts");
 ```
 
-- [ ] **Step 5: Run context/compaction/agent integration tests and typecheck.**
+- [x] **Step 5: Run context/compaction/agent integration tests and typecheck.**
 
 Run: `bun test tests/unit/context-compiler.test.ts tests/unit/compaction.test.ts tests/integration/agent-loop.test.ts`; `bun run typecheck`
 
-- [ ] **Step 6: Commit the decision-context path.**
+- [x] **Step 6: Commit the decision-context path.**
 
 Run: `git add src/context/context-compiler.ts src/agent/loop.ts src/agent/types.ts src/agent/compaction.ts tests/unit/context-compiler.test.ts tests/unit/compaction.test.ts tests/integration/agent-loop.test.ts; git commit -m "feat: compile bounded context per decision"`
 
@@ -279,13 +279,13 @@ Run: `git add src/context/context-compiler.ts src/agent/loop.ts src/agent/types.
 - `restoreTaskRuntime` rejects incompatible/corrupt snapshots with a typed
   recovery result and never silently starts a fresh task.
 
-- [ ] **Step 1: Write the failing round-trip test.**
+- [x] **Step 1: Write the failing round-trip test.**
 
 Construct a ledger with a model plan, a failed action, a proof gap, and a
 verification run; assert `restoreTaskRuntime(serializeTaskRuntime(input))`
 preserves all of them and the route model ID.
 
-- [ ] **Step 2: Write the failing corruption test and run both tests.**
+- [x] **Step 2: Write the failing corruption test and run both tests.**
 
 Pass `{ schemaVersion: 1, ledger: null }` and an unknown future version to the
 codec. Assert a typed `INVALID_RUNTIME_SNAPSHOT` result instead of a new task.
@@ -294,29 +294,29 @@ Run: `bun test tests/unit/task-ledger-codec.test.ts tests/unit/storage.test.ts`
 
 Expected: FAIL because the runtime codec/repository is not implemented.
 
-- [ ] **Step 3: Implement the versioned codec and DB repository methods.**
+- [x] **Step 3: Implement the versioned codec and DB repository methods.**
 
 Validate every persisted array/object at the boundary, preserve unknown fields
 only inside a versioned `extensions` object, and redact model/output text from
 the snapshot. Return `Result`/typed errors used by the existing storage layer.
 
-- [ ] **Step 4: Make the user resume path restore the ledger before calling the loop.**
+- [x] **Step 4: Make the user resume path restore the ledger before calling the loop.**
 
 Load the latest `agent_tasks` snapshot for the selected session, restore it,
 and pass the recovered task/runtime anchor to `runAgent`; refuse to start when
 the snapshot is corrupt or belongs to another repository revision.
 
-- [ ] **Step 5: Add in-flight recovery rules for model, tool, mutation, and verification boundaries.**
+- [x] **Step 5: Add in-flight recovery rules for model, tool, mutation, and verification boundaries.**
 
 Mark an in-flight action as interrupted on restore and create one bounded
 recovery contract with the original action ID; never replay a destructive
 mutation automatically.
 
-- [ ] **Step 6: Run storage/resume/agent tests and typecheck.**
+- [x] **Step 6: Run storage/resume/agent tests and typecheck.**
 
 Run: `bun test tests/unit/task-ledger-codec.test.ts tests/unit/storage.test.ts tests/integration/resume.test.ts tests/integration/agent-loop.test.ts`; `bun run typecheck`
 
-- [ ] **Step 7: Commit durable task state.**
+- [x] **Step 7: Commit durable task state.**
 
 Run: `git add src/agent/task-ledger-codec.ts src/agent/task-runtime-state.ts src/storage/database.ts src/tui/app.tsx src/agent/loop.ts tests/unit/task-ledger-codec.test.ts tests/unit/storage.test.ts tests/integration/resume.test.ts; git commit -m "feat: persist and restore task runtime state"`
 

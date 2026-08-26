@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { LocalCodeDatabase } from "../../src/storage/database.js";
 import { createTaskLedger, setTaskPhase } from "../../src/agent/task-state.js";
 import { createTaskEpisodeMemoryFact } from "../../src/shared/memory.js";
+import { createTaskRuntimeSnapshot } from "../../src/agent/task-runtime-state.js";
 
 test("storage migrations are idempotent and preserve settings", () => {
   const storage = new LocalCodeDatabase(":memory:");
@@ -102,6 +103,51 @@ test("storage persists and restores the structured agent task ledger", () => {
   storage.saveAgentTask(ledger, "session-1");
   expect(storage.getAgentTask("task-1")?.phase).toBe("analyze");
 
+  storage.close();
+});
+
+test("storage persists the versioned runtime envelope for durable resume", () => {
+  const storage = new LocalCodeDatabase(":memory:");
+  const ledger = createTaskLedger({
+    id: "runtime-task",
+    objective: "Resume the parser repair",
+    mode: "coding",
+  });
+  const snapshot = createTaskRuntimeSnapshot({
+    ledger,
+    repositoryRoot: "D:/fixture/repository",
+    repositoryRevision: "revision-1",
+    sessionId: "session-runtime",
+    route: {
+      candidateId: "local/qwen",
+      providerId: "lm-studio",
+      modelId: "qwen-coder",
+    },
+    contextAnchor: {
+      sourceIds: ["src/parser.ts"],
+      instructionSources: ["AGENTS.md"],
+      memoryIds: ["memory:parser"],
+      proofGapIds: ["deliverable-parser"],
+      activeNodeId: "mutate-parser",
+    },
+    activeNodeId: "mutate-parser",
+    updatedRevision: 4,
+  });
+
+  storage.saveAgentRuntime(snapshot, "session-runtime");
+  const restored = storage.getAgentRuntime("runtime-task");
+  const latest = storage.getLatestAgentRuntime("session-runtime");
+
+  expect(restored?.ok).toBe(true);
+  expect(latest?.ok).toBe(true);
+  if (!restored?.ok || !latest?.ok) return;
+  expect(restored.snapshot.route?.modelId).toBe("qwen-coder");
+  expect(restored.snapshot.activeNodeId).toBe("mutate-parser");
+  expect(restored.snapshot.contextAnchor.proofGapIds).toEqual([
+    "deliverable-parser",
+  ]);
+  expect(restored.snapshot.updatedRevision).toBe(4);
+  expect(latest.snapshot.taskId).toBe("runtime-task");
   storage.close();
 });
 

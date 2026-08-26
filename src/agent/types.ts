@@ -26,6 +26,10 @@ import type { LocalCodeLogger } from "../shared/logging.js";
 import type { AdaptiveExecutionProfile } from "./execution-profile.js";
 import type { TaskContract } from "./task-contract.js";
 import type { ObjectiveProofAssessment } from "./objective-proof.js";
+import type {
+  TaskInFlightMarker,
+  TaskRuntimeSnapshot,
+} from "./task-runtime-state.js";
 
 export interface AgentTask {
   id: string;
@@ -43,6 +47,8 @@ export interface AgentTask {
   taskContract?: TaskContract;
   /** Make the compiled contract's criteria part of completion authority. */
   enforceTaskContract?: boolean;
+  /** Versioned state restored by a durable resume operation. */
+  runtimeSnapshot?: TaskRuntimeSnapshot;
   successCriteria?: string[];
   /** Host-framed constraints retained in the authoritative task ledger. */
   constraints?: string[];
@@ -192,7 +198,15 @@ export interface AgentLoopOptions {
   toolChoice?: "none" | "auto" | "required";
   events?: AppEventBus;
   onEvent?: (event: AgentEvent) => void;
-  persistTask?: (ledger: AgentTaskLedger) => void;
+  /**
+   * Persist the authoritative ledger. When an operation is about to cross a
+   * process boundary, the optional marker makes restart recovery explicit;
+   * callers must clear it with a subsequent marker-less persistence call.
+   */
+  persistTask?: (
+    ledger: AgentTaskLedger,
+    inFlight?: TaskInFlightMarker,
+  ) => void;
   /**
    * Host-owned preservation check. The kernel must not assume that the
    * workspace remained untouched merely because a mutation returned without

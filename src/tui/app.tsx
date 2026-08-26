@@ -26,6 +26,11 @@ import type { ProviderStatus } from "../providers/registry.js";
 import type { SessionSummary } from "../storage/database.js";
 import { verifyStructuralCodingCriteria } from "../agent/verification-criteria.js";
 import type { AgentTaskLedger } from "../agent/task-state.js";
+import {
+  createTaskRuntimeSnapshot,
+  type TaskInFlightMarker,
+  type TaskRuntimeSnapshot,
+} from "../agent/task-runtime-state.js";
 import { reviewWorkspaceChange } from "../agent/workspace-review.js";
 import { runCodeReview } from "../agent/code-review-agent.js";
 import {
@@ -1065,6 +1070,7 @@ export function AppShell(
     objective: string,
     turnId: string,
     sessionId = turnId,
+    resumeRuntime?: TaskRuntimeSnapshot,
   ): Promise<void> => {
     const taskAbort = new AbortController();
     activeTaskAbort = taskAbort;
@@ -1158,6 +1164,24 @@ export function AppShell(
               evidenceState: "SUFFICIENT" as const,
               searchBackend: "not_needed" as const,
             };
+        if (resumeRuntime) {
+          const expectedRoot = path
+            .resolve(resumeRuntime.repositoryRoot)
+            .toLowerCase();
+          const currentRoot = path.resolve(process.cwd()).toLowerCase();
+          if (expectedRoot !== currentRoot)
+            throw new Error(
+              "Cannot resume this task from a different repository root.",
+            );
+          const currentRevision = routingContext.snapshot?.revision;
+          if (
+            resumeRuntime.repositoryRevision &&
+            currentRevision !== resumeRuntime.repositoryRevision
+          )
+            throw new Error(
+              "Cannot resume this task because the repository revision changed.",
+            );
+        }
         if (routingContext.snapshot) {
           for (const fact of repositorySnapshotMemoryFacts(
             routingContext.snapshot,
@@ -1351,7 +1375,8 @@ export function AppShell(
             Math.ceil(routingContext.prompt.length / 4),
           ),
           candidates: executableCandidates,
-          preferredCandidateId: selectedModel?.id,
+          preferredCandidateId:
+            resumeRuntime?.route?.candidateId ?? selectedModel?.id,
           execution: {
             strategy: (progressiveExecution
               ? "progressive"
@@ -1474,7 +1499,7 @@ export function AppShell(
                 explicitPaths: contextFiles(),
                 memoryFacts: semanticMemoryFacts,
                 logger: taskLogger,
-            })
+              })
             : routingContext;
           const adaptiveProfile = selectExecutionProfile({
             mode: executionMode,
@@ -1522,11 +1547,76 @@ export function AppShell(
               executionContextChars: agentContext.prompt.length,
             },
           });
+          const runtimeTaskId = resumeRuntime?.taskId ?? turnId;
+          let runtimeRevision = resumeRuntime?.updatedRevision ?? 0;
+          const runtimeRoute = {
+            candidateId: selected.id,
+            providerId: selected.providerId,
+            ...(selected.modelId ? { modelId: selected.modelId } : {}),
+            ...(selected.local?.runtime
+              ? { runtimeId: selected.local.runtime }
+              : {}),
+            ...(selected.agentProbe?.agentCapabilityClass
+              ? { capability: selected.agentProbe.agentCapabilityClass }
+              : {}),
+          };
+          const runtimeContextAnchor = {
+            sourceIds: [
+              ...new Set([
+                ...(resumeRuntime?.contextAnchor.sourceIds ?? []),
+                ...(agentContext.intelligenceSources ?? []),
+                ...agentContext.files,
+              ]),
+            ],
+            instructionSources: [
+              ...new Set([
+                ...(resumeRuntime?.contextAnchor.instructionSources ?? []),
+                ...(agentContext.snapshot?.instructionFiles ?? []).map(
+                  (file) => file.path,
+                ),
+                ...(agentContext.instructions ?? []),
+              ]),
+            ],
+            memoryIds: [
+              ...new Set([
+                ...(resumeRuntime?.contextAnchor.memoryIds ?? []),
+                ...semanticMemoryFacts.map((fact) => fact.id),
+              ]),
+            ],
+            proofGapIds: [...(resumeRuntime?.contextAnchor.proofGapIds ?? [])],
+            ...(resumeRuntime?.contextAnchor.summary
+              ? { summary: resumeRuntime.contextAnchor.summary }
+              : {}),
+          };
+          const persistRuntime = (
+            ledger: AgentTaskLedger,
+            inFlight?: TaskInFlightMarker,
+          ): void => {
+            runtimeRevision += 1;
+            controlPlane.db.saveAgentRuntime(
+              createTaskRuntimeSnapshot({
+                ledger,
+                repositoryRoot: process.cwd(),
+                sessionId,
+                ...(agentContext.snapshot?.revision
+                  ? { repositoryRevision: agentContext.snapshot.revision }
+                  : {}),
+                route: runtimeRoute,
+                contextAnchor: runtimeContextAnchor,
+                ...(ledger.taskGraph?.currentNodeId
+                  ? { activeNodeId: ledger.taskGraph.currentNodeId }
+                  : {}),
+                ...(inFlight ? { inFlight } : {}),
+                updatedRevision: runtimeRevision,
+              }),
+              sessionId,
+            );
+          };
           let result: Awaited<ReturnType<typeof runAgent>>;
           try {
             result = await runAgent(
               {
-                id: turnId,
+                id: runtimeTaskId,
                 objective,
                 root: process.cwd(),
                 candidate: selected,
@@ -1557,6 +1647,7 @@ export function AppShell(
                       ? "required"
                       : "not_required"
                     : "not_required",
+                ...(resumeRuntime ? { runtimeSnapshot: resumeRuntime } : {}),
                 // Coding work is a multi-step execution, not a single chat
                 // response. Keep conversation/read-only turns short, while
                 // giving staged local agents enough turns to read, mutate,
@@ -1582,8 +1673,7 @@ export function AppShell(
                   ? {}
                   : {
                       events: appEvents,
-                      persistTask: (ledger: AgentTaskLedger) =>
-                        controlPlane.db.saveAgentTask(ledger, sessionId),
+                      persistTask: persistRuntime,
                     }),
                 checkUserWorkPreserved: (checkpointId) =>
                   checkpointId ? checkpoint.isPreserved(checkpointId) : true,
@@ -1972,16 +2062,45 @@ export function AppShell(
       }),
     );
     setNotice("Resuming task from the current workspace state…");
-    void runTask(session.objective, turnId, session.id).catch(
-      (error: unknown) => {
-        appendError(error instanceof Error ? error.message : "Task failed");
-        setNotice(
-          error instanceof Error && error.name === "AbortError"
-            ? "Task cancelled"
-            : "Task failed",
+    void (async () => {
+      const { openControlPlane } = await import("../cli/control-plane.js");
+      const controlPlane = await openControlPlane(process.cwd());
+      let runtimeResult;
+      try {
+        runtimeResult = controlPlane.db.getLatestAgentRuntime(session.id);
+      } finally {
+        controlPlane.close();
+      }
+      if (!runtimeResult) {
+        setNotice("No durable task state is available for this session");
+        return;
+      }
+      if (!runtimeResult.ok) {
+        appendError(
+          `Task resume refused: ${runtimeResult.error.reason}`,
+          "The persisted task state was not replaced with a new task.",
         );
-      },
-    );
+        setNotice("Resume blocked - invalid saved task state");
+        return;
+      }
+      if (runtimeResult.snapshot.ledger.phase === "complete") {
+        setNotice("Task already completed; start a new request to continue");
+        return;
+      }
+      await runTask(
+        session.objective,
+        turnId,
+        session.id,
+        runtimeResult.snapshot,
+      );
+    })().catch((error: unknown) => {
+      appendError(error instanceof Error ? error.message : "Task failed");
+      setNotice(
+        error instanceof Error && error.name === "AbortError"
+          ? "Task cancelled"
+          : "Task failed",
+      );
+    });
   };
 
   const setupPrivacyOptions: RepositoryPrivacy[] = [

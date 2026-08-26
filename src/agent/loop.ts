@@ -58,6 +58,7 @@ import {
   recordRecoveryContract,
   recordTaskAction,
   recordVerificationRun,
+  reopenTaskForResume,
   setTaskCriterion,
   setTaskPlan,
   setTaskPhase,
@@ -66,6 +67,7 @@ import {
 } from "./task-state.js";
 import type { AgentPhase, AgentTaskLedger, PlanStep } from "./task-state.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
+import type { TaskInFlightMarker } from "./task-runtime-state.js";
 import type {
   AgentEvent,
   AgentLoopOptions,
@@ -829,6 +831,17 @@ export async function runAgent(
   signal = new AbortController().signal,
 ): Promise<AgentRunResult> {
   const toolMap = new Map(options.tools.map((tool) => [tool.name, tool]));
+  const restoredRuntime = task.runtimeSnapshot
+    ? structuredClone(task.runtimeSnapshot)
+    : undefined;
+  const restoredLedger = restoredRuntime?.ledger
+    ? structuredClone(restoredRuntime.ledger)
+    : undefined;
+  if (restoredLedger && restoredLedger.objective !== task.objective)
+    throw new Error(
+      "Cannot resume a task with an objective different from its persisted runtime.",
+    );
+  if (restoredLedger) reopenTaskForResume(restoredLedger);
   const profile = task.systemPromptProfile ?? "coding";
   const mode: TurnMode =
     task.mode ??
@@ -837,10 +850,14 @@ export async function runAgent(
       : task.verificationCommand || task.verificationCommands?.length
         ? "coding"
         : "workspace_question");
-  const verificationPlan = normalizeVerificationPlan(
+  const requestedVerificationPlan = normalizeVerificationPlan(
     task.verificationCommands,
     task.verificationCommand,
   );
+  const verificationPlan =
+    requestedVerificationPlan.length > 0
+      ? requestedVerificationPlan
+      : (restoredLedger?.verificationPlan ?? []);
   const verificationPolicy =
     task.verificationPolicy ??
     (mode === "coding"
@@ -874,18 +891,21 @@ export async function runAgent(
       uncertaintyCount:
         mode === "coding" && objectivePaths.length === 0 ? 1 : 0,
     });
-  const planningMode = task.planningMode ?? "compatibility";
-  const taskContract = task.taskContract
-    ? cloneTaskContract(task.taskContract)
-    : compileTaskContract({
-        id: task.id,
-        originalRequest: task.objective,
-        mode,
-        executionProfile,
-        explicitPaths: objectivePaths,
-        verificationCommands: verificationPlan,
-        constraints: task.constraints,
-      });
+  const planningMode =
+    restoredLedger?.planningMode ?? task.planningMode ?? "compatibility";
+  const taskContract = restoredLedger?.contract
+    ? cloneTaskContract(restoredLedger.contract)
+    : task.taskContract
+      ? cloneTaskContract(task.taskContract)
+      : compileTaskContract({
+          id: task.id,
+          originalRequest: task.objective,
+          mode,
+          executionProfile,
+          explicitPaths: objectivePaths,
+          verificationCommands: verificationPlan,
+          constraints: task.constraints,
+        });
   const constraints = [
     ...new Set([
       ...taskContract.constraints.map((constraint) => constraint.description),
@@ -932,32 +952,74 @@ export async function runAgent(
   const successCriteria =
     task.successCriteria && task.successCriteria.length > 0
       ? task.successCriteria
-      : contractCriteriaEnabled
-        ? taskContract.acceptanceCriteria.map(
+      : restoredLedger && restoredLedger.successCriteria.length > 0
+        ? restoredLedger.successCriteria.map(
             (criterion) => criterion.description,
           )
-        : ["Address the user's objective with an evidence-backed response."];
+        : contractCriteriaEnabled
+          ? taskContract.acceptanceCriteria.map(
+              (criterion) => criterion.description,
+            )
+          : ["Address the user's objective with an evidence-backed response."];
   const explicitSuccessCriteria =
     (task.successCriteria?.length ?? 0) > 0 || contractCriteriaEnabled;
-  const ledger = createTaskLedger({
-    id: task.id,
-    objective: task.objective,
-    mode,
-    contract: taskContract,
-    executionProfile,
-    planningMode,
-    verificationPlan,
-    successCriteria: successCriteria.map((description, index) => ({
-      id: `criterion-${index + 1}`,
-      description,
-      required: true,
-      satisfied: false,
-    })),
-    constraints: constraints.map((description, index) => ({
-      id: `constraint-${index + 1}`,
-      description,
-    })),
-  });
+  const ledger =
+    restoredLedger ??
+    createTaskLedger({
+      id: task.id,
+      objective: task.objective,
+      mode,
+      contract: taskContract,
+      executionProfile,
+      planningMode,
+      verificationPlan,
+      successCriteria: successCriteria.map((description, index) => ({
+        id: `criterion-${index + 1}`,
+        description,
+        required: true,
+        satisfied: false,
+      })),
+      constraints: constraints.map((description, index) => ({
+        id: `constraint-${index + 1}`,
+        description,
+      })),
+    });
+  ledger.contract ??= taskContract;
+  ledger.executionProfile ??= executionProfile;
+  ledger.planningMode ??= planningMode;
+  ledger.verificationPlan = verificationPlan;
+  if (restoredRuntime?.inFlight) {
+    const interrupted = restoredRuntime.inFlight;
+    const timestamp = new Date().toISOString();
+    recordTaskAction(ledger, {
+      id: `${task.id}:resume-interrupted:${interrupted.actionId}`,
+      kind:
+        interrupted.kind === "model"
+          ? "decide"
+          : interrupted.kind === "verification"
+            ? "verify"
+            : interrupted.kind === "mutation"
+              ? "write"
+              : interrupted.kind === "tool"
+                ? "execute"
+                : "decide",
+      target: interrupted.target ?? interrupted.actionId,
+      status: "failed",
+      startedAt: interrupted.startedAt,
+      completedAt: timestamp,
+      summary:
+        "The persisted operation was interrupted by process termination and was not replayed automatically.",
+    });
+    addTaskBlocker(ledger, {
+      id: `${task.id}:resume-interrupted-blocker`,
+      summary: `Interrupted ${interrupted.kind} operation ${interrupted.actionId} requires a fresh bounded decision.`,
+      recoverable: true,
+      suggestedAction:
+        interrupted.kind === "mutation"
+          ? "Re-read the target and decide whether the mutation was committed before attempting any new write."
+          : "Inspect the preserved task state and continue from a fresh host observation.",
+    });
+  }
   const logger = options.logger?.child({
     component: "agent.loop",
     taskId: task.id,
@@ -997,7 +1059,8 @@ export async function runAgent(
   });
   transitionPhase(ledger, "discover", loopOptions);
   options.persistTask?.(ledger);
-  const persistLedger = (): void => options.persistTask?.(ledger);
+  const persistLedger = (inFlight?: TaskInFlightMarker): void =>
+    options.persistTask?.(ledger, inFlight);
   const emitPlan = (): void => {
     if (!ledger.plan) return;
     persistLedger();
@@ -1047,18 +1110,20 @@ export async function runAgent(
       updatedAt: new Date().toISOString(),
     });
   };
-  ledger.taskGraph = compileTaskGraph({
-    objective: task.objective,
-    mode,
-    candidateFiles: objectivePaths,
-    verificationCommands: verificationPlan.map((item) => item.command),
-    constraints,
-  });
-  if (planningMode === "model")
-    ledger.taskGraph = createModelPlanningGraph({
+  if (!restoredLedger?.taskGraph) {
+    ledger.taskGraph = compileTaskGraph({
       objective: task.objective,
+      mode,
+      candidateFiles: objectivePaths,
+      verificationCommands: verificationPlan.map((item) => item.command),
       constraints,
     });
+    if (planningMode === "model")
+      ledger.taskGraph = createModelPlanningGraph({
+        objective: task.objective,
+        constraints,
+      });
+  }
   persistLedger();
   const currentModelNode = (): TaskNode | undefined => {
     if (planningMode !== "model" || !ledger.taskGraph?.currentNodeId)
@@ -3242,6 +3307,12 @@ export async function runAgent(
       continuationMessages: requestMessages.length - 2,
     });
     const assistantTextParts: string[] = [];
+    const modelActionId = `${task.id}:model:${turn}`;
+    persistLedger({
+      kind: "model",
+      actionId: modelActionId,
+      startedAt: new Date().toISOString(),
+    });
     options.trace?.record({
       taskId: task.id,
       type: "turn.started",
@@ -3352,6 +3423,8 @@ export async function runAgent(
         providerFailureMessage(failure),
         failure,
       );
+    } finally {
+      persistLedger();
     }
     if (recoverableProviderFailure) {
       modelProtocolRecoveryCount += 1;
@@ -4518,7 +4591,22 @@ export async function runAgent(
               tool: call.name,
               ...chunk,
             });
-          const output = await tool.execute(input, context);
+          const toolStartedAt = new Date().toISOString();
+          persistLedger({
+            kind:
+              tool.risk === "write" || tool.risk === "destructive"
+                ? "mutation"
+                : "tool",
+            actionId: call.id,
+            ...(requestedPath ? { target: requestedPath } : {}),
+            startedAt: toolStartedAt,
+          });
+          let output: unknown;
+          try {
+            output = await tool.execute(input, context);
+          } finally {
+            persistLedger();
+          }
           const execution = executionFailure(call.name, input, output);
           const result: ToolResult = {
             tool: call.name,
@@ -4696,7 +4784,12 @@ export async function runAgent(
           status: "running",
           startedAt: verificationStartedAt,
         });
-        persistLedger();
+        persistLedger({
+          kind: "verification",
+          actionId: verificationId,
+          target: planned.command,
+          startedAt: verificationStartedAt,
+        });
         emit(loopOptions, {
           type: "verification.started",
           id: verificationId,
@@ -4715,13 +4808,17 @@ export async function runAgent(
         let output = "";
         let passed = false;
         try {
-          const verification = await runTestsTool.execute(
-            runTestsTool.validate({ command: planned.command }),
-            context,
-          );
-          exitCode = verification.exitCode;
-          output = verification.output;
-          passed = exitCode === 0;
+          try {
+            const verification = await runTestsTool.execute(
+              runTestsTool.validate({ command: planned.command }),
+              context,
+            );
+            exitCode = verification.exitCode;
+            output = verification.output;
+            passed = exitCode === 0;
+          } finally {
+            persistLedger();
+          }
         } catch (error) {
           if (
             signal.aborted ||
