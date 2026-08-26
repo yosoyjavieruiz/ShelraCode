@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   compileContextPacket,
+  compileDecisionContext,
   renderContextPacket,
 } from "../../src/context/context-compiler.js";
 
@@ -37,4 +38,29 @@ test("rejects an invalid packet budget or empty objective", () => {
   expect(() =>
     compileContextPacket({ objective: "Inspect", tokenBudget: 255 }),
   ).toThrow(/tokenBudget/i);
+});
+
+test("compiles a fresh decision context from bounded, relevant sources", () => {
+  const packet = compileDecisionContext({
+    objective: "Fix the parser",
+    subtask: "Inspect the parser and its tests",
+    constraints: ["preserve the public API"],
+    instructions: [{ source: "AGENTS.md", text: "run the focused tests" }],
+    memory: [],
+    evidence: [{ source: "src/parser.ts", summary: "parser symbol" }],
+    observations: [
+      { source: "old-tool", text: "unrelated-large-output".repeat(2_000) },
+      { source: "ReadFile", text: "export function parse(input: string)" },
+    ],
+    legalActions: ["ReadFile", "SearchText"],
+    tokenBudget: 2_000,
+  });
+
+  expect(packet.text).toContain("Fix the parser");
+  expect(packet.text).toContain("src/parser.ts");
+  expect(packet.text).toContain("export function parse");
+  expect(packet.text).not.toContain("unrelated-large-output");
+  expect(packet.sourceIds).toContain("src/parser.ts");
+  expect(packet.sourceIds).toContain("ReadFile");
+  expect(packet.omittedSections).toContain("observations:budget");
 });

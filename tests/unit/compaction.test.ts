@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { compactTaskContext } from "../../src/agent/compaction.js";
 import {
+  addTaskBlocker,
   addTaskEvidence,
   createTaskLedger,
   recordRecoveryContract,
@@ -88,4 +89,39 @@ test("compaction rejects an unsafe budget", () => {
     mode: "knowledge",
   });
   expect(() => compactTaskContext(ledger, [], 100)).toThrow(/budget/i);
+});
+
+test("compaction exposes rehydration text and structural source ids", () => {
+  const ledger = createTaskLedger({
+    id: "compact-rehydration",
+    objective: "Fix the parser",
+    mode: "coding",
+  });
+  ledger.taskGraph = compileTaskGraph({
+    objective: ledger.objective,
+    mode: ledger.mode,
+    candidateFiles: ["src/parser.ts"],
+    verificationCommands: [],
+  });
+  if (ledger.taskGraph) ledger.taskGraph.currentNodeId = "current-node";
+  addTaskEvidence(ledger, {
+    id: "parser-source",
+    kind: "file",
+    source: "src/parser.ts",
+    summary: "parser symbol",
+    relevance: 1,
+    freshness: 1,
+  });
+  addTaskBlocker(ledger, {
+    id: "missing-proof",
+    summary: "missing proof for parser deliverable",
+    recoverable: true,
+  });
+
+  const compacted = compactTaskContext(ledger, [], 1_800);
+
+  expect(compacted.text).toContain("Fix the parser");
+  expect(compacted.text).toContain("current-node");
+  expect(compacted.text).toContain("missing proof");
+  expect(compacted.sourceIds).toContain("src/parser.ts");
 });

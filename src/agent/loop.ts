@@ -20,6 +20,7 @@ import {
 import { normalizeProviderEvents } from "../providers/stream-normalizer.js";
 import {
   compileContextPacket,
+  compileDecisionContext,
   renderContextPacket,
 } from "../context/context-compiler.js";
 import { extractObjectivePaths } from "./objective-review.js";
@@ -639,6 +640,24 @@ function normalizeWorkspacePath(value: string): string {
     parts.push(part);
   }
   return parts.join("/");
+}
+
+function latestToolContinuation(
+  messages: readonly NormalizedMessage[],
+): NormalizedMessage[] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const assistant = messages[index];
+    if (assistant?.role !== "assistant" || !assistant.toolCalls?.length)
+      continue;
+    const continuation: NormalizedMessage[] = [assistant];
+    for (let next = index + 1; next < messages.length; next += 1) {
+      const message = messages[next];
+      if (message?.role !== "tool") break;
+      continuation.push(message);
+    }
+    return continuation.length > 1 ? continuation : [];
+  }
+  return [];
 }
 
 function mutationFailureKey(
@@ -3142,6 +3161,86 @@ export async function runAgent(
           ? STAGED_MUTATION_OUTPUT_TOKENS
           : STAGED_DISCOVERY_OUTPUT_TOKENS
         : maxOutputTokens;
+    const currentNode = currentModelNode();
+    const decisionContext = compileDecisionContext({
+      turn,
+      ...(currentNode?.id ? { nodeId: currentNode.id } : {}),
+      objective: task.objective,
+      subtask:
+        currentNode?.objective ??
+        (activeWorkUnitTarget
+          ? `Continue the bounded work unit for ${activeWorkUnitTarget}.`
+          : undefined),
+      constraints,
+      ...(task.context?.trim()
+        ? {
+            evidence: [
+              {
+                source: "host-context",
+                kind: "repository",
+                summary: task.context,
+                relevance: 1,
+              },
+              ...ledger.evidence.map((evidence) => ({
+                source: evidence.source,
+                kind: evidence.kind,
+                summary: evidence.summary,
+                relevance: evidence.relevance,
+              })),
+            ],
+          }
+        : {
+            evidence: ledger.evidence.map((evidence) => ({
+              source: evidence.source,
+              kind: evidence.kind,
+              summary: evidence.summary,
+              relevance: evidence.relevance,
+            })),
+          }),
+      observations: messages
+        .filter((message) => message.role !== "system")
+        .slice(-16)
+        .map((message) => ({
+          source: message.role,
+          text: message.content,
+        })),
+      ...(pendingRecoveryInstruction
+        ? { unresolvedProblem: pendingRecoveryInstruction }
+        : ledger.blockers.at(-1)?.summary
+          ? { unresolvedProblem: ledger.blockers.at(-1)!.summary }
+          : {}),
+      legalActions: turnTools.map((tool) => tool.name),
+      expectedOutput:
+        currentNode?.objective ?? "Choose one bounded, legal next action.",
+      tokenBudget: Math.min(
+        16_384,
+        Math.max(1_024, Math.ceil((contextBudgetChars ?? 50_000) / 4)),
+      ),
+    });
+    const continuation = latestToolContinuation(messages);
+    const decisionUser: NormalizedMessage = {
+      role: "user",
+      content: decisionContext.text,
+    };
+    const requestMessages: NormalizedMessage[] = [
+      {
+        role: "system",
+        content:
+          messages[0]?.role === "system"
+            ? messages[0].content
+            : baseSystemPrompt,
+      },
+      ...(messages.at(-1)?.role === "tool"
+        ? [decisionUser, ...continuation]
+        : [...continuation, decisionUser]),
+    ];
+    logger?.debug("agent.decision_context.compiled", {
+      turn,
+      sourceCount: decisionContext.sourceIds.length,
+      omittedSections: decisionContext.omittedSections,
+      packetChars: decisionContext.text.length,
+      continuationMessages: requestMessages.length - 2,
+    });
     const assistantTextParts: string[] = [];
     options.trace?.record({
       taskId: task.id,
@@ -3180,7 +3279,7 @@ export async function runAgent(
         options.provider.stream(
           {
             modelId: providerModelId(task),
-            messages,
+            messages: requestMessages,
             temperature,
             maxOutputTokens: turnMaxOutputTokens,
             ...(turnTools.length > 0

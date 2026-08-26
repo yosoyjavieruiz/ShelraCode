@@ -5,6 +5,10 @@ export interface CompactedTaskContext {
   messages: NormalizedMessage[];
   omittedMessages: number;
   preservedState: string;
+  /** The bounded structured state packet used for rehydration diagnostics. */
+  text: string;
+  /** Repository/source identifiers retained independently from raw prose. */
+  sourceIds: string[];
 }
 
 function clip(value: string, max = 600): string {
@@ -41,8 +45,23 @@ function compactText(value: string | undefined, max = 600): string | undefined {
   return clip(value, max);
 }
 
-function compactStrings(values: readonly string[] | undefined, max = 32): string[] {
+function compactStrings(
+  values: readonly string[] | undefined,
+  max = 32,
+): string[] {
   return (values ?? []).slice(-max).map((value) => clip(value, 600));
+}
+
+function preservedSourceIds(ledger: AgentTaskLedger): string[] {
+  const ids = new Set<string>();
+  for (const evidence of ledger.evidence.slice(-32)) ids.add(evidence.source);
+  for (const file of ledger.filesRead.slice(-64)) ids.add(file);
+  for (const file of ledger.filesChanged.slice(-64)) ids.add(file);
+  for (const step of ledger.plan?.steps ?? [])
+    for (const scope of step.scope ?? []) ids.add(scope);
+  for (const node of ledger.taskGraph?.nodes ?? [])
+    for (const candidate of node.scope.candidateFiles) ids.add(candidate);
+  return [...ids].filter((value) => value.trim().length > 0).slice(-128);
 }
 
 function stateSummary(ledger: AgentTaskLedger, maxChars = 16_000): string {
@@ -77,12 +96,14 @@ function stateSummary(ledger: AgentTaskLedger, maxChars = 16_000): string {
           evidence: compactStrings(item.evidence, 8),
           status: item.status,
         })),
-        evidenceRequirements: ledger.contract.evidenceRequirements.map((item) => ({
-          id: item.id,
-          description: clip(item.description),
-          kind: item.kind,
-          required: item.required,
-        })),
+        evidenceRequirements: ledger.contract.evidenceRequirements.map(
+          (item) => ({
+            id: item.id,
+            description: clip(item.description),
+            kind: item.kind,
+            required: item.required,
+          }),
+        ),
         repositoryScope: ledger.contract.repositoryScope,
         permissions: ledger.contract.permissions,
         risk: {
@@ -128,7 +149,9 @@ function stateSummary(ledger: AgentTaskLedger, maxChars = 16_000): string {
         planSource: ledger.taskGraph.planSource,
         revision: ledger.taskGraph.revision,
         acceptanceCriteria: compactStrings(ledger.taskGraph.acceptanceCriteria),
-        evidenceRequirements: compactStrings(ledger.taskGraph.evidenceRequirements),
+        evidenceRequirements: compactStrings(
+          ledger.taskGraph.evidenceRequirements,
+        ),
         nodes: ledger.taskGraph.nodes.map((node) => ({
           id: node.id,
           status: node.status,
@@ -372,5 +395,7 @@ export function compactTaskContext(
       messages.length - compacted.length + (system ? 1 : 0),
     ),
     preservedState: state,
+    text: state,
+    sourceIds: preservedSourceIds(ledger),
   };
 }
