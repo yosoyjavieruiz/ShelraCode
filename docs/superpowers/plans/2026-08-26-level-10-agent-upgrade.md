@@ -416,7 +416,7 @@ Run: `bun test tests/unit/process.test.ts tests/unit/permissions.test.ts tests/i
 - Test: `tests/unit/skills.test.ts`
 - Test: `tests/integration/privacy-context.test.ts`
 
-- [ ] **Step 1: Write the failing loader and precedence tests.**
+- [x] **Step 1: Write the failing loader and precedence tests.**
 
 Create a fixture with root/nested `AGENTS.md`, a Skill metadata file, a full
 Skill body, a README instruction, and tool output that says to ignore policy.
@@ -424,22 +424,22 @@ Assert discovery returns metadata only, body loading occurs only after a
 matching task, nested trusted instructions override parent instructions, and
 README/tool output never enters the trusted instruction list.
 
-- [ ] **Step 2: Run the tests and confirm there is no runtime Skill loader.**
+- [x] **Step 2: Run the tests and confirm there is no runtime Skill loader.**
 
 Run: `bun test tests/unit/scoped-instructions.test.ts tests/unit/skills.test.ts`
 
-- [ ] **Step 3: Implement bounded loader, trust labels, and deterministic precedence.**
+- [x] **Step 3: Implement bounded loader, trust labels, and deterministic precedence.**
 
 Use `system > project root > nested scope > user task > memory > repository
 data` for policy composition, while preserving user intent as the task
 payload; a lower-trust source may add evidence but cannot change permissions.
 
-- [ ] **Step 4: Integrate only trusted instruction content into the decision packet and record provenance.**
+- [x] **Step 4: Integrate only trusted instruction content into the decision packet and record provenance.**
 
 Include Skill metadata globally, include at most the selected Skill bodies under
 their token budget, and add source IDs/trust labels to `ContextEvidence`.
 
-- [ ] **Step 5: Run instruction/privacy/type checks and commit.**
+- [x] **Step 5: Run instruction/privacy/type checks and commit.**
 
 Run: `bun test tests/unit/scoped-instructions.test.ts tests/unit/skills.test.ts tests/integration/privacy-context.test.ts`; `bun run typecheck`; `git add src/instructions src/context/instructions.ts src/context/context-compiler.ts tests/unit/scoped-instructions.test.ts tests/unit/skills.test.ts tests/integration/privacy-context.test.ts; git commit -m "feat: load scoped skills with trusted instruction precedence"`
 

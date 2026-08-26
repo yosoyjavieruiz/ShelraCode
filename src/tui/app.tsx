@@ -1576,6 +1576,7 @@ export function AppShell(
                   (file) => file.path,
                 ),
                 ...(agentContext.instructions ?? []),
+                ...(agentContext.instructionSources ?? []),
               ]),
             ],
             memoryIds: [
@@ -1631,6 +1632,16 @@ export function AppShell(
                 repositoryPolicy: controlPlane.settings.privacy,
                 permissionMode: controlPlane.settings.permissionMode,
                 context: agentContext.prompt || undefined,
+                instructions: agentContext.trustedInstructions?.map(
+                  (instruction) => ({
+                    source: instruction.sourceId,
+                    text: instruction.text,
+                    trust: instruction.trust,
+                    precedence: instruction.precedence,
+                    scope: instruction.scope,
+                    relevance: 1,
+                  }),
+                ),
                 contextEvidenceState: agentContext.evidenceState,
                 repositoryState: repositoryIsEmpty ? "empty" : "non_empty",
                 greenfieldIntent,

@@ -30,6 +30,16 @@ import type {
   TaskInFlightMarker,
   TaskRuntimeSnapshot,
 } from "./task-runtime-state.js";
+import type { InstructionTrust } from "../instructions/trust-policy.js";
+
+export interface AgentTaskInstruction {
+  source: string;
+  text: string;
+  trust?: InstructionTrust;
+  precedence?: number;
+  scope?: string;
+  relevance?: number;
+}
 
 export interface AgentTask {
   id: string;
@@ -53,6 +63,8 @@ export interface AgentTask {
   /** Host-framed constraints retained in the authoritative task ledger. */
   constraints?: string[];
   context?: string;
+  /** Host-composed trusted instructions kept separate from repository data. */
+  instructions?: AgentTaskInstruction[];
   /** Host discovery result used by the write gate; it is not model authority. */
   contextEvidenceState?: "SUFFICIENT" | "INSUFFICIENT" | "CONFLICTING";
   /** Host-observed repository shape used to distinguish greenfield work. */

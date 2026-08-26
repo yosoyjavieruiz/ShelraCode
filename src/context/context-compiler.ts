@@ -1,3 +1,5 @@
+import type { InstructionTrust } from "../instructions/trust-policy.js";
+
 /**
  * A bounded, decision-specific view of repository/task state.
  *
@@ -51,6 +53,9 @@ export interface ContextPacketInput {
 export interface DecisionContextInstruction {
   source: string;
   text: string;
+  trust?: InstructionTrust;
+  precedence?: number;
+  scope?: string;
   relevance?: number;
 }
 
@@ -244,9 +249,16 @@ function instructionLines(
   objective: string,
   omitted: string[],
 ): string[] {
-  return boundedDecisionText(values, objective, 16, 4_000, omitted).map(
-    (item) => `[${item.source}] ${item.text}`,
-  );
+  return boundedDecisionText(values, objective, 16, 4_000, omitted)
+    .sort(
+      (left, right) =>
+        (left.precedence ?? 0) - (right.precedence ?? 0) ||
+        left.source.localeCompare(right.source),
+    )
+    .map(
+      (item) =>
+        `[${item.source}] [trust=${item.trust ?? "project"}] ${item.text}`,
+    );
 }
 
 function memoryLines(

@@ -5,13 +5,17 @@ import {
   normalizePath,
   scanSecrets,
 } from "../privacy/policy.js";
+import { isPrivilegedInstructionName } from "../instructions/trust-policy.js";
 import { runCommand } from "../shared/process.js";
 import type {
   RepositoryContext,
   RepositoryContextOptions,
 } from "./context-builder.js";
 import { inspectRepositorySnapshot } from "./repository-snapshot.js";
-import { loadScopedInstructions } from "./instructions.js";
+import {
+  composeTrustedInstructions,
+  loadScopedInstructions,
+} from "./instructions.js";
 import { isDirectRepositoryFactQuestion } from "../shared/repository-facts.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
 import { selectRelevantMemory } from "../shared/memory.js";
@@ -19,6 +23,10 @@ import {
   buildRepositoryIntelligence,
   selectRelatedRepositoryEvidence,
 } from "./repository-intelligence.js";
+import {
+  buildSkillContext,
+  type LoadedSkill,
+} from "../instructions/skill-loader.js";
 
 const priorityNames = new Set([
   "README",
@@ -487,6 +495,25 @@ async function buildRepositoryContextInternal(
         ordered,
         options.signal,
       );
+  const skillContext =
+    factQuestion || options.loadSkills === false
+      ? { metadata: [], selected: [], loaded: [] as LoadedSkill[] }
+      : await buildSkillContext(options.root, options.objective, {
+          signal: options.signal,
+          maxSkills: 64,
+        });
+  const trustedInstructions = composeTrustedInstructions({
+    project: [
+      ...loadedInstructions,
+      ...skillContext.loaded.map((skill) => ({
+        source: skill.sourceId,
+        text: skill.body,
+        trust: skill.trust,
+        kind: "skill" as const,
+        precedence: skill.precedence,
+      })),
+    ],
+  }).instructions;
   const maxChars = options.maxChars ?? 40_000;
   const memoryFacts = selectRelevantMemory(
     options.memoryFacts ?? [],
@@ -499,23 +526,41 @@ async function buildRepositoryContextInternal(
   const sections: string[] = [];
   const includedFiles: string[] = [];
 
-  for (const instruction of loadedInstructions) {
-    const safeContent = redactSecrets(instruction.content);
-    const findings = scanSecrets(instruction.content);
+  if (skillContext.metadata.length > 0) {
+    const metadataLines = skillContext.metadata
+      .slice(0, 64)
+      .map(
+        (skill) =>
+          `- ${skill.name} (${skill.sourceId}): ${redactSecrets(skill.description)}`,
+      )
+      .join("\n");
+    const remaining = Math.max(0, maxChars - usedChars);
+    const clippedMetadata = metadataLines.slice(0, remaining);
+    if (clippedMetadata)
+      sections.push(
+        `Available Skill metadata (bodies loaded only for objective matches):\n${clippedMetadata}`,
+      );
+    usedChars += clippedMetadata.length;
+  }
+
+  for (const instruction of trustedInstructions) {
+    const safeContent = redactSecrets(instruction.text);
+    const findings = scanSecrets(instruction.text);
     if (findings.length > 0) {
       containsHighConfidenceSecret = true;
-      secretPaths.push(instruction.path);
+      secretPaths.push(instruction.sourceId);
     }
     const remaining = Math.max(0, maxChars - usedChars);
     const clipped = safeContent.slice(0, Math.min(remaining, 8_000));
     if (!clipped) break;
-    sections.push(`### Instruction ${instruction.path}\n${clipped}`);
+    sections.push(`### Instruction ${instruction.sourceId}\n${clipped}`);
     usedChars += clipped.length;
   }
 
   for (const relativePath of ordered) {
     if (options.signal?.aborted)
       throw new DOMException("Context inspection aborted", "AbortError");
+    if (isPrivilegedInstructionName(relativePath)) continue;
     if (isNeverRemotePath(relativePath)) {
       secretPaths.push(relativePath);
       continue;
@@ -609,6 +654,12 @@ async function buildRepositoryContextInternal(
     intelligence,
     intelligenceSources: intelligenceSelection?.sourceIds,
     intelligenceSelection,
+    trustedInstructions,
+    skillMetadata: skillContext.metadata,
+    selectedSkills: skillContext.loaded,
+    instructionSources: trustedInstructions.map(
+      (instruction) => instruction.sourceId,
+    ),
   };
   logger?.info("context.discovery.finished", {
     discoveredFileCount: files.length,
@@ -616,7 +667,7 @@ async function buildRepositoryContextInternal(
     objectiveMatchCount: relevantMatches.length,
     structuralSourceCount: intelligenceSelection?.sourceIds.length ?? 0,
     indexedFileCount: intelligence?.indexedFiles.length ?? 0,
-    instructionCount: loadedInstructions.length,
+    instructionCount: trustedInstructions.length,
     usedChars,
     maxChars,
     truncated: usedChars >= maxChars,

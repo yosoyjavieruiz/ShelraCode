@@ -5,6 +5,11 @@ import type {
   RepositoryIntelligence,
   RepositoryIntelligenceSelection,
 } from "./repository-intelligence.js";
+import type {
+  LoadedSkill,
+  SkillMetadata,
+} from "../instructions/skill-loader.js";
+import type { TrustedInstruction } from "../instructions/trust-policy.js";
 
 export interface ContextBudgetInput {
   advertisedContext: number;
@@ -48,6 +53,8 @@ export interface RepositoryContextOptions {
   memoryFacts?: readonly MemoryFact[];
   /** Build bounded structural repository evidence for the current objective. */
   buildIntelligence?: boolean;
+  /** Load project Skill metadata and only bodies matching the objective. */
+  loadSkills?: boolean;
   logger?: LocalCodeLogger;
 }
 
@@ -70,6 +77,12 @@ export interface RepositoryContext {
   intelligenceSources?: string[];
   /** Structured selection retained for host-side consumers and diagnostics. */
   intelligenceSelection?: RepositoryIntelligenceSelection;
+  /** Trusted project instructions supplied separately from repository data. */
+  trustedInstructions?: TrustedInstruction[];
+  /** All Skill metadata is bounded; selected bodies are loaded lazily. */
+  skillMetadata?: SkillMetadata[];
+  selectedSkills?: LoadedSkill[];
+  instructionSources?: string[];
   searchBackend:
     "rg" | "fallback" | "no_matches" | "unavailable" | "not_needed";
 }

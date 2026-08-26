@@ -3272,6 +3272,7 @@ export async function runAgent(
           ? `Continue the bounded work unit for ${activeWorkUnitTarget}.`
           : undefined),
       constraints,
+      instructions: task.instructions,
       ...(task.context?.trim()
         ? {
             evidence: [

@@ -64,3 +64,31 @@ test("compiles a fresh decision context from bounded, relevant sources", () => {
   expect(packet.sourceIds).toContain("ReadFile");
   expect(packet.omittedSections).toContain("observations:budget");
 });
+
+test("keeps instruction provenance and trust labels in the decision packet", () => {
+  const packet = compileDecisionContext({
+    objective: "Fix the parser",
+    instructions: [
+      {
+        source: "AGENTS.md",
+        text: "Run focused tests.",
+        trust: "project",
+        precedence: 400,
+      },
+      {
+        source: "src/AGENTS.md",
+        text: "Preserve the parser API.",
+        trust: "project",
+        precedence: 401,
+      },
+    ],
+    legalActions: ["ReadFile"],
+    tokenBudget: 512,
+  });
+
+  expect(packet.text).toContain("[AGENTS.md] [trust=project]");
+  expect(packet.text).toContain("[src/AGENTS.md] [trust=project]");
+  expect(packet.sourceIds).toEqual(
+    expect.arrayContaining(["AGENTS.md", "src/AGENTS.md"]),
+  );
+});
