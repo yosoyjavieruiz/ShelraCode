@@ -5,7 +5,7 @@ const SETTING_LABELS = [
   "Motion appearance",
   "Repository privacy private local policy",
   "Routing mode strict zero ask before paid policy",
-  "Permission mode plan edit auto policy",
+  "Permission mode ask plan edit auto policy",
   "Secondary chrome layout",
   "Tool activity interaction",
   "Keybindings interaction",

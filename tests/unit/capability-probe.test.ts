@@ -138,7 +138,7 @@ test("an eligible protocol model must also complete disposable edit and test ite
         },
       });
 
-      if (user?.startsWith("CAPABILITY EDIT")) {
+      if (user?.includes("CAPABILITY EDIT")) {
         if (last?.role === "user")
           yield emitTool("ReadFile", { path: "src/message.ts" });
         else if (
@@ -151,7 +151,7 @@ test("an eligible protocol model must also complete disposable edit and test ite
             newText: 'greeting = "hello world"',
           });
         else yield { type: "text.delta", text: "The edit is verified." };
-      } else if (user?.startsWith("CAPABILITY TEST")) {
+      } else if (user?.includes("CAPABILITY TEST")) {
         const content = last?.role === "tool" ? last.content : "";
         if (last?.role === "user")
           yield emitTool("RunTests", { command: "bun test" });

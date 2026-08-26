@@ -47,8 +47,16 @@ Done: frozen-lockfile install, format, typecheck, 51-test suite, source and
 bundle smoke, real PTY source/bundle launch, local Qwen tool journey, terminal
 restoration, docs and changelog.
 
+## Post-week-one production packaging - 2026-08-26
+
+Done: `bun run build` now creates `dist/shelra.exe`, atomically activates it
+under `%USERPROFILE%\.shelra\bin`, writes the active version manifest,
+updates the user PATH, preserves the `localcode` compatibility shim, and is
+verified from an external disposable project directory.
+
 ## Deferred
 
-Standalone native executable packaging, Cloudflare/Gemini adapters, account
-specific live-provider verification, advanced model benchmarking, richer
-dialogs and V1 memory/decomposition remain outside the evidenced v0.1 slice.
+Cloudflare/Gemini adapters, account-specific live-provider verification,
+advanced model benchmarking, richer dialogs and V1 memory/decomposition remain
+outside the evidenced v0.1 slice. Cross-platform native packaging and signed
+public distribution remain future release work.

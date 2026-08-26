@@ -49,11 +49,15 @@ function protocolFailure(error: unknown): ProviderEvent {
   return {
     type: "error",
     error: {
-      code: "BAD_REQUEST",
+      // This is a model/runtime protocol defect discovered while normalizing
+      // an otherwise successful response. It is distinct from an HTTP 400
+      // request rejected by the provider and can therefore be recovered by
+      // the agent loop without pretending the provider is unavailable.
+      code: "MODEL_PROTOCOL_ERROR",
       message:
         error instanceof ToolError
           ? error.message
-          : "The provider emitted an invalid textual tool envelope.",
+          : "The provider emitted an invalid textual tool envelope; retry the current decision using one native tool call or plain text.",
     },
   };
 }

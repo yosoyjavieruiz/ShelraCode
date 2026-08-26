@@ -50,6 +50,7 @@ export type ProviderFailureCode =
   | "MODEL_UNAVAILABLE"
   | "UNSUPPORTED_CAPABILITY"
   | "CONTEXT_TOO_LARGE"
+  | "MODEL_PROTOCOL_ERROR"
   | "CAPACITY"
   | "TIMEOUT"
   | "NETWORK"

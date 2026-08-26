@@ -25,9 +25,12 @@ export function readSettings(
       ? "ask-before-paid"
       : "strict-zero";
   const permissionMode: PermissionMode =
-    env.LOCALCODE_PERMISSION === "PLAN" || env.LOCALCODE_PERMISSION === "AUTO"
+    env.LOCALCODE_PERMISSION === "ASK" ||
+    env.LOCALCODE_PERMISSION === "PLAN" ||
+    env.LOCALCODE_PERMISSION === "EDIT" ||
+    env.LOCALCODE_PERMISSION === "AUTO"
       ? env.LOCALCODE_PERMISSION
-      : "EDIT";
+      : "ASK";
   return {
     privacy: classifyRepositoryPrivacy(env.LOCALCODE_PRIVACY),
     routingMode,
@@ -58,7 +61,7 @@ function validSettings(value: unknown): PersistedRepositorySettings {
     result.routingMode = record.routingMode as LocalCodeSettings["routingMode"];
   if (
     typeof record.permissionMode === "string" &&
-    ["PLAN", "EDIT", "AUTO"].includes(record.permissionMode)
+    ["ASK", "PLAN", "EDIT", "AUTO"].includes(record.permissionMode)
   )
     result.permissionMode =
       record.permissionMode as LocalCodeSettings["permissionMode"];
@@ -80,9 +83,9 @@ export async function readRepositorySettings(
 }
 
 /**
- * The first interactive launch should be onboarding, not an empty workspace.
- * A repository is considered configured once both policy decisions have been
- * persisted. Explicit `localcode setup` can still reopen the wizard later.
+ * Reports whether a workspace has persisted policy decisions. The CLI uses
+ * this state for configuration services, while the main no-argument launch
+ * remains stable and always opens the conversation surface.
  */
 export async function hasRepositorySetup(root: string): Promise<boolean> {
   const settings = await readRepositorySettings(root);

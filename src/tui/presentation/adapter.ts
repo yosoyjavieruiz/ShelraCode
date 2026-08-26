@@ -770,13 +770,14 @@ export function presentAppEvent(
     const completed = event.steps.filter(
       (step) => step.status === "done",
     ).length;
-    const lastIndex = state.items.length - 1;
-    const lastItem = state.items[lastIndex];
-    if (lastItem?.turnId === turnId && lastItem.kind === "plan-update") {
+    const lastPlanIndex = state.items.findLastIndex(
+      (item) => item.turnId === turnId && item.kind === "plan-update",
+    );
+    if (lastPlanIndex >= 0) {
       return {
         ...state,
         items: state.items.map((item, index) =>
-          index === lastIndex
+          index === lastPlanIndex
             ? { ...item, steps, completed, total: event.steps.length }
             : item,
         ),

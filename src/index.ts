@@ -1,5 +1,4 @@
 import { cliUsage, parseCliArgs } from "./cli/args.js";
-import { hasRepositorySetup } from "./config/settings.js";
 import {
   runConfig,
   runAgentDoctor,
@@ -8,8 +7,8 @@ import {
   runProviders,
   runSetup,
 } from "./cli/commands.js";
-
-const VERSION = "0.1.0";
+import { defaultTuiScreen } from "./cli/startup.js";
+import { PRODUCT_NAME, VERSION } from "./version.js";
 
 async function main(): Promise<void> {
   const parsed = parseCliArgs(process.argv.slice(2));
@@ -19,14 +18,11 @@ async function main(): Promise<void> {
       console.log(cliUsage);
       return;
     case "version":
-      console.log(`LocalCode ${VERSION}`);
+      console.log(`${PRODUCT_NAME} ${VERSION}`);
       return;
     case "tui": {
       const { launchTui } = await import("./tui/launch.js");
-      const initialScreen = (await hasRepositorySetup(process.cwd()))
-        ? "conversation"
-        : "setup";
-      await launchTui(initialScreen);
+      await launchTui(defaultTuiScreen());
       return;
     }
     case "setup": {

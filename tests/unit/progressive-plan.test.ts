@@ -80,7 +80,7 @@ test("creation preparation authorizes a safe missing file inside the workspace",
   ).toEqual(["index.html"]);
 });
 
-test("greenfield web creation gets a deterministic primary artifact without a model path", async () => {
+test("greenfield creation does not invent a domain-specific artifact without a model path", async () => {
   const progressivePlan = await import(
     "../../src/agent/progressive-plan.js"
   );
@@ -94,7 +94,7 @@ test("greenfield web creation gets a deterministic primary artifact without a mo
       "Create a premium real-time digital clock web application with JavaScript.",
       [],
     ),
-  ).toEqual(["index.html"]);
+  ).toEqual([]);
 });
 
 test("preparation evidence does not promote an unrelated project manifest into creation scope", async () => {

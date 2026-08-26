@@ -184,6 +184,11 @@ export function resolveTurnMode(
   if (requestsPlan(objective)) return "plan";
 
   if (analysis.class === "COMMAND") return "command";
+  // An explicit read-only constraint is authoritative for every other task
+  // shape. Match it before mutation intent so a language overlap such as the
+  // English word "edit" inside the Spanish verb "edites" cannot widen the
+  // tool policy.
+  if (explicitlyReadOnly(objective)) return "workspace_question";
   // "Review ... for possible bugs" is an inspection request even when the
   // task analyzer labels the subject as DEBUGGING. Only an explicit mutation
   // verb (for example "review and fix") may widen it to coding.

@@ -67,6 +67,46 @@ test("a second plan.changed in the same turn updates the existing item in place,
   expect(item?.kind === "plan-update" && item.completed).toBe(1);
 });
 
+test("a later plan.changed updates the current turn plan after tool activity", () => {
+  let state = presentAppEvent(withTurn(), {
+    type: "plan.changed",
+    steps: [
+      { id: "s1", description: "Create file", status: "active" },
+      { id: "s2", description: "Verify result", status: "pending" },
+    ],
+  });
+  state = presentAppEvent(state, {
+    type: "tool.started",
+    callId: "call-1",
+    tool: "CreateFile",
+    input: { path: "index.html" },
+  });
+  state = presentAppEvent(state, {
+    type: "tool.finished",
+    callId: "call-1",
+    tool: "CreateFile",
+    result: {
+      tool: "CreateFile",
+      ok: true,
+      output: "created index.html",
+      durationMs: 1,
+    },
+  });
+  state = presentAppEvent(state, {
+    type: "plan.changed",
+    steps: [
+      { id: "s1", description: "Create file", status: "done" },
+      { id: "s2", description: "Verify result", status: "active" },
+    ],
+  });
+
+  const planItems = state.items.filter((entry) => entry.kind === "plan-update");
+  expect(planItems).toHaveLength(1);
+  expect(planItems[0]?.kind === "plan-update" && planItems[0].completed).toBe(
+    1,
+  );
+});
+
 test("failed and skipped steps map to failed/cancelled activity states", () => {
   const state = presentAppEvent(withTurn(), {
     type: "plan.changed",

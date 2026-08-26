@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { parseCliArgs } from "../../src/cli/args.js";
+import { defaultTuiScreen } from "../../src/cli/startup.js";
 
 describe("LocalCode CLI", () => {
   test("parses the default interactive command", () => {
     expect(parseCliArgs([])).toEqual({ command: "tui", args: [] });
+    expect(defaultTuiScreen()).toBe("conversation");
   });
 
   test("parses supported subcommands and flags", () => {

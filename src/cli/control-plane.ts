@@ -154,6 +154,15 @@ function hasRequiredCapability(
   );
 }
 
+function isPreferredModel(
+  candidate: ModelCandidate,
+  preferredModelId: string | undefined,
+): boolean {
+  if (!preferredModelId?.trim()) return false;
+  const preferred = preferredModelId.trim();
+  return candidate.id === preferred || candidate.modelId === preferred;
+}
+
 function selectFreeCloudProbeTargets(
   candidates: readonly ModelCandidate[],
   required: AgentCapabilityClass | undefined,
@@ -391,10 +400,15 @@ export async function openControlPlane(
         // is loaded, probe only a small preferred prefix and let the runtime
         // decide whether it can serve those candidates.
         const orderedPending = [...pending].sort((left, right) => {
-          const leftPreferred =
-            left.modelId === options.preferredModelId ? 0 : 1;
-          const rightPreferred =
-            right.modelId === options.preferredModelId ? 0 : 1;
+          const leftPreferred = isPreferredModel(left, options.preferredModelId)
+            ? 0
+            : 1;
+          const rightPreferred = isPreferredModel(
+            right,
+            options.preferredModelId,
+          )
+            ? 0
+            : 1;
           if (leftPreferred !== rightPreferred)
             return leftPreferred - rightPreferred;
           const leftLoaded = left.local?.loaded === true ? 0 : 1;
@@ -407,11 +421,25 @@ export async function openControlPlane(
         const hasReusableCodingRoute = [...cached.values()].some(
           (probe) => probe?.agenticCodingEligible === true,
         );
-        const probeTargets = hasReusableCodingRoute
+        // An explicit picker choice is a request to measure that exact
+        // model, not merely a display preference. A reusable coding route may
+        // still remain the safe fallback if the selected candidate cannot be
+        // served, but it must not suppress the selected candidate's probe.
+        const preferredPending = orderedPending.find((candidate) =>
+          isPreferredModel(candidate, options.preferredModelId),
+        );
+        const defaultProbeTargets = hasReusableCodingRoute
           ? []
           : loadedPending.length > 0
             ? loadedPending
             : orderedPending.slice(0, 3);
+        const probeTargets = [
+          ...(preferredPending ? [preferredPending] : []),
+          ...defaultProbeTargets,
+        ].filter(
+          (candidate, index, all) =>
+            all.findIndex((item) => item.id === candidate.id) === index,
+        );
         const probed = (
           await Promise.all(
             probeTargets.map((candidate) =>

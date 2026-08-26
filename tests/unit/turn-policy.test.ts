@@ -89,6 +89,22 @@ test("a read-a-file request resolves to workspace_question mode", () => {
   expect(mode).toBe("workspace_question");
 });
 
+test("an explicit no-edit constraint keeps a repository question read-only", () => {
+  const objective =
+    "Lee el proyecto actual y dime que archivos existen. No edites nada.";
+  const analysis = analyzeTask(objective);
+  const mode = resolveTurnMode(objective, analysis);
+  const policy = resolveTurnPolicy(mode);
+
+  expect(mode).toBe("workspace_question");
+  expect(policy.repositoryRead).toBe(true);
+  expect(policy.repositoryWrite).toBe(false);
+  expect(policy.allowedTools).toContain("ReadFile");
+  expect(policy.allowedTools).not.toContain("EditFile");
+  expect(policy.allowedTools).not.toContain("CreateFile");
+  expect(policy.allowedTools).not.toContain("Shell");
+});
+
 test("a coding task resolves to coding mode with the mutation toolset", () => {
   const { mode, policy } = policyFor("Fix this bug and run the tests.");
   expect(mode).toBe("coding");

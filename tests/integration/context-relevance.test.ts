@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { buildRepositoryContext } from "../../src/context/repository.js";
+import { runCommand } from "../../src/shared/process.js";
 
 const temporaryRoots: string[] = [];
 
@@ -115,4 +116,31 @@ test("direct repository language facts are sufficient when manifests or language
   expect(
     context.snapshot?.manifests.map((manifest) => manifest.path),
   ).toContain("package.json");
+});
+
+test("repository state does not treat LocalCode runtime state as project content", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "localcode-context-"));
+  temporaryRoots.push(root);
+  await mkdir(path.join(root, ".localcode"), { recursive: true });
+  await writeFile(
+    path.join(root, ".localcode", "config.json"),
+    JSON.stringify({ setup: true }),
+  );
+  await writeFile(path.join(root, "agent.jsonl"), '{"event":"runtime"}\n');
+  const git = await runCommand("git", ["init", "--quiet"], { cwd: root });
+  expect(git.exitCode).toBe(0);
+
+  const context = await buildRepositoryContext({
+    root,
+    objective: "Create a new application from scratch.",
+    maxChars: 12_000,
+  });
+
+  expect(context.files).toEqual([]);
+  expect(context.snapshot?.topLevelEntries).toEqual([
+    ".git",
+    ".localcode",
+    "agent.jsonl",
+  ]);
+  expect(context.evidenceState).toBe("INSUFFICIENT");
 });

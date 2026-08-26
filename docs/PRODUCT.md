@@ -14,12 +14,12 @@ Local when possible. Free cloud when useful. Paid only when the user explicitly 
 
 ## MVP promise
 
-The first `localcode` launch discovers the machine, local runtimes, model fit,
-provider readiness, privacy policy, and routing mode, then continues directly
-into the keyboard-first TUI. `localcode setup` reopens that onboarding flow
-intentionally. Inside the workspace the user can inspect the repository, route
-a task, use safe tools, see route explanations, verify changes, and roll back
-LocalCode-owned edits safely.
+Every no-argument `shelra`/`localcode` launch opens the same keyboard-first TUI
+from the current workspace. `shelra setup`/`localcode setup` explicitly opens
+the onboarding flow for hardware, local runtimes, model fit, provider
+readiness, privacy policy, and routing mode. Inside the workspace the user can
+inspect the repository, route a task, use safe tools, see route explanations,
+verify changes, and roll back LocalCode-owned edits safely.
 
 ## Core flows
 

@@ -46,10 +46,10 @@ export function parseCliArgs(argv: readonly string[]): ParsedCliArgs {
   return { command: first as CliCommand, args: rest };
 }
 
-export const cliUsage = `LocalCode - local-first coding agent
+export const cliUsage = `ShelraCode - local-first coding agent
 
 Usage:
-  localcode [command]
+  shelra [command]
 
 Commands:
   setup       reopen onboarding intentionally

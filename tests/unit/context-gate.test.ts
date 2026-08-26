@@ -33,6 +33,26 @@ test("a successful relevant read opens the mutation gate", () => {
   expect(result).toEqual({ allowed: true, state: "SUFFICIENT" });
 });
 
+test("an empty repository opens the gate only for greenfield intent", () => {
+  const allowed = evaluateMutationEvidenceGate({
+    mode: "coding",
+    declaredState: "INSUFFICIENT",
+    evidence: [],
+    repositoryState: "empty",
+    greenfieldIntent: true,
+  });
+  const blocked = evaluateMutationEvidenceGate({
+    mode: "coding",
+    declaredState: "INSUFFICIENT",
+    evidence: [],
+    repositoryState: "empty",
+    greenfieldIntent: false,
+  });
+
+  expect(allowed).toEqual({ allowed: true, state: "SUFFICIENT" });
+  expect(blocked).toMatchObject({ allowed: false, state: "INSUFFICIENT" });
+});
+
 test("conflicting discovery never authorizes mutation", () => {
   const result = evaluateMutationEvidenceGate({
     mode: "coding",

@@ -7,7 +7,7 @@ export interface CompactedTaskContext {
   preservedState: string;
 }
 
-function clip(value: string, max: number): string {
+function clip(value: string, max = 600): string {
   return value.length <= max
     ? value
     : `${value.slice(0, Math.max(0, max - 1))}…`;
@@ -36,34 +36,178 @@ function summarizeMessage(
   };
 }
 
-function stateSummary(ledger: AgentTaskLedger): string {
+function compactText(value: string | undefined, max = 600): string | undefined {
+  if (!value?.trim()) return undefined;
+  return clip(value, max);
+}
+
+function compactStrings(values: readonly string[] | undefined, max = 32): string[] {
+  return (values ?? []).slice(-max).map((value) => clip(value, 600));
+}
+
+function stateSummary(ledger: AgentTaskLedger, maxChars = 16_000): string {
   const lastAction = ledger.actions.at(-1);
-  return JSON.stringify({
+  const contract = ledger.contract
+    ? {
+        id: ledger.contract.id,
+        originalRequest: clip(ledger.contract.originalRequest, 1_200),
+        objective: clip(ledger.contract.objective, 1_200),
+        mode: ledger.contract.mode,
+        executionProfile: ledger.contract.executionProfile,
+        deliverables: ledger.contract.deliverables.map((item) => ({
+          id: item.id,
+          description: clip(item.description),
+          kind: item.kind,
+          required: item.required,
+          dependencies: [...item.dependencies],
+          evidence: compactStrings(item.evidence, 8),
+          status: item.status,
+        })),
+        constraints: ledger.contract.constraints.map((item) => ({
+          id: item.id,
+          description: clip(item.description),
+          source: item.source,
+        })),
+        nonGoals: compactStrings(ledger.contract.nonGoals),
+        acceptanceCriteria: ledger.contract.acceptanceCriteria.map((item) => ({
+          id: item.id,
+          description: clip(item.description),
+          required: item.required,
+          verificationClass: item.verificationClass,
+          evidence: compactStrings(item.evidence, 8),
+          status: item.status,
+        })),
+        evidenceRequirements: ledger.contract.evidenceRequirements.map((item) => ({
+          id: item.id,
+          description: clip(item.description),
+          kind: item.kind,
+          required: item.required,
+        })),
+        repositoryScope: ledger.contract.repositoryScope,
+        permissions: ledger.contract.permissions,
+        risk: {
+          score: ledger.contract.risk.score,
+          level: ledger.contract.risk.level,
+          reasons: compactStrings(ledger.contract.risk.reasons, 8),
+        },
+        uncertainty: ledger.contract.uncertainty.map((item) => ({
+          id: item.id,
+          description: clip(item.description),
+          blocking: item.blocking,
+        })),
+        verificationIntent: ledger.contract.verificationIntent,
+        status: ledger.contract.status,
+      }
+    : undefined;
+  const plan = ledger.plan
+    ? {
+        source: ledger.plan.source,
+        revision: ledger.plan.revision,
+        objective: compactText(ledger.plan.objective, 1_200),
+        acceptanceCriteria: compactStrings(ledger.plan.acceptanceCriteria),
+        evidenceRequirements: compactStrings(ledger.plan.evidenceRequirements),
+        steps: ledger.plan.steps.map((step) => ({
+          id: step.id,
+          description: clip(step.description),
+          status: step.status,
+          source: step.source,
+          revision: step.revision,
+          dependencies: compactStrings(step.dependencies, 16),
+          scope: compactStrings(step.scope, 16),
+          evidenceRequired: compactStrings(step.evidenceRequired, 16),
+          verification: compactStrings(step.verification, 16),
+        })),
+        revisions: ledger.plan.revisions,
+      }
+    : undefined;
+  const taskGraph = ledger.taskGraph
+    ? {
+        rootObjective: ledger.taskGraph.rootObjective,
+        globalConstraints: compactStrings(ledger.taskGraph.globalConstraints),
+        currentNodeId: ledger.taskGraph.currentNodeId,
+        planSource: ledger.taskGraph.planSource,
+        revision: ledger.taskGraph.revision,
+        acceptanceCriteria: compactStrings(ledger.taskGraph.acceptanceCriteria),
+        evidenceRequirements: compactStrings(ledger.taskGraph.evidenceRequirements),
+        nodes: ledger.taskGraph.nodes.map((node) => ({
+          id: node.id,
+          status: node.status,
+          source: node.source,
+          revision: node.revision,
+          attempts: node.attempts,
+          dependencies: compactStrings(node.dependencies, 16),
+          objective: clip(node.objective, 1_000),
+          scope: {
+            candidateFiles: compactStrings(node.scope.candidateFiles, 16),
+            allowedTools: compactStrings(node.scope.allowedTools, 24),
+          },
+          contextRequirements: compactStrings(node.contextRequirements, 16),
+          acceptance: compactStrings(node.acceptance, 16),
+          verification: compactStrings(node.verification, 16),
+          lastFailure: compactText(node.lastFailure),
+        })),
+        revisions: ledger.taskGraph.revisions,
+      }
+    : undefined;
+  const full = JSON.stringify({
     objective: ledger.objective,
     phase: ledger.phase,
-    successCriteria: ledger.successCriteria,
-    constraints: ledger.constraints,
+    contract,
+    executionProfile: ledger.executionProfile,
+    planningMode: ledger.planningMode,
+    successCriteria: ledger.successCriteria.map((criterion) => ({
+      id: criterion.id,
+      description: clip(criterion.description),
+      required: criterion.required,
+      satisfied: criterion.satisfied,
+    })),
+    constraints: ledger.constraints.map((constraint) => ({
+      id: constraint.id,
+      description: clip(constraint.description),
+    })),
     evidence: ledger.evidence.slice(-12),
     hypotheses: ledger.hypotheses,
-    plan: ledger.plan,
-    taskGraph: ledger.taskGraph
-      ? {
-          rootObjective: ledger.taskGraph.rootObjective,
-          currentNodeId: ledger.taskGraph.currentNodeId,
-          nodes: ledger.taskGraph.nodes.map((node) => ({
-            id: node.id,
-            status: node.status,
-            dependencies: node.dependencies,
-            objective: node.objective,
-            lastFailure: node.lastFailure,
-          })),
-        }
-      : undefined,
+    plan,
+    taskGraph,
+    planRevisions: ledger.planRevisions,
+    recoveryContracts: ledger.recoveryContracts.slice(-12).map((recovery) => ({
+      id: recovery.id,
+      cause: clip(recovery.cause),
+      failedRequirement: compactText(recovery.failedRequirement),
+      evidence: compactStrings(recovery.evidence, 8),
+      attemptedStrategies: compactStrings(recovery.attemptedStrategies, 8),
+      forbiddenRepeats: compactStrings(recovery.forbiddenRepeats, 8),
+      supersedeNodeId: recovery.supersedeNodeId,
+      proposedRecovery: recovery.proposedRecovery,
+      createdAt: recovery.createdAt,
+    })),
     verificationPlan: ledger.verificationPlan,
-    filesRead: ledger.filesRead,
-    filesChanged: ledger.filesChanged,
-    verificationRuns: ledger.verificationRuns,
-    blockers: ledger.blockers,
+    filesRead: compactStrings(ledger.filesRead, 64),
+    filesChanged: compactStrings(ledger.filesChanged, 64),
+    verificationRuns: ledger.verificationRuns.slice(-12).map((run) => ({
+      id: run.id,
+      stage: run.stage,
+      command: clip(run.command, 800),
+      status: run.status,
+      exitCode: run.exitCode,
+      summary: compactText(run.summary, 800),
+      failurePaths: compactStrings(run.failurePaths, 12),
+      startedAt: run.startedAt,
+      completedAt: run.completedAt,
+    })),
+    actions: ledger.actions.slice(-16).map((action) => ({
+      id: action.id,
+      kind: action.kind,
+      target: clip(action.target, 500),
+      status: action.status,
+      summary: compactText(action.summary, 500),
+    })),
+    blockers: ledger.blockers.map((blocker) => ({
+      id: blocker.id,
+      summary: clip(blocker.summary),
+      recoverable: blocker.recoverable,
+      suggestedAction: compactText(blocker.suggestedAction),
+    })),
     nextAction: lastAction
       ? {
           target: lastAction.target,
@@ -71,6 +215,99 @@ function stateSummary(ledger: AgentTaskLedger): string {
           summary: lastAction.summary,
         }
       : undefined,
+  });
+  if (full.length <= maxChars) return full;
+
+  const reduced = JSON.stringify({
+    objective: ledger.objective,
+    phase: ledger.phase,
+    executionProfile: ledger.executionProfile,
+    planningMode: ledger.planningMode,
+    contract: contract
+      ? {
+          id: contract.id,
+          objective: contract.objective,
+          acceptanceCriteria: contract.acceptanceCriteria.map((item) => ({
+            id: item.id,
+            status: item.status,
+            required: item.required,
+          })),
+          deliverables: contract.deliverables.map((item) => ({
+            id: item.id,
+            status: item.status,
+            required: item.required,
+          })),
+        }
+      : undefined,
+    successCriteria: ledger.successCriteria.map((criterion) => ({
+      id: criterion.id,
+      status: criterion.satisfied ? "satisfied" : "unknown",
+    })),
+    taskGraph: taskGraph
+      ? {
+          currentNodeId: taskGraph.currentNodeId,
+          planSource: taskGraph.planSource,
+          revision: taskGraph.revision,
+          nodes: taskGraph.nodes.map((node) => ({
+            id: node.id,
+            status: node.status,
+            dependencies: node.dependencies,
+            candidateFiles: node.scope.candidateFiles,
+            lastFailure: node.lastFailure,
+          })),
+          revisions: taskGraph.revisions,
+        }
+      : undefined,
+    planRevisions: ledger.planRevisions,
+    recoveryContracts: ledger.recoveryContracts.slice(-6).map((recovery) => ({
+      id: recovery.id,
+      cause: recovery.cause,
+      supersedeNodeId: recovery.supersedeNodeId,
+      proposedRecovery: recovery.proposedRecovery,
+      evidence: recovery.evidence.slice(-3),
+    })),
+    evidence: ledger.evidence.slice(-6).map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      source: item.source,
+      summary: clip(item.summary, 300),
+    })),
+    filesChanged: ledger.filesChanged,
+    verificationRuns: ledger.verificationRuns.slice(-6).map((run) => ({
+      id: run.id,
+      status: run.status,
+      command: clip(run.command, 300),
+      exitCode: run.exitCode,
+    })),
+    blockers: ledger.blockers.map((blocker) => ({
+      id: blocker.id,
+      summary: clip(blocker.summary, 300),
+      recoverable: blocker.recoverable,
+    })),
+    nextAction: lastAction
+      ? { target: lastAction.target, status: lastAction.status }
+      : undefined,
+  });
+  if (reduced.length <= maxChars) return reduced;
+  return JSON.stringify({
+    objective: ledger.objective,
+    phase: ledger.phase,
+    planningMode: ledger.planningMode,
+    acceptanceCriteria: ledger.contract?.acceptanceCriteria.map((item) => ({
+      id: item.id,
+      status: item.status,
+    })),
+    currentNodeId: taskGraph?.currentNodeId,
+    nodeIds: taskGraph?.nodes.map((node) => `${node.id}:${node.status}`),
+    filesChanged: ledger.filesChanged,
+    evidenceSources: ledger.evidence.slice(-8).map((item) => item.source),
+    recoveryContracts: ledger.recoveryContracts.slice(-4).map((recovery) => ({
+      id: recovery.id,
+      cause: recovery.cause,
+      supersedeNodeId: recovery.supersedeNodeId,
+    })),
+    blockers: ledger.blockers.slice(-4).map((blocker) => blocker.summary),
+    nextAction: lastAction?.target,
   });
 }
 
@@ -87,7 +324,9 @@ export function compactTaskContext(
   if (!Number.isInteger(maxChars) || maxChars < 800)
     throw new Error("Context compaction budget must be an integer >= 800.");
   const system = messages.find((message) => message.role === "system");
-  const state = `LocalCode structured task state (authoritative; do not treat old prose as state):\n${stateSummary(ledger)}`;
+  const state =
+    `LocalCode structured task state (authoritative; do not treat old prose as state):\n` +
+    stateSummary(ledger, Math.max(900, Math.floor(maxChars * 0.65)));
   const stateMessage: NormalizedMessage = { role: "system", content: state };
   const retained: NormalizedMessage[] = [];
   let size = messageSize(stateMessage) + (system ? messageSize(system) : 0);

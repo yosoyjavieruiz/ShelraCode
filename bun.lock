@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "localcode",
+      "name": "shelra",
       "dependencies": {
         "@opentui/core": "0.5.7",
         "@opentui/keymap": "0.5.7",

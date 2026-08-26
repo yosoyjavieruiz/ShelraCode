@@ -3,8 +3,11 @@ import { compactTaskContext } from "../../src/agent/compaction.js";
 import {
   addTaskEvidence,
   createTaskLedger,
+  recordRecoveryContract,
 } from "../../src/agent/task-state.js";
 import { compileTaskGraph } from "../../src/agent/task-graph.js";
+import { compileTaskContract } from "../../src/agent/task-contract.js";
+import { createRecoveryContract } from "../../src/agent/recovery.js";
 
 test("compaction preserves authoritative task state and recent observations", () => {
   const ledger = createTaskLedger({
@@ -12,6 +15,21 @@ test("compaction preserves authoritative task state and recent observations", ()
     objective: "Migrate session refresh safely",
     mode: "coding",
   });
+  ledger.contract = compileTaskContract({
+    id: ledger.id,
+    originalRequest: ledger.objective,
+    mode: ledger.mode,
+  });
+  recordRecoveryContract(
+    ledger,
+    createRecoveryContract({
+      id: "recovery-1",
+      cause: "TEST_FAILED",
+      evidence: ["test.ts: expected 2"],
+      forbiddenRepeats: ["same edit"],
+      proposedRecovery: "repair",
+    }),
+  );
   ledger.filesChanged.push("src/session.ts");
   ledger.taskGraph = compileTaskGraph({
     objective: ledger.objective,
@@ -46,6 +64,8 @@ test("compaction preserves authoritative task state and recent observations", ()
   expect(result.preservedState).toContain("Migrate session refresh safely");
   expect(result.preservedState).toContain("src/session.ts");
   expect(result.preservedState).toContain("mutate-src-session-ts");
+  expect(result.preservedState).toContain("recovery-1");
+  expect(result.preservedState).toContain("acceptanceCriteria");
   expect(
     result.messages.some((message) =>
       message.content.includes("latest observation"),

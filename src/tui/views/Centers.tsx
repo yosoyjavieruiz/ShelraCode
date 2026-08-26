@@ -870,7 +870,7 @@ export function SettingsView(props: {
     ["Motion", props.reducedMotion ? "Reduced" : "System", "appearance"],
     ["Repository privacy", props.privacy ?? "private", "policy"],
     ["Routing mode", props.routingMode ?? "strict-zero", "policy"],
-    ["Permission mode", props.permissionMode ?? "EDIT", "policy"],
+    ["Permission mode", props.permissionMode ?? "ASK", "policy"],
     ["Secondary chrome", "Conversation-first · transient", "layout"],
     ["Tool activity", "Grouped · collapsed by default", "interaction"],
     ["Keybindings", "Default · Ctrl+P palette", "interaction"],
@@ -899,6 +899,7 @@ export function SettingsView(props: {
       .replace("Default · Ctrl+P palette", "Default")
       .replace("strict-zero", "Strict zero")
       .replace("private", "Private")
+      .replace("ASK", "Ask every action")
       .replace("EDIT", "Edit");
   return (
     <box flexDirection="column" gap={1} flexGrow={1}>

@@ -23,6 +23,8 @@ import type { IndependentVerificationResult } from "./verifier.js";
 import type { AgentTraceRecorder } from "./trace.js";
 import type { VerificationCommand } from "./verification-plan.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
+import type { AdaptiveExecutionProfile } from "./execution-profile.js";
+import type { TaskContract } from "./task-contract.js";
 
 export interface AgentTask {
   id: string;
@@ -32,12 +34,24 @@ export interface AgentTask {
   repositoryPolicy: RepositoryPrivacy;
   permissionMode: PermissionMode;
   mode?: TurnMode;
+  /** Host-selected adaptive strategy. Semantic planning remains LLM-owned. */
+  executionProfile?: AdaptiveExecutionProfile;
+  /** Model planning is explicit; compatibility keeps legacy callers stable. */
+  planningMode?: "none" | "model" | "compatibility";
+  /** Optional contract compiled by an application service. */
+  taskContract?: TaskContract;
+  /** Make the compiled contract's criteria part of completion authority. */
+  enforceTaskContract?: boolean;
   successCriteria?: string[];
   /** Host-framed constraints retained in the authoritative task ledger. */
   constraints?: string[];
   context?: string;
   /** Host discovery result used by the write gate; it is not model authority. */
   contextEvidenceState?: "SUFFICIENT" | "INSUFFICIENT" | "CONFLICTING";
+  /** Host-observed repository shape used to distinguish greenfield work. */
+  repositoryState?: "empty" | "non_empty" | "unknown";
+  /** Generic compiler signal; only authorizes empty-workspace bootstrap work. */
+  greenfieldIntent?: boolean;
   containsHighConfidenceSecret?: boolean;
   /** @deprecated Use verificationCommands for new callers. */
   verificationCommand?: string;

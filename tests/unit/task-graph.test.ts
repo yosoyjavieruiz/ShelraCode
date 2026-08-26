@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { compileTaskGraph } from "../../src/agent/task-graph.js";
+import {
+  compileTaskGraph,
+  isLegalTaskNodeTransition,
+  setTaskNodeStatus,
+} from "../../src/agent/task-graph.js";
 
 test("compiles a complex coding objective into dependent bounded work units", () => {
   const graph = compileTaskGraph({
@@ -48,4 +52,21 @@ test("does not turn an unlocalized coding task into a root mutation scope", () =
     graph.nodes.find((node) => node.id === "localize-scope")?.scope
       .allowedTools,
   ).not.toContain("EditFile");
+});
+
+test("keeps task-node lifecycle monotonic and rejects terminal rewrites", () => {
+  const graph = compileTaskGraph({
+    objective: "Update src/value.ts",
+    mode: "coding",
+    candidateFiles: ["src/value.ts"],
+  });
+
+  expect(isLegalTaskNodeTransition("ready", "running")).toBe(true);
+  expect(isLegalTaskNodeTransition("passed", "running")).toBe(false);
+  expect(setTaskNodeStatus(graph, "discover", "running")).toBe(true);
+  expect(setTaskNodeStatus(graph, "discover", "passed")).toBe(true);
+  expect(setTaskNodeStatus(graph, "discover", "running")).toBe(false);
+  expect(graph.nodes.find((node) => node.id === "discover")?.status).toBe(
+    "passed",
+  );
 });

@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { runCodeReview } from "../../src/agent/code-review-agent.js";
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   addTaskEvidence,
   createTaskLedger,
@@ -91,4 +94,43 @@ test("read-only code review blocks a task with unavailable verification", async 
   expect(report.issues.map((issue) => issue.code)).toContain(
     "VERIFICATION_UNAVAILABLE",
   );
+});
+
+test("does not treat a non-Git workspace as a failed diff check", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "localcode-code-review-"));
+  const ledger = createTaskLedger({
+    id: "review-non-git",
+    objective: "Create an artifact.",
+    mode: "coding",
+  });
+  addTaskEvidence(ledger, {
+    id: "artifact-context",
+    kind: "file",
+    source: "workspace",
+    summary: "The disposable workspace was inspected.",
+    relevance: 1,
+    freshness: 1,
+  });
+  recordTaskAction(ledger, {
+    id: "artifact-write",
+    kind: "write",
+    target: "artifact.txt",
+    status: "succeeded",
+  });
+  ledger.filesChanged.push("artifact.txt");
+
+  const report = await runCodeReview({
+    root,
+    objective: ledger.objective,
+    mode: "coding",
+    ledger,
+    verificationRequired: false,
+    verificationState: "not_required",
+    finalReviewPerformed: true,
+    userWorkPreserved: true,
+  });
+
+  expect(report.diffCheck).toBe("unavailable");
+  expect(report.verdict).toBe("PASS");
+  expect(report.verification.pass).toBe(true);
 });

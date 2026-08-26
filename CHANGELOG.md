@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1
+
+- Added the standalone Windows `shelra.exe` production build and per-user installer.
+- Added the global `shelra` command with `localcode` compatibility alias.
+- Added active-version metadata and idempotent user PATH registration.
+- Updated the CLI version identity to ShelraCode.
+- Kept the no-argument `shelra`/`localcode` entry on the same conversation
+  surface from every workspace; onboarding is explicit through `setup`.
+
 ## 0.1.0
 
 - Added Bun/TypeScript/OpenTUI + SolidJS application bootstrap.

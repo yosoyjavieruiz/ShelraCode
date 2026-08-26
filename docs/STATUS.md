@@ -6,10 +6,11 @@ classification, tool contracts, agent loop, recovery, verification), see
 currently the priority and is tracked separately so it isn't lost in a
 UI-focused log.
 
-## Current product evidence — 2026-08-25
+## Current product evidence — 2026-08-26
 
-The current source has a green canonical deterministic suite (`474 pass, 1
-skip, 0 fail`), a passing typecheck, a rebuilt `dist/index.js`, and passing
+The current source has a green canonical deterministic suite (`593 pass, 1
+skip, 0 fail` across 594 tests), a passing typecheck, a rebuilt
+`dist/index.js`, and passing
 source/bundle CLI smoke. The routing correction makes empirical capability a
 score/fallback signal instead of an unconditional route veto, so an executable
 1.5B local candidate can be attempted for an otherwise policy-valid task.
@@ -18,6 +19,13 @@ completion evidence remains task- and runtime-specific.
 The file-domain controls now distinguish read/list/create/edit/overwrite/delete
 operations, reject phantom objective paths, and surface rejected tool requests
 as `BLOCKED` activity with a typed recovery explanation.
+
+`bun run build` now also compiles `dist/shelra.exe`, installs the active Windows
+user version under `%USERPROFILE%\.shelra\bin`, writes
+`%USERPROFILE%\.shelra\active.json`, creates the `localcode.cmd`
+compatibility shim, and updates the user PATH. A fresh shell can therefore run
+`shelra` from another project directory without LM Studio or a repository-local
+script path.
 
 ## Done
 
@@ -37,9 +45,9 @@ as `BLOCKED` activity with a typed recovery explanation.
 - `localcode setup` now opens a staged V2 onboarding surface for hardware,
   LM Studio/local models, configured providers, privacy and routing, and saves
   through the existing settings services.
-- A first `localcode`/`--tui` launch now enters that same onboarding surface
-  automatically when repository policy is not configured; completion transitions
-  directly into the workspace.
+- Every no-argument `shelra`/`localcode`/`--tui` launch now enters the same
+  conversation surface from any workspace. The onboarding surface remains an
+  explicit `setup` command, so changing projects cannot change the main CLI.
 - Slash commands, command palette entries and default help metadata share one
   registry.
 - OpenTUI keymap is active in the real launcher with a timed Ctrl+X leader;
@@ -48,12 +56,17 @@ as `BLOCKED` activity with a typed recovery explanation.
 - The fresh bundle exits with code 0 through `/exit` and `Ctrl+C` after
   restoring the alternate screen; the exit callback is deferred outside the
   active key event to keep OpenTUI teardown ordered.
-- `bun run format:check`, `bun run typecheck`, canonical `bun run test`
-  (306 passing tests, 1032 expectations) and `bun run build` pass from the
-  current checkout.
+- `bun run typecheck`, canonical `bun run test` (593 pass, 1 skip, 0 fail;
+  594 tests and 1925 expectations) and `bun run build` pass from the current
+  checkout. The full `bun run format:check` still reports formatting
+  differences in 27 user/working files; those files were not rewritten during
+  this packaging delivery. Targeted formatting checks for the packaging and
+  classifier changes pass.
 - `qwen2.5-coder-7b-instruct` and other LM Studio models are discovered by the
   current local runtime. Groq/OpenRouter catalogs are discovered from the
   configured environment without making an inference request.
+- Standalone production packaging is active for Windows x64: `dist/shelra.exe`
+  and the installed `shelra` command pass help/version/doctor smoke.
 
 ## In progress
 
@@ -68,15 +81,13 @@ as `BLOCKED` activity with a typed recovery explanation.
   expiring free-tier quota and OpenRouter as free-only catalog entries; paid
   variants are excluded before routing. Remote privacy/ZDR remains a separate
   hard gate, and live account quota/health evidence is still volatile.
-- No standalone native executable is produced; the current release artifact is
-  the Bun bundle `dist/index.js` plus OpenTUI runtime assets.
 
 ## Next
 
 - Exercise the remaining center views interactively at the desired terminal
   sizes when a resize-capable host is available.
-- Add a standalone executable only if the release packaging requirement is
-  explicitly brought into the UI delivery scope.
+- Keep the standalone packaging path aligned with future release signing and
+  cross-platform artifacts; the current build/install path is Windows x64.
 
 ## Known limitations
 

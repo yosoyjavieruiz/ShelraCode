@@ -1,13 +1,15 @@
 {
-  "name": "localcode",
-  "version": "0.1.0",
+  "name": "shelra",
+  "version": "0.1.1",
   "description": "A local-first, privacy-aware AI coding agent for the terminal.",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
+    "shelra": "src/index.ts",
     "localcode": "src/index.ts"
   },
   "scripts": {
+    "shelra": "bun --conditions=browser run src/index.ts",
     "localcode": "bun --conditions=browser run src/index.ts",
     "dev": "bun --conditions=browser run src/index.ts",
     "dev:tui": "bun --conditions=browser run src/index.ts --tui",

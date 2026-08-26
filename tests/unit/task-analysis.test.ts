@@ -52,6 +52,14 @@ test("classifies a Spanish-language search request as search", () => {
   expect(task.class).toBe("SEARCH");
 });
 
+test("does not classify the Spanish no-edit verb as an English edit command", () => {
+  const task = analyzeTask(
+    "Lee el proyecto actual y dime que archivos existen. No edites nada.",
+  );
+
+  expect(task.class).toBe("EXPLAIN");
+});
+
 // The analysis target remains useful for score/context shaping, but it is not
 // an eligibility floor. An accessible local model must be attempted when
 // privacy, tools, permissions, and runtime health permit it; completion is

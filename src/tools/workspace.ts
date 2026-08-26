@@ -354,6 +354,11 @@ async function runToolProcess(
   }
 }
 
+const SHELL_TOOL_DESCRIPTION =
+  process.platform === "win32"
+    ? "Run a classified workspace command on Windows. Prefer ReadFile/SearchText for repository content; use PowerShell syntax and do not assume Unix-only commands such as head, tail, grep or sed are installed."
+    : "Run a classified workspace command. Prefer ReadFile/SearchText for repository content and keep commands narrow.";
+
 function inputString(input: Record<string, unknown>, key: string): string {
   return stringInput(input[key]);
 }
@@ -362,12 +367,24 @@ function inputBoolean(input: Record<string, unknown>, key: string): boolean {
   return input[key] === true;
 }
 
+function isRuntimeStatePath(relative: string): boolean {
+  return (
+    relative.replaceAll("\\", "/") === "agent.jsonl" ||
+    relative.replaceAll("\\", "/").startsWith(".localcode/")
+  );
+}
+
 async function requirePermission(
   ctx: ToolExecutionContext,
   risk: "read" | "write" | "execute" | "destructive",
   description = `Run ${risk} workspace action`,
+  command?: string,
 ): Promise<void> {
-  const decision = checkPermission({ mode: ctx.permissionMode, risk });
+  const decision = checkPermission({
+    mode: ctx.permissionMode,
+    risk,
+    ...(command ? { command } : {}),
+  });
   ctx.logger?.debug("tool.permission.checked", {
     risk,
     permissionMode: ctx.permissionMode,
@@ -375,9 +392,20 @@ async function requirePermission(
     requiresApproval: decision.requiresApproval,
   });
   if (decision.allowed) return;
+  if (decision.requiresApproval && ctx.approvalGranted === true) {
+    ctx.logger?.info("tool.permission.approved", {
+      risk,
+      source: "controller-one-shot-approval",
+    });
+    return;
+  }
   if (decision.requiresApproval && ctx.requestApproval) {
     ctx.logger?.info("tool.permission.approval_requested", { risk });
-    const allowed = await ctx.requestApproval({ description, risk });
+    const allowed = await ctx.requestApproval({
+      description,
+      risk,
+      ...(command ? { command } : {}),
+    });
     if (allowed) {
       ctx.logger?.info("tool.permission.approved", { risk });
       return;
@@ -390,8 +418,10 @@ async function requirePermission(
       "PERMISSION_DENIED",
       "Approval denied for this workspace action.",
       {
-        recoverable: false,
-        suggestedAction: "Ask the user for explicit approval before retrying.",
+        recoverable: true,
+        suggestedAction:
+          "Do not repeat this identical action. Use the user's decision and request approval again only for a changed action.",
+        details: { reason: "user_denied" },
       },
     );
   }
@@ -429,7 +459,7 @@ async function listFallback(
     const relative = path.join(directory, entry.name).replaceAll("\\", "/");
     if (entry.isDirectory())
       result.push(...(await listFallback(root, relative, depth + 1)));
-    else result.push(relative);
+    else if (!isRuntimeStatePath(relative)) result.push(relative);
   }
   return result;
 }
@@ -530,7 +560,7 @@ export const readFileTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "read");
+    await requirePermission(ctx, "read", `Read workspace file: ${input.path}`);
     const absolute = await assertWorkspacePath(ctx.root, input.path);
     const info = await statForTool(absolute, input.path);
     if (info.isDirectory)
@@ -620,7 +650,11 @@ export const writeFileTool: ToolDefinition<
     return { path: inputString(value, "path"), content: value.content };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "write");
+    await requirePermission(
+      ctx,
+      "write",
+      `Write workspace file: ${input.path}`,
+    );
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
         "CONFLICT",
@@ -702,7 +736,11 @@ export const createFileTool: ToolDefinition<
     return { path: inputString(value, "path"), content: value.content };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "write");
+    await requirePermission(
+      ctx,
+      "write",
+      `Create workspace file: ${input.path}`,
+    );
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
         "CONFLICT",
@@ -813,7 +851,11 @@ export const editFileTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "write");
+    await requirePermission(
+      ctx,
+      "write",
+      `Edit workspace file: ${input.path}`,
+    );
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
         "CONFLICT",
@@ -971,12 +1013,12 @@ export const listFilesTool: ToolDefinition<
     return value.path === undefined ? {} : { path: inputString(value, "path") };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "read");
     // A leading "/" means "the workspace root" here (see
     // resolveWorkspacePath), not an OS-absolute path — normalize it the
     // same way so returned paths read as "package.json", not "/package.json".
     const normalizedPath = (input.path ?? "").replace(/^[/\\]+/, "");
     const directory = normalizedPath || ".";
+    await requirePermission(ctx, "read", `List workspace directory: ${directory}`);
     const absoluteDirectory = await assertWorkspacePath(ctx.root, directory);
     const info = await statForTool(absoluteDirectory, directory);
     if (info.isFile)
@@ -1005,7 +1047,10 @@ export const listFilesTool: ToolDefinition<
     );
     let files: string[];
     if (result.exitCode === 0 || result.exitCode === 1) {
-      files = result.stdout.split(/\r?\n/).filter(Boolean).slice(0, 1_000);
+      files = result.stdout
+        .split(/\r?\n/)
+        .filter((file) => Boolean(file) && !isRuntimeStatePath(file))
+        .slice(0, 1_000);
     } else if (result.exitCode === 127) {
       files = await listFallback(ctx.root, directory);
     } else {
@@ -1080,9 +1125,13 @@ export const globFilesTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "read");
     const normalizedPath = (input.path ?? "").replace(/^[/\\]+/u, "");
     const directory = normalizedPath || ".";
+    await requirePermission(
+      ctx,
+      "read",
+      `Find workspace files matching ${input.pattern} in ${directory}`,
+    );
     const absoluteDirectory = await assertWorkspacePath(ctx.root, directory);
     const info = await statForTool(absoluteDirectory, directory);
     if (info.isFile)
@@ -1117,7 +1166,10 @@ export const globFilesTool: ToolDefinition<
     );
     let files: string[];
     if (result.exitCode === 0 || result.exitCode === 1) {
-      files = result.stdout.split(/\r?\n/).filter(Boolean).slice(0, 500);
+      files = result.stdout
+        .split(/\r?\n/)
+        .filter((file) => Boolean(file) && !isRuntimeStatePath(file))
+        .slice(0, 500);
     } else if (result.exitCode === 127) {
       files = (await listFallback(ctx.root, "."))
         .filter((file) => globToRegExp(input.pattern).test(file))
@@ -1273,7 +1325,11 @@ export const searchTextTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "read");
+    await requirePermission(
+      ctx,
+      "read",
+      `Search workspace for ${JSON.stringify(input.query)}`,
+    );
     const cwd = await assertWorkspacePath(ctx.root, input.path ?? ".");
     const result = await runCommand(
       "rg",
@@ -1337,14 +1393,17 @@ export const shellTool: ToolDefinition<
   }
 > = {
   name: "Shell",
-  description: "Run a classified workspace command.",
+  description: SHELL_TOOL_DESCRIPTION,
   risk: "execute",
   parameters: {
     type: "object",
     properties: {
       command: {
         type: "string",
-        description: "Shell command to run in the workspace root.",
+        description:
+          process.platform === "win32"
+            ? "PowerShell-compatible command to run in the workspace root; use ReadFile/SearchText instead of Unix-only text pipelines."
+            : "Shell command to run in the workspace root.",
       },
     },
     required: ["command"],
@@ -1380,6 +1439,7 @@ export const shellTool: ToolDefinition<
       ctx,
       classification,
       `Run command: ${input.command}`,
+      input.command,
     );
     const started = performance.now();
     const result = await runToolShellCommand(input.command, {
@@ -1416,7 +1476,7 @@ export const gitStatusTool: ToolDefinition<
     return {};
   },
   async execute(_input, ctx) {
-    await requirePermission(ctx, "read");
+    await requirePermission(ctx, "read", "Read Git status");
     const result = await runCommand("git", ["status", "--short", "--branch"], {
       cwd: ctx.root,
       signal: ctx.signal,
@@ -1462,7 +1522,11 @@ export const gitDiffTool: ToolDefinition<
     return { staged: inputBoolean(value, "staged") };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "read");
+    await requirePermission(
+      ctx,
+      "read",
+      `Read ${input.staged ? "staged " : "working tree "}Git diff`,
+    );
     const result = await runCommand(
       "git",
       input.staged ? ["diff", "--cached", "--"] : ["diff", "--"],
@@ -1558,7 +1622,7 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
             "Use a local test command or a turn policy that explicitly permits network access.",
         },
       );
-    await requirePermission(ctx, "execute");
+    await requirePermission(ctx, "execute", `Run tests: ${command}`, command);
     const classification = classifyShellCommand(command);
     if (classification === "destructive")
       throw new ToolError(

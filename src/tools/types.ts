@@ -25,6 +25,10 @@ export interface ToolParameterSchema {
 export interface ToolApprovalRequest {
   description: string;
   risk: ToolRisk;
+  /** Exact operation being approved; useful to audit and render the request. */
+  tool?: string;
+  path?: string;
+  command?: string;
 }
 
 export interface ToolExecutionContext {
@@ -44,6 +48,8 @@ export interface ToolExecutionContext {
   defaultTestCommand?: string;
   env?: Record<string, string | undefined>;
   requestApproval?: (request: ToolApprovalRequest) => Promise<boolean>;
+  /** One-shot approval already granted for this exact tool invocation. */
+  approvalGranted?: boolean;
   /**
    * Optional live-output sink for long-running tools (Shell, RunTests) —
    * the host UI's live shell/test tail. Set per call by the loop, not part

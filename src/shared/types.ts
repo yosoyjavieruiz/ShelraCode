@@ -22,7 +22,13 @@ export type RepositoryPrivacy =
 
 export type RoutingMode = "strict-zero" | "ask-before-paid";
 
-export type PermissionMode = "PLAN" | "EDIT" | "AUTO";
+/**
+ * Permission policy for workspace actions.
+ * ASK is the interactive default: every workspace action is presented to the
+ * user once before execution. The other modes remain available for users who
+ * explicitly choose a less interactive policy.
+ */
+export type PermissionMode = "ASK" | "PLAN" | "EDIT" | "AUTO";
 
 export type TaskClass =
   | "SEARCH"

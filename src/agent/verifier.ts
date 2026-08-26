@@ -10,6 +10,7 @@ export interface VerificationIssue {
     | "VERIFICATION_UNAVAILABLE"
     | "VERIFICATION_FAILED"
     | "FINAL_REVIEW_MISSING"
+    | "FINAL_REVIEW_FAILED"
     | "BLOCKER_PRESENT"
     | "USER_WORK_CHANGED";
   message: string;

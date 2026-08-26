@@ -51,6 +51,28 @@ operations now return bounded diff evidence and typed path errors.
 - [x] Checkpoint tests restored LocalCode-owned content and refused to overwrite an external edit.
 - [x] TUI renderer tests covered 80, 100, 120 and 160 columns.
 
+## Production packaging update — 2026-08-26
+
+- [x] `bun run build` produced `dist/shelra.exe` for the current Windows x64
+      machine and installed it as the active user version.
+- [x] The active manifest was written to `%USERPROFILE%\.shelra\active.json`
+      with product `ShelraCode`, command `shelra`, and version `0.1.1`.
+- [x] `%USERPROFILE%\.shelra\bin` was registered in the Windows user PATH;
+      a fresh shell resolved `shelra` from an external disposable project.
+- [x] The installed executable returned the expected `--help`, `--version`,
+      and `doctor` output; standalone smoke passed.
+- [x] Installer unit coverage passed for atomic activation, previous-version
+      backup, the `localcode.cmd` compatibility shim, and idempotent PATH
+      handling.
+- [x] The post-packaging canonical suite passed: `593 pass`, `1 skip`, `0 fail`
+      across 594 tests in 104 files.
+- [x] A no-argument TUI process was launched from an external project through
+      the installed executable. The process used the current directory as its
+      workspace and rendered the same conversation surface as `dist/index.js`,
+      even without project setup. The onboarding surface remains explicit via
+      `shelra setup`; the prior real PTY journey also verified input,
+      permissions, cancellation, and terminal restoration.
+
 ## Not established by this acceptance run
 
 - Groq and OpenRouter credentials are present and source/tests verify their
@@ -59,7 +81,5 @@ operations now return bounded diff evidence and typed path errors.
   account quota/health/privacy behavior remains unverified. Zen was not configured.
 - No llmfit installation was available; fallback hardware detection was the
   observed path.
-- No standalone `.exe` was produced. `dist/index.js` is the verified Bun
-  bundle; its OpenTUI native package remains an external platform dependency.
 - Cloudflare and Gemini are not registered user-facing providers in v0.1.
 - The automated PTY wrapper reports code 1 after injected interactive `/exit` or Ctrl+C even though terminal cleanup is visible; this status is not yet confirmed against the user's native terminal host.

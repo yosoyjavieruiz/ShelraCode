@@ -9,6 +9,19 @@ import {
 } from "./verifier.js";
 import type { TurnMode } from "./turn-policy.js";
 
+function isNotGitRepository(result: {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}): boolean {
+  return (
+    (result.exitCode === 128 || result.exitCode === 129) &&
+    /(?:not a git repository|no es un repositorio(?: de)? git)/iu.test(
+      `${result.stderr}\n${result.stdout}`,
+    )
+  );
+}
+
 export interface CodeReviewInput {
   root: string;
   objective: string;
@@ -73,7 +86,12 @@ export async function runCodeReview(
         timeoutMs: 10_000,
         logger: input.logger,
       });
-      diffCheck = result.exitCode === 0 ? "passed" : "failed";
+      diffCheck =
+        result.exitCode === 0
+          ? "passed"
+          : isNotGitRepository(result)
+            ? "unavailable"
+            : "failed";
     } catch (error) {
       if (input.signal?.aborted) diffCheck = "unavailable";
       else {
@@ -136,6 +154,22 @@ export async function runCodeReview(
         : "Pre-existing user work could not be proven preserved.",
     },
   ];
+  let reviewedVerification = verification;
+  if (diffCheck === "failed") {
+    reviewedVerification = {
+      ...verification,
+      pass: false,
+      confidence: Math.min(verification.confidence, 0.2),
+      issues: [
+        ...verification.issues,
+        {
+          code: "FINAL_REVIEW_FAILED",
+          message: "Git whitespace/diff validation failed.",
+          severity: "error",
+        },
+      ],
+    };
+  }
   const failedDimensions = dimensions.filter(
     (dimension) => dimension.status === "fail",
   ).length;
@@ -144,7 +178,7 @@ export async function runCodeReview(
   ).length;
   const score = Math.max(0, 10 - failedDimensions * 2 - partialDimensions);
   const verdict =
-    verification.pass && diffCheck === "passed" ? "PASS" : "BLOCKED";
+    reviewedVerification.pass && diffCheck !== "failed" ? "PASS" : "BLOCKED";
   input.logger?.info("agent.code_review.finished", {
     verdict,
     score,
@@ -158,7 +192,7 @@ export async function runCodeReview(
     dimensions,
     issues: verification.issues,
     diffCheck,
-    verification,
+    verification: reviewedVerification,
     reference:
       "Claude Code public agent-loop baseline: context, action, verification, repeat; behavioral comparison only.",
   };

@@ -56,14 +56,11 @@ export interface PermissionDecision {
 export function checkPermission(
   input: PermissionCheckInput,
 ): PermissionDecision {
-  if (
-    input.mode === "PLAN" &&
-    (input.risk === "write" || input.risk === "destructive")
-  ) {
+  if (input.mode === "ASK") {
     return {
       allowed: false,
-      requiresApproval: false,
-      reason: "PLAN mode blocks workspace mutation",
+      requiresApproval: true,
+      reason: "interactive permission is required for every workspace action",
     };
   }
 
@@ -80,13 +77,13 @@ export function checkPermission(
 
   if (
     input.mode === "PLAN" &&
-    shellRisk === "execute" &&
-    input.risk !== "read"
+    (input.risk === "write" ||
+      input.risk === "execute")
   ) {
     return {
       allowed: false,
-      requiresApproval: false,
-      reason: "PLAN mode blocks mutation-capable execution",
+      requiresApproval: true,
+      reason: "PLAN mode requires approval before this workspace action",
     };
   }
 

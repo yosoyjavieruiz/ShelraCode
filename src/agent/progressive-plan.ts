@@ -7,8 +7,6 @@ const CREATABLE_ARTIFACT_PATTERN =
   /\.(?:c|cc|cpp|cs|css|go|h|html|java|js|json|jsx|less|md|mjs|py|rs|scss|svelte|toml|ts|tsx|vue|xml|ya?ml)$/iu;
 const CREATION_INTENT_PATTERN =
   /\b(?:add|build|create|generate|implement|scaffold|write|agrega|anade|construye|crea|genera|implementa|escribe)\b/iu;
-const GREENFIELD_WEB_PATTERN =
-  /\b(?:browser|html|web\s+(?:app|application|page|site)|website)\b/iu;
 const CONTEXT_ONLY_BASENAMES = new Set([
   "agents.md",
   "package.json",
@@ -149,14 +147,10 @@ export async function verifiedPreparationTargets(
 ): Promise<string[]> {
   const rootPath = path.resolve(root);
   const creationRequested = CREATION_INTENT_PATTERN.test(objective);
-  const defaultCreationTargets =
-    creationRequested && GREENFIELD_WEB_PATTERN.test(objective)
-      ? ["index.html"]
-      : [];
   const objectiveLower = objective.toLowerCase();
   const eligible: string[] = [];
 
-  for (const candidate of [...candidates, ...defaultCreationTargets]) {
+  for (const candidate of candidates) {
     const normalized = normalize(candidate);
     if (
       !normalized ||
@@ -205,10 +199,6 @@ export async function verifiedPreparationTargets(
   );
   if (explicit.length > 0) return explicit;
   if (creationRequested) {
-    const primaryDefault = defaultCreationTargets.find((candidate) =>
-      uniqueEligible.includes(candidate),
-    );
-    if (primaryDefault) return [primaryDefault];
     return uniqueEligible.slice(0, Math.max(1, limit));
   }
   return selectProgressiveTargets(objective, [], uniqueEligible, limit);

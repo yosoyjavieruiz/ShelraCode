@@ -1,12 +1,30 @@
 import type { TurnMode } from "./turn-policy.js";
+import {
+  appendPlanProposal,
+  refreshPlanReadiness,
+  type MonotonicPlan,
+  type PlanNode,
+  type PlanNodeKind,
+  type PlanProposal,
+  type PlanRevision,
+  type PlanValidationContext,
+} from "./planner.js";
 
 export type TaskNodeStatus =
-  "blocked" | "ready" | "running" | "verifying" | "passed" | "failed";
+  | "pending"
+  | "blocked"
+  | "ready"
+  | "running"
+  | "verifying"
+  | "passed"
+  | "failed"
+  | "superseded";
 
 export interface TaskNode {
   id: string;
   objective: string;
   dependencies: string[];
+  kind?: PlanNodeKind;
   status: TaskNodeStatus;
   scope: {
     candidateFiles: string[];
@@ -14,7 +32,10 @@ export interface TaskNode {
   };
   contextRequirements: string[];
   acceptance: string[];
+  verification?: string[];
   attempts: number;
+  source?: "model" | "controller" | "controller-recovery";
+  revision?: number;
   lastFailure?: string;
 }
 
@@ -23,6 +44,11 @@ export interface TaskGraph {
   globalConstraints: string[];
   nodes: TaskNode[];
   currentNodeId: string;
+  planSource?: "model" | "mixed" | "compatibility";
+  revision?: number;
+  revisions?: PlanRevision[];
+  acceptanceCriteria?: string[];
+  evidenceRequirements?: string[];
 }
 
 export interface TaskGraphInput {
@@ -32,6 +58,19 @@ export interface TaskGraphInput {
   verificationCommands?: readonly string[];
   constraints?: readonly string[];
 }
+
+const LEGAL_NODE_TRANSITIONS: Readonly<
+  Record<TaskNodeStatus, ReadonlySet<TaskNodeStatus>>
+> = {
+  pending: new Set(["ready", "running", "blocked", "failed"]),
+  ready: new Set(["running", "verifying", "passed", "blocked", "failed"]),
+  running: new Set(["verifying", "passed", "blocked", "failed"]),
+  verifying: new Set(["running", "passed", "blocked", "failed"]),
+  passed: new Set(),
+  failed: new Set(),
+  blocked: new Set(),
+  superseded: new Set(),
+};
 
 const READ_TOOLS = [
   "ListFiles",
@@ -208,7 +247,139 @@ export function compileTaskGraph(input: TaskGraphInput): TaskGraph {
     ],
     nodes,
     currentNodeId: "discover",
+    planSource: "compatibility",
+    revision: 0,
+    revisions: [],
+    acceptanceCriteria: [
+      "The requested repository outcome is supported by host evidence.",
+    ],
+    evidenceRequirements: ["Fresh evidence relevant to the objective."],
   };
+}
+
+export function createModelPlanningGraph(input: {
+  objective: string;
+  constraints?: readonly string[];
+}): TaskGraph {
+  return {
+    rootObjective: input.objective,
+    globalConstraints: [...(input.constraints ?? [])],
+    nodes: [],
+    currentNodeId: "",
+    planSource: "model",
+    revision: 0,
+    revisions: [],
+    acceptanceCriteria: [],
+    evidenceRequirements: [],
+  };
+}
+
+function toMonotonicPlan(graph: TaskGraph): MonotonicPlan {
+  const nodes: PlanNode[] = graph.nodes.map((node) => ({
+    id: node.id,
+    objective: node.objective,
+    dependencies: [...node.dependencies],
+    kind:
+      node.kind ??
+      (node.scope.allowedTools.length > 0 ? "workspace" : "semantic"),
+    scope: {
+      ...(node.scope.candidateFiles.length > 0
+        ? { candidateFiles: [...node.scope.candidateFiles] }
+        : {}),
+      ...(node.scope.allowedTools.length > 0
+        ? { allowedTools: [...node.scope.allowedTools] }
+        : {}),
+    },
+    contextRequirements: [...node.contextRequirements],
+    requiredEvidence: [...node.contextRequirements],
+    acceptance: [...node.acceptance],
+    ...(node.verification ? { verification: [...node.verification] } : {}),
+    status:
+      node.status === "passed"
+        ? "verified"
+        : node.status === "superseded"
+          ? "superseded"
+          : node.status,
+    source:
+      node.source === "controller-recovery"
+        ? "controller-recovery"
+        : node.source === "model"
+          ? "model"
+          : "controller",
+    revision: node.revision ?? 0,
+  }));
+  return {
+    rootObjective: graph.rootObjective,
+    revision: graph.revision ?? 0,
+    currentNodeId: graph.currentNodeId || undefined,
+    nodes,
+    revisions: graph.revisions ?? [],
+    acceptanceCriteria: [...(graph.acceptanceCriteria ?? [])],
+    evidenceRequirements: [...(graph.evidenceRequirements ?? [])],
+    constraints: [...graph.globalConstraints],
+  };
+}
+
+function fromPlanNode(node: PlanNode): TaskNode {
+  const status: TaskNodeStatus =
+    node.status === "verified"
+      ? "passed"
+      : node.status === "superseded"
+        ? "superseded"
+        : node.status;
+  return {
+    id: node.id,
+    objective: node.objective,
+    dependencies: [...node.dependencies],
+    kind: node.kind,
+    status,
+    scope: {
+      candidateFiles: [...(node.scope?.candidateFiles ?? [])],
+      allowedTools: [...(node.scope?.allowedTools ?? [])],
+    },
+    contextRequirements: [
+      ...(node.contextRequirements ?? node.requiredEvidence ?? []),
+    ],
+    acceptance: [...(node.acceptance ?? [])],
+    verification: [...(node.verification ?? [])],
+    attempts: 0,
+    source: node.source,
+    revision: node.revision,
+  };
+}
+
+/** Convert an accepted model proposal into the controller's graph projection. */
+export function appendModelPlanToGraph(
+  graph: TaskGraph,
+  proposal: PlanProposal,
+  context: Omit<PlanValidationContext, "existingNodes"> & { reason?: string },
+): { graph: TaskGraph; revision: PlanRevision } {
+  const accepted = appendPlanProposal(
+    toMonotonicPlan(graph),
+    proposal,
+    context,
+  );
+  const nextGraph: TaskGraph = {
+    rootObjective: graph.rootObjective,
+    globalConstraints: [...graph.globalConstraints],
+    nodes: accepted.plan.nodes.map(fromPlanNode),
+    currentNodeId: accepted.plan.currentNodeId ?? "",
+    planSource: "model",
+    revision: accepted.plan.revision,
+    revisions: accepted.plan.revisions,
+    acceptanceCriteria: [...accepted.plan.acceptanceCriteria],
+    evidenceRequirements: [...accepted.plan.evidenceRequirements],
+  };
+  return { graph: nextGraph, revision: accepted.revision };
+}
+
+/** Select the next dependency-ready semantic node proposed by the LLM. */
+export function nextReadyTaskNode(graph: TaskGraph): TaskNode | undefined {
+  const plan = toMonotonicPlan(graph);
+  refreshPlanReadiness(plan);
+  const nextId = plan.nodes.find((node) => node.status === "ready")?.id;
+  if (!nextId) return undefined;
+  return graph.nodes.find((node) => node.id === nextId);
 }
 
 export function setTaskNodeStatus(
@@ -218,8 +389,31 @@ export function setTaskNodeStatus(
 ): boolean {
   const target = graph.nodes.find((candidate) => candidate.id === nodeId);
   if (!target || target.status === status) return false;
+  if (!LEGAL_NODE_TRANSITIONS[target.status].has(status)) return false;
   target.status = status;
   if (status === "running" || status === "verifying")
     graph.currentNodeId = nodeId;
+  const plan = toMonotonicPlan(graph);
+  refreshPlanReadiness(plan);
+  graph.currentNodeId = plan.currentNodeId ?? "";
+  for (const next of plan.nodes) {
+    const graphNode = graph.nodes.find((candidate) => candidate.id === next.id);
+    if (!graphNode || graphNode.status === "superseded") continue;
+    const nextStatus: TaskNodeStatus =
+      next.status === "verified" ? "passed" : next.status;
+    if (
+      graphNode.status !== nextStatus &&
+      LEGAL_NODE_TRANSITIONS[graphNode.status].has(nextStatus)
+    )
+      graphNode.status = nextStatus;
+  }
   return true;
+}
+
+/** Exposed for deterministic scheduler/evaluation checks. */
+export function isLegalTaskNodeTransition(
+  from: TaskNodeStatus,
+  to: TaskNodeStatus,
+): boolean {
+  return from === to || LEGAL_NODE_TRANSITIONS[from].has(to);
 }

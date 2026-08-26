@@ -1,6 +1,10 @@
 import type { TurnMode } from "./turn-policy.js";
 import type { VerificationCommand } from "./verification-plan.js";
 import type { TaskGraph } from "./task-graph.js";
+import type { AdaptiveExecutionProfile } from "./execution-profile.js";
+import type { PlanRevision } from "./planner.js";
+import type { RecoveryContract } from "./recovery.js";
+import type { TaskContract } from "./task-contract.js";
 
 export type AgentPhase =
   | "frame"
@@ -31,7 +35,14 @@ export interface TaskConstraint {
 
 export interface ContextEvidence {
   id: string;
-  kind: "manifest" | "file" | "search" | "git" | "test" | "tool-result";
+  kind:
+    | "manifest"
+    | "file"
+    | "search"
+    | "git"
+    | "test"
+    | "tool-result"
+    | "decision";
   source: string;
   summary: string;
   relevance: number;
@@ -48,6 +59,11 @@ export interface PlanStep {
   id: string;
   description: string;
   status: "pending" | "active" | "done" | "failed" | "skipped";
+  kind?: "workspace" | "semantic" | "clarification";
+  source?: "model" | "controller" | "controller-recovery";
+  revision?: number;
+  dependencies?: string[];
+  scope?: string[];
   evidenceRequired?: string[];
   verification?: string[];
 }
@@ -55,11 +71,18 @@ export interface PlanStep {
 export interface TaskPlan {
   steps: PlanStep[];
   updatedAt: string;
+  source?: "model" | "controller";
+  revision?: number;
+  revisions?: PlanRevision[];
+  objective?: string;
+  acceptanceCriteria?: string[];
+  evidenceRequirements?: string[];
 }
 
 export interface AgentAction {
   id: string;
-  kind: "read" | "search" | "write" | "execute" | "verify" | "review";
+  kind:
+    "read" | "search" | "write" | "execute" | "verify" | "review" | "decide";
   target: string;
   status: "running" | "succeeded" | "failed" | "cancelled";
   startedAt?: string;
@@ -92,6 +115,9 @@ export interface AgentTaskLedger {
   objective: string;
   mode: TurnMode;
   phase: AgentPhase;
+  contract?: TaskContract;
+  executionProfile?: AdaptiveExecutionProfile;
+  planningMode?: "none" | "model" | "compatibility";
   successCriteria: SuccessCriterion[];
   constraints: TaskConstraint[];
   evidence: ContextEvidence[];
@@ -100,6 +126,8 @@ export interface AgentTaskLedger {
   verificationPlan: VerificationCommand[];
   /** Controller-owned long-horizon execution graph; model context is only a view. */
   taskGraph?: TaskGraph;
+  planRevisions: PlanRevision[];
+  recoveryContracts: RecoveryContract[];
   actions: AgentAction[];
   filesRead: string[];
   filesChanged: string[];
@@ -128,6 +156,9 @@ export function createTaskLedger(input: {
   id: string;
   objective: string;
   mode: TurnMode;
+  contract?: TaskContract;
+  executionProfile?: AdaptiveExecutionProfile;
+  planningMode?: "none" | "model" | "compatibility";
   successCriteria?: SuccessCriterion[];
   constraints?: TaskConstraint[];
   verificationPlan?: VerificationCommand[];
@@ -138,6 +169,11 @@ export function createTaskLedger(input: {
     objective: input.objective,
     mode: input.mode,
     phase: "frame",
+    ...(input.contract ? { contract: input.contract } : {}),
+    ...(input.executionProfile
+      ? { executionProfile: input.executionProfile }
+      : {}),
+    ...(input.planningMode ? { planningMode: input.planningMode } : {}),
     successCriteria: input.successCriteria ?? [],
     constraints: input.constraints ?? [],
     verificationPlan: input.verificationPlan ?? [],
@@ -148,6 +184,8 @@ export function createTaskLedger(input: {
     filesChanged: [],
     verificationRuns: [],
     blockers: [],
+    planRevisions: [],
+    recoveryContracts: [],
     startedAt: timestamp,
     updatedAt: timestamp,
   };
@@ -179,6 +217,24 @@ export function addTaskEvidence(
 
 export function setTaskPlan(ledger: AgentTaskLedger, plan: TaskPlan): void {
   ledger.plan = plan;
+  ledger.updatedAt = now();
+}
+
+export function recordPlanRevision(
+  ledger: AgentTaskLedger,
+  revision: PlanRevision,
+): void {
+  if (!ledger.planRevisions.some((item) => item.id === revision.id))
+    ledger.planRevisions.push(revision);
+  ledger.updatedAt = now();
+}
+
+export function recordRecoveryContract(
+  ledger: AgentTaskLedger,
+  recovery: RecoveryContract,
+): void {
+  if (!ledger.recoveryContracts.some((item) => item.id === recovery.id))
+    ledger.recoveryContracts.push(recovery);
   ledger.updatedAt = now();
 }
 

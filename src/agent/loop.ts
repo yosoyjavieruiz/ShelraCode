@@ -8,7 +8,7 @@ import type {
 import type { FileMutationSnapshot } from "../checkpoint/checkpoint.js";
 import { runTestsTool } from "../tools/workspace.js";
 import { ToolError, toolErrorDetails } from "../tools/errors.js";
-import type { ToolDefinition, ToolResult } from "../tools/types.js";
+import type { ToolDefinition, ToolResult, ToolRisk } from "../tools/types.js";
 import { evaluateCompletionGate } from "./completion-gate.js";
 import { independentlyVerifyTask } from "./verifier.js";
 import { compactTaskContext } from "./compaction.js";
@@ -17,17 +17,43 @@ import {
   recoverTextToolCalls,
 } from "./tool-envelope.js";
 import { normalizeProviderEvents } from "../providers/stream-normalizer.js";
+import {
+  compileContextPacket,
+  renderContextPacket,
+} from "../context/context-compiler.js";
 import { extractObjectivePaths } from "./objective-review.js";
 import { evaluateMutationEvidenceGate } from "./context-gate.js";
-import { compileTaskGraph, setTaskNodeStatus } from "./task-graph.js";
+import {
+  appendModelPlanToGraph,
+  compileTaskGraph,
+  createModelPlanningGraph,
+  type TaskNode,
+  setTaskNodeStatus,
+} from "./task-graph.js";
 export { recoverTextToolCalls } from "./tool-envelope.js";
 import { normalizeVerificationPlan } from "./verification-plan.js";
 import { isNeverRemotePath, scanSecrets } from "../privacy/policy.js";
 import type { TurnMode } from "./turn-policy.js";
 import {
+  requiresModelPlan,
+  selectExecutionProfile,
+} from "./execution-profile.js";
+import { cloneTaskContract, compileTaskContract } from "./task-contract.js";
+import {
+  requestModelPlan,
+  normalizeAppendOnlyRecoveryPlanProposal,
+  normalizeRecoveryPlanProposal,
+  type PlanNodeStatus,
+  type PlanModelResult,
+  type PlanProposal,
+} from "./planner.js";
+import { createRecoveryContract, type RecoveryContract } from "./recovery.js";
+import {
   addTaskEvidence,
   addTaskBlocker,
   createTaskLedger,
+  recordPlanRevision,
+  recordRecoveryContract,
   recordTaskAction,
   recordVerificationRun,
   setTaskCriterion,
@@ -115,6 +141,20 @@ function summarizeFailure(message: string): string {
   return normalized.length <= 500
     ? normalized
     : `${normalized.slice(0, 500)}â€¦[truncated]`;
+}
+
+function isToolShapedAssistantText(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  try {
+    if (recoverTextToolCalls(trimmed, 0)?.length) return true;
+  } catch (error) {
+    // A malformed tool envelope is still not a semantic decision. Let the
+    // bounded no-action recovery explain the protocol boundary to the model.
+    if (error instanceof ToolError) return true;
+    throw error;
+  }
+  return TOOL_TEXT_SHAPE.test(trimmed);
 }
 
 function emit(options: AgentLoopOptions, event: AgentEvent): void {
@@ -276,6 +316,12 @@ function objectOutput(value: unknown): Record<string, unknown> | undefined {
 const MODEL_TOOL_TEXT_LIMIT = 8_000;
 const MODEL_EXECUTION_TEXT_LIMIT = 4_000;
 
+// Local OpenAI-compatible runtimes sometimes serialize a tool call as prose
+// after receiving a tool error. The provider boundary quarantines that prose
+// and reports MODEL_PROTOCOL_ERROR; allow a small, consecutive recovery
+// window before treating a persistently incompatible model/runtime as fatal.
+const MAX_MODEL_PROTOCOL_RECOVERIES = 2;
+
 // After a staged target has been observed, keep the small model on one
 // bounded mutation/verification decision instead of reopening discovery on
 // every turn. A failed mutation explicitly reopens discovery for recovery.
@@ -318,6 +364,36 @@ const MAX_STAGED_FULL_REWRITE_CHARS = 12_000;
 // different limit.
 const STAGED_DISCOVERY_OUTPUT_TOKENS = 768;
 const STAGED_MUTATION_OUTPUT_TOKENS = 1_536;
+
+const MODEL_PLAN_READ_ONLY_TOOLS = new Set([
+  "ListFiles",
+  "GlobFiles",
+  "SearchText",
+  "ReadFile",
+  "GitStatus",
+  "GitDiff",
+]);
+
+// A plan node's allowed tools describe the semantic operation it intends to
+// perform. Safe repository reads are enabling context for that operation,
+// not a mutation outside the plan. Keep this set explicit so a node that
+// allows WriteFile can still inspect the existing target without gaining
+// Shell, tests, or another mutation primitive by implication.
+const MODEL_PLAN_CONTEXT_TOOLS = new Set([
+  "ListFiles",
+  "GlobFiles",
+  "SearchText",
+  "ReadFile",
+  "GitStatus",
+  "GitDiff",
+]);
+const MODEL_PLAN_FILE_MUTATION_TOOLS = new Set([
+  "EditFile",
+  "WriteFile",
+  "CreateFile",
+  "DeleteFile",
+  "ApplyPatch",
+]);
 
 function objectiveAuthorizesDeletion(objective: string): boolean {
   const normalized = objective.toLowerCase();
@@ -466,6 +542,11 @@ function executionFailure(
         .join(" | ")
     : "";
   const detail = failures ? ` ${failures}` : "";
+  const windowsTextCommandHint =
+    process.platform === "win32" &&
+    /\b(?:head|tail|grep|sed|awk)\b/iu.test(command)
+      ? " On Windows, use ReadFile/SearchText or a PowerShell equivalent instead of Unix-only text commands."
+      : "";
   return {
     ok: false,
     error:
@@ -478,8 +559,22 @@ function executionFailure(
     suggestedAction:
       toolName === "RunTests"
         ? "Inspect the concise failure evidence, change the implementation if needed, and run the focused test again."
-        : "Inspect stderr and retry with a corrected command or narrower step.",
+        : `Inspect stderr and retry with a corrected command or narrower step.${windowsTextCommandHint}`,
   };
+}
+
+function isNonGitRepositoryFailure(
+  toolName: string,
+  result: ToolResult,
+): boolean {
+  return (
+    (toolName === "GitStatus" || toolName === "GitDiff") &&
+    result.ok === false &&
+    result.code === "COMMAND_FAILED" &&
+    /(?:not a git repository|no es un repositorio(?: de)? git)/iu.test(
+      result.error ?? "",
+    )
+  );
 }
 
 function validateToolInput(
@@ -650,6 +745,11 @@ const TOOL_ERROR_RECOVERY_INSTRUCTION =
   "wrong tool for a file vs. directory, invalid argument) — correct that " +
   "and try again instead of giving up or repeating the same call.";
 
+const PLATFORM_EXECUTION_INSTRUCTION =
+  process.platform === "win32"
+    ? "The execution host is Windows. Prefer ReadFile/SearchText for repository content and PowerShell-compatible commands; do not assume Unix-only commands such as head, tail, grep or sed are installed."
+    : "Prefer the repository tools for file content and keep shell commands narrow and portable.";
+
 const SYSTEM_PROMPT_BY_PROFILE: Record<
   NonNullable<AgentTask["systemPromptProfile"]>,
   string
@@ -671,6 +771,8 @@ const SYSTEM_PROMPT_BY_PROFILE: Record<
     "turn; do not describe a planned tool call as prose, JSON, XML, or a " +
     "code block, and do not assume file contents before reading them. After " +
     "each tool result, choose the next action from the new evidence. " +
+    PLATFORM_EXECUTION_INSTRUCTION +
+    " " +
     TOOL_ERROR_RECOVERY_INSTRUCTION,
 };
 
@@ -726,16 +828,104 @@ export async function runAgent(
         ? "required"
         : "not_required"
       : "not_required");
-  const constraints = frameConstraints(task, mode, verificationPlan);
+  const objectivePaths = [
+    ...new Set(
+      [...extractObjectivePaths(task.objective), ...(task.stagedPaths ?? [])]
+        .map(normalizeWorkspacePath)
+        .filter((value) => value.length > 0),
+    ),
+  ];
+  const derivedComplexity = Math.min(
+    1,
+    0.15 +
+      (objectivePaths.length >= 2 ? 0.25 : 0) +
+      (objectivePaths.length >= 6 ? 0.25 : 0) +
+      (task.objective.length > 160 ? 0.15 : 0) +
+      (verificationPlan.length > 0 ? 0.1 : 0),
+  );
+  const executionProfile =
+    task.executionProfile ??
+    selectExecutionProfile({
+      mode,
+      complexity: derivedComplexity,
+      explicitPathCount: objectivePaths.length,
+      deliverableCount: Math.max(1, objectivePaths.length),
+      risk: mode === "coding" ? 0.3 : 0.1,
+      uncertaintyCount:
+        mode === "coding" && objectivePaths.length === 0 ? 1 : 0,
+    });
+  const planningMode = task.planningMode ?? "compatibility";
+  const taskContract = task.taskContract
+    ? cloneTaskContract(task.taskContract)
+    : compileTaskContract({
+        id: task.id,
+        originalRequest: task.objective,
+        mode,
+        executionProfile,
+        explicitPaths: objectivePaths,
+        verificationCommands: verificationPlan,
+        constraints: task.constraints,
+      });
+  const constraints = [
+    ...new Set([
+      ...taskContract.constraints.map((constraint) => constraint.description),
+      ...frameConstraints(task, mode, verificationPlan),
+    ]),
+  ];
+  for (const constraint of constraints)
+    if (
+      !taskContract.constraints.some(
+        (existing) => existing.description === constraint,
+      )
+    )
+      taskContract.constraints.push({
+        id: `constraint-controller-${taskContract.constraints.length + 1}`,
+        description: constraint,
+        source: "controller",
+      });
+  const compiledTaskContext = task.context?.trim()
+    ? renderContextPacket(
+        compileContextPacket({
+          objective: task.objective,
+          constraints,
+          evidence: [
+            {
+              source: "host-context",
+              kind: "repository",
+              summary: task.context,
+              relevance: 1,
+            },
+          ],
+          legalActions: options.tools.map((tool) => tool.name),
+          expectedOutput: "Choose one bounded, legal next action.",
+          tokenBudget: Math.min(
+            16_384,
+            Math.max(1_024, Math.ceil((task.contextBudgetChars ?? 50_000) / 4)),
+          ),
+        }),
+      )
+    : "";
+  const contractCriteriaEnabled =
+    task.enforceTaskContract === true ||
+    task.taskContract !== undefined ||
+    (planningMode === "model" && mode === "coding");
   const successCriteria =
     task.successCriteria && task.successCriteria.length > 0
       ? task.successCriteria
-      : ["Address the user's objective with an evidence-backed response."];
-  const explicitSuccessCriteria = (task.successCriteria?.length ?? 0) > 0;
+      : contractCriteriaEnabled
+        ? taskContract.acceptanceCriteria.map(
+            (criterion) => criterion.description,
+          )
+        : ["Address the user's objective with an evidence-backed response."];
+  const explicitSuccessCriteria =
+    (task.successCriteria?.length ?? 0) > 0 || contractCriteriaEnabled;
   const ledger = createTaskLedger({
     id: task.id,
     objective: task.objective,
     mode,
+    contract: taskContract,
+    executionProfile,
+    planningMode,
     verificationPlan,
     successCriteria: successCriteria.map((description, index) => ({
       id: `criterion-${index + 1}`,
@@ -770,7 +960,7 @@ export async function runAgent(
     toolCount: options.tools.length,
     toolChoice: options.toolChoice ?? "auto",
     objectiveLength: task.objective.length,
-    contextLength: task.context?.length ?? 0,
+    contextLength: compiledTaskContext.length,
   });
   options.trace?.record({
     taskId: task.id,
@@ -781,6 +971,8 @@ export async function runAgent(
       model: providerModelId(task),
       toolCount: options.tools.length,
       toolChoice: options.toolChoice ?? "auto",
+      executionProfile,
+      planningMode,
     },
   });
   transitionPhase(ledger, "discover", loopOptions);
@@ -798,13 +990,43 @@ export async function runAgent(
       })),
     });
   };
-  const objectivePaths = [
-    ...new Set(
-      [...extractObjectivePaths(task.objective), ...(task.stagedPaths ?? [])]
-        .map(normalizeWorkspacePath)
-        .filter((value) => value.length > 0),
-    ),
-  ];
+  const projectModelPlan = (): void => {
+    const graph = ledger.taskGraph;
+    if (!graph || graph.planSource !== "model") return;
+    const status = (value: PlanNodeStatus): PlanStep["status"] => {
+      if (value === "verified") return "done";
+      if (value === "superseded") return "skipped";
+      if (value === "running" || value === "verifying") return "active";
+      if (value === "failed" || value === "blocked") return "failed";
+      return "pending";
+    };
+    setTaskPlan(ledger, {
+      source: "model",
+      revision: graph.revision,
+      revisions: graph.revisions,
+      objective: graph.rootObjective,
+      acceptanceCriteria: [...(graph.acceptanceCriteria ?? [])],
+      evidenceRequirements: [...(graph.evidenceRequirements ?? [])],
+      steps: graph.nodes.map((node) => ({
+        id: node.id,
+        description: node.objective,
+        status: status(node.status === "passed" ? "verified" : node.status),
+        kind: node.kind,
+        source: node.source ?? "model",
+        revision: node.revision,
+        dependencies: [...node.dependencies],
+        scope: [...node.scope.candidateFiles],
+        evidenceRequired: [...node.contextRequirements],
+        verification:
+          node.verification && node.verification.length > 0
+            ? [...node.verification]
+            : node.acceptance.length > 0
+              ? [...node.acceptance]
+              : undefined,
+      })),
+      updatedAt: new Date().toISOString(),
+    });
+  };
   ledger.taskGraph = compileTaskGraph({
     objective: task.objective,
     mode,
@@ -812,28 +1034,77 @@ export async function runAgent(
     verificationCommands: verificationPlan.map((item) => item.command),
     constraints,
   });
+  if (planningMode === "model")
+    ledger.taskGraph = createModelPlanningGraph({
+      objective: task.objective,
+      constraints,
+    });
   persistLedger();
+  const currentModelNode = (): TaskNode | undefined => {
+    if (planningMode !== "model" || !ledger.taskGraph?.currentNodeId)
+      return undefined;
+    return ledger.taskGraph.nodes.find(
+      (node) => node.id === ledger.taskGraph?.currentNodeId,
+    );
+  };
+  const modelPlanHasUnfinishedNodes = (): boolean =>
+    planningMode === "model" &&
+    Boolean(
+      ledger.taskGraph?.nodes.some(
+        (node) => node.status !== "passed" && node.status !== "superseded",
+      ),
+    );
+  const modelPlanHasRunnableContinuation = (): boolean =>
+    planningMode === "model" &&
+    Boolean(
+      ledger.taskGraph?.nodes.some(
+        (node) =>
+          node.status === "ready" ||
+          node.status === "running" ||
+          node.status === "verifying",
+      ),
+    );
+  const modelPlanIsComplete = (): boolean =>
+    planningMode !== "model" ||
+    Boolean(
+      ledger.taskGraph &&
+      ledger.taskGraph.nodes.length > 0 &&
+      ledger.taskGraph.nodes.every(
+        (node) => node.status === "passed" || node.status === "superseded",
+      ),
+    );
   const updateTaskNode = (
     nodeId: string | undefined,
     status: Parameters<typeof setTaskNodeStatus>[2],
   ): void => {
     if (!ledger.taskGraph || !nodeId) return;
-    if (setTaskNodeStatus(ledger.taskGraph, nodeId, status)) persistLedger();
+    if (!setTaskNodeStatus(ledger.taskGraph, nodeId, status)) return;
+    if (ledger.plan?.source === "model") projectModelPlan();
+    persistLedger();
+    if (ledger.plan?.source === "model") emitPlan();
   };
   const mutationNodeForPath = (
     target: string | undefined,
   ): string | undefined => {
-    if (!target || !ledger.taskGraph) return undefined;
+    if (!ledger.taskGraph) return undefined;
+    if (!target && planningMode === "model") return currentModelNode()?.id;
+    if (!target) return undefined;
     const normalized = normalizeWorkspacePath(target);
     return ledger.taskGraph.nodes.find(
       (node) =>
-        node.id.startsWith("mutate-") &&
+        node.status !== "passed" &&
+        node.status !== "superseded" &&
         node.scope.candidateFiles.some(
           (candidate) => normalizeWorkspacePath(candidate) === normalized,
         ),
     )?.id;
   };
   const syncTargetPlan = (activePaths: readonly string[] = []): void => {
+    if (ledger.plan?.source === "model") {
+      projectModelPlan();
+      emitPlan();
+      return;
+    }
     if (!ledger.plan || objectivePaths.length === 0) return;
     const changed = new Set(ledger.filesChanged.map(normalizeWorkspacePath));
     const active = new Set(activePaths.map(normalizeWorkspacePath));
@@ -858,6 +1129,267 @@ export async function runAgent(
   // verification the model must be able to re-read the file it just changed
   // even when the failing test path is the next acceptance target.
   let criteriaReadPaths = [...criteriaWritePaths];
+  const syncModelPlanScope = (): void => {
+    if (planningMode !== "model") return;
+    const node = currentModelNode();
+    const scope = (node?.scope.candidateFiles ?? [])
+      .map(normalizeWorkspacePath)
+      .filter((value) => value.length > 0);
+    criteriaWritePaths = [...new Set(scope)];
+    criteriaReadPaths = [...new Set(scope)];
+  };
+  interface ModelNodeActionState {
+    readCount: number;
+    mutationCount: number;
+    executionCount: number;
+    semanticCount: number;
+  }
+
+  const modelNodeActions = new Map<string, ModelNodeActionState>();
+  let lastActionedModelNodeId: string | undefined;
+  // Keep the mutation boundary separate from the current graph pointer. A
+  // host verification can run after the graph has advanced or after a
+  // recovery revision has been appended, so closing `currentModelNode()` at
+  // that point can leave the actual mutating node stuck in `verifying`.
+  let lastModelMutationNodeId: string | undefined;
+  const modelNodeActionState = (nodeId: string): ModelNodeActionState => {
+    const existing = modelNodeActions.get(nodeId);
+    if (existing) return existing;
+    const created = {
+      readCount: 0,
+      mutationCount: 0,
+      executionCount: 0,
+      semanticCount: 0,
+    };
+    modelNodeActions.set(nodeId, created);
+    return created;
+  };
+  const modelNodeIsReadOnly = (node: TaskNode): boolean => {
+    const allowedTools = node.scope.allowedTools;
+    return (
+      allowedTools.length > 0 &&
+      allowedTools.every((name) => MODEL_PLAN_READ_ONLY_TOOLS.has(name))
+    );
+  };
+  const modelNodeIsSemantic = (node: TaskNode): boolean =>
+    node.kind === "semantic" && node.scope.allowedTools.length === 0;
+  const modelNodeNeedsClarification = (node: TaskNode): boolean =>
+    node.kind === "clarification" && node.scope.allowedTools.length === 0;
+  const successfulExecution = (call: ToolCall, result: ToolResult): boolean => {
+    if (!result.ok) return false;
+    if (call.name !== "Shell" && call.name !== "RunTests") return true;
+    const output = objectOutput(result.output);
+    return typeof output?.exitCode !== "number" || output.exitCode === 0;
+  };
+  const modelNodeAllowsPath = (node: TaskNode, input: unknown): boolean => {
+    // Candidate files describe the LLM's intended scope. An explicit user
+    // approval may authorize a legitimate deviation, so observation must not
+    // silently discard successful evidence merely because the path was not in
+    // the original proposal. Workspace-root and security checks still happen
+    // at the tool boundary.
+    void node;
+    void input;
+    return true;
+  };
+  const observeModelPlanAction = (
+    call: ToolCall,
+    tool: ToolDefinition<unknown, unknown> | undefined,
+    result: ToolResult,
+    input: unknown,
+    planNodeId?: string,
+  ): void => {
+    if (planningMode !== "model") return;
+    const node =
+      (planNodeId
+        ? ledger.taskGraph?.nodes.find(
+            (candidate) => candidate.id === planNodeId,
+          )
+        : undefined) ?? currentModelNode();
+    const nonGitRepository = isNonGitRepositoryFailure(call.name, result);
+    if (!result.ok) {
+      if (nonGitRepository) {
+        // Git metadata is optional for a disposable or newly created
+        // workspace. Preserve the real tool failure in the action ledger,
+        // but do not turn an unavailable Git capability into a failed
+        // semantic work node or an endless retry. The host's final review
+        // already falls back to the mutation ledger in this situation.
+        if (node && modelNodeIsReadOnly(node)) {
+          modelNodeActionState(node.id).readCount += 1;
+          // Git metadata is optional in a disposable workspace, but the
+          // read-only LLM node still needs to complete through the same
+          // captured-node path as every other successful observation. This
+          // keeps progress/replan counters and the active-node identity in
+          // sync when the graph advances.
+          completeCurrentModelNodeAfterAction(node.id);
+        }
+        return;
+      }
+      if (node) node.lastFailure = result.error;
+      const retryable = result.recoverable !== false;
+      const isPlanBoundaryFailure =
+        (result.code === "CONFLICT" || result.code === "PERMISSION_DENIED") &&
+        result.error?.includes("LLM-authored plan node") === true;
+      if (isPlanBoundaryFailure) {
+        // The semantic plan remains LLM-authored, while its workspace
+        // boundary remains controller-enforced. Never widen the boundary
+        // because a worker guessed a different path; request a monotonic
+        // replacement node instead.
+        const attemptedPath =
+          typeof input === "object" &&
+          input !== null &&
+          "path" in input &&
+          typeof input.path === "string"
+            ? normalizeWorkspacePath(input.path)
+            : undefined;
+        updateTaskNode(node?.id, "failed");
+        pendingModelPlanRecovery ??= {
+          cause: "PLAN_SCOPE_CONFLICT",
+          issues: [
+            result.error ?? "The action was outside the current plan scope.",
+          ],
+          nextActions: [
+            `Reconsider the worker's attempted workspace path ${attemptedPath ?? "(missing path)"} and return a new replacement node with the semantically correct explicit candidateFiles scope.`,
+            result.suggestedAction ??
+              "Propose a replacement plan node with the exact intended workspace path.",
+          ],
+          ...(node?.id ? { supersedeNodeId: node.id } : {}),
+        };
+      }
+      const semanticExecutionFailure =
+        result.code === "TEST_FAILED" || result.code === "COMMAND_FAILED";
+      if (
+        semanticExecutionFailure &&
+        node &&
+        !nonGitRepository &&
+        !pendingModelPlanRecovery
+      ) {
+        // A failed command/test is semantic evidence about the current
+        // LLM-authored work unit, not merely another raw tool error. Mark the
+        // unit failed and return control to the same LLM planner for an
+        // append-only repair/replan. The controller does not choose the fix;
+        // it only preserves the failure boundary and prevents the worker
+        // from continuing under a plan whose declared verification failed.
+        updateTaskNode(node.id, "failed");
+        pendingModelPlanRecovery = {
+          cause: result.code ?? "COMMAND_FAILED",
+          issues: [
+            result.error ?? "The planned verification or command failed.",
+          ],
+          nextActions: [
+            result.suggestedAction ??
+              "Inspect the failure evidence and return a replacement repair node.",
+            "Preserve valid completed plan history and propose the next semantic repair with explicit scope and verification.",
+          ],
+          supersedeNodeId: node.id,
+        };
+      }
+      recordRecoveryContract(ledger, {
+        id: `${task.id}:tool-recovery:${call.id}`,
+        cause: result.code ?? "TOOL_FAILURE",
+        evidence: [result.error ?? "The planned tool action failed."],
+        attemptedStrategies: [
+          `${call.name}:${JSON.stringify(summarizeToolInput(input))}`,
+        ],
+        forbiddenRepeats: [
+          `${call.name}:${JSON.stringify(summarizeToolInput(input))}`,
+        ],
+        proposedRecovery:
+          result.code === "TEST_FAILED" || result.code === "COMMAND_FAILED"
+            ? "repair"
+            : retryable
+              ? "retry"
+              : "stop",
+        createdAt: new Date().toISOString(),
+      });
+      persistLedger();
+      return;
+    }
+    if (!node) return;
+    if (!modelNodeAllowsPath(node, input)) return;
+    const state = modelNodeActionState(node.id);
+    const isMutation = tool?.risk === "write" || tool?.risk === "destructive";
+    const isExecution = tool?.risk === "execute";
+    if (isMutation) lastModelMutationNodeId = node.id;
+    if (tool?.risk === "read") state.readCount += 1;
+    if (isMutation) state.mutationCount += 1;
+    if (isExecution && successfulExecution(call, result))
+      state.executionCount += 1;
+
+    // A successful observation is not a successful mutation. In particular,
+    // a read used to advance the next write node in the v20 CLI journey even
+    // though that node had not changed anything. Keep the LLM-authored
+    // semantic order, but require an action of the node's declared class
+    // before its completion can be considered.
+    if (isMutation || (isExecution && successfulExecution(call, result)))
+      updateTaskNode(node.id, "verifying");
+  };
+  const modelNodeHasRequiredAction = (
+    node: TaskNode,
+    state: ModelNodeActionState,
+  ): boolean => {
+    const readOnlyNode = modelNodeIsReadOnly(node);
+    return modelNodeIsSemantic(node)
+      ? state.semanticCount > 0
+      : readOnlyNode
+        ? state.readCount > 0
+        : node.scope.allowedTools.some((name) =>
+              MODEL_PLAN_FILE_MUTATION_TOOLS.has(name),
+            )
+          ? state.mutationCount > 0
+          : state.executionCount > 0;
+  };
+  const completeCurrentModelNode = (
+    objectiveVerified: boolean,
+    nodeId?: string,
+  ): boolean => {
+    if (planningMode !== "model") return false;
+    const node =
+      (nodeId
+        ? ledger.taskGraph?.nodes.find((candidate) => candidate.id === nodeId)
+        : undefined) ?? currentModelNode();
+    if (!node) return false;
+    const state = modelNodeActions.get(node.id);
+    if (!state) return false;
+    if (!modelNodeHasRequiredAction(node, state)) return false;
+    const hasFileMutationTool = node.scope.allowedTools.some((name) =>
+      MODEL_PLAN_FILE_MUTATION_TOOLS.has(name),
+    );
+    // A single-file workspace node has an unambiguous action boundary: a
+    // successful mutation is enough to unlock the next LLM-authored node.
+    // For a node that intentionally spans several candidate files, the
+    // candidate list is an allowed scope rather than proof that every file
+    // was completed. Keep that node active until the objective verifier
+    // proves its broader acceptance, otherwise one partial mutation would
+    // silently skip the rest of the LLM-authored work unit.
+    if (
+      !objectiveVerified &&
+      hasFileMutationTool &&
+      node.scope.candidateFiles.length > 1
+    )
+      return false;
+    // A node is the LLM's bounded semantic unit, while the objective is the
+    // user's global outcome. A successful typed action proves that the node's
+    // declared action boundary was executed; the objective verifier still
+    // decides whether the whole request is complete. Keeping those facts
+    // separate lets a multi-node plan advance after index.html succeeds
+    // instead of rejecting the next file as outside the stale node scope.
+    lastActionedModelNodeId = node.id;
+    // Replan attempts are a bounded recovery budget, not a lifetime quota for
+    // the task. An accepted replacement plan followed by a successful scoped
+    // action is meaningful progress, so a malformed earlier plan must not
+    // consume the recovery budget for every later independent node. Keeping
+    // the counter consecutive-to-progress still prevents an unproductive
+    // sequence of accepted-but-never-runnable plans from becoming unbounded.
+    modelReplanCount = 0;
+    updateTaskNode(node.id, "passed");
+    syncModelPlanScope();
+    return true;
+  };
+  const completeCurrentModelNodeAfterAction = (nodeId?: string): boolean =>
+    completeCurrentModelNode(false, nodeId);
+  const completeCurrentModelNodeAfterVerification = (
+    nodeId?: string,
+  ): boolean => completeCurrentModelNode(true, nodeId);
   const observedExistingPaths = new Set<string>();
   const observedMissingPaths = new Set<string>();
   const contextFallback =
@@ -867,7 +1399,13 @@ export async function runAgent(
   const declaredEvidenceState =
     task.contextEvidenceState ??
     (task.context?.trim() ? "SUFFICIENT" : "INSUFFICIENT");
-  const stagedTask = mode === "coding" && objectivePaths.length > 1;
+  // Host-staged work units are the compatibility controller's fallback for
+  // coding turns without an LLM-authored execution plan. Once the semantic
+  // planner is active, the LLM owns the work order and node scope; keeping the
+  // old target-by-target stage here would silently replace that plan with a
+  // monotone host sequence.
+  const stagedTask =
+    planningMode !== "model" && mode === "coding" && objectivePaths.length > 1;
   const stagedNeedsSupportingEvidence = requiresSupportingStagedEvidence(
     task.objective,
     objectivePaths.length,
@@ -920,16 +1458,53 @@ export async function runAgent(
     },
     {
       role: "user",
-      content: task.context
-        ? `${task.objective}\n\n${task.context}${stagedExecutionInstruction()}`
+      content: compiledTaskContext
+        ? `${compiledTaskContext}${stagedExecutionInstruction()}`
         : `${task.objective}${contextFallback}${stagedExecutionInstruction()}`,
     },
   ];
+  const modelPlanInstruction = (): string => {
+    if (planningMode !== "model") return "";
+    const plan = ledger.taskGraph;
+    const node = currentModelNode();
+    if (!plan || !node)
+      return "\n\nLLM-AUTHORED PLAN: no executable node is currently ready; do not invent workspace actions.";
+    const scopedPaths = node.scope.candidateFiles.filter(
+      (candidate) => candidate.trim().length > 0,
+    );
+    const pathRule =
+      scopedPaths.length > 0
+        ? `A path-bearing call in this turn must use only these exact relative paths: ${scopedPaths.join(", ")}. Do not call a later node's path early, even if it appears elsewhere in the objective or plan.`
+        : "This node has no path scope; do not invent a workspace path unless one is returned by an allowed observation.";
+    const toolRule =
+      node.scope.allowedTools.length > 0
+        ? `The semantic action must use only these planned tools: ${node.scope.allowedTools.join(", ")}.`
+        : "No workspace tool call is legal for this node.";
+    return (
+      "\n\nLLM-AUTHORED MONOTONIC PLAN (authoritative semantic work order): " +
+      `revision ${plan.revision ?? 0}; current node ${node.id}. ` +
+      "The controller validates this plan and owns completion, but it does not replace the LLM's semantic ordering with a fixed task tree. " +
+      `Current node objective: ${node.objective} ` +
+      `Dependencies: ${node.dependencies.join(", ") || "none"}. ` +
+      `Allowed tools: ${node.scope.allowedTools.join(", ") || "host-approved tools"}. ` +
+      `Scoped paths: ${node.scope.candidateFiles.join(", ") || "not yet localized"}. ` +
+      `Required evidence: ${node.contextRequirements.join("; ") || "the current observation"}. ` +
+      `${toolRule} ${pathRule} ` +
+      (modelNodeIsSemantic(node)
+        ? "This is a semantic node: return one concise plain-text decision or design result. No workspace tool call, JSON tool envelope, XML tool tag, or tool-shaped code block is legal for this node. "
+        : modelNodeNeedsClarification(node)
+          ? "This node is a clarification boundary: do not invent a workspace action; surface the missing user decision. "
+          : "") +
+      "Complete only this bounded node, observe the result, then continue from the next ready node."
+    );
+  };
   const refreshStagedWorkUnitPrompt = (): void => {
-    if (!stagedTask) return;
     const systemMessage = messages[0];
     if (systemMessage?.role === "system")
-      systemMessage.content = baseSystemPrompt + stagedExecutionInstruction();
+      systemMessage.content =
+        baseSystemPrompt +
+        stagedExecutionInstruction() +
+        modelPlanInstruction();
   };
   const toolRuns: ToolResult[] = [];
   let finalText = "";
@@ -995,7 +1570,10 @@ export async function runAgent(
   transitionPhase(ledger, "analyze", loopOptions);
   updateTaskNode("analyze", "running");
   persistLedger();
-  if (mode === "plan" || (task.successCriteria?.length ?? 0) > 1) {
+  if (
+    planningMode === "compatibility" &&
+    (mode === "plan" || (task.successCriteria?.length ?? 0) > 1)
+  ) {
     transitionPhase(ledger, "plan", loopOptions);
     const targetSteps: PlanStep[] = objectivePaths
       .slice(0, 8)
@@ -1066,8 +1644,29 @@ export async function runAgent(
   let repeatedMutationFailureCount = 0;
   let noActionCount = 0;
   let oversizedBatchCount = 0;
+  let modelProtocolRecoveryCount = 0;
   let forcedRecoveryTool: { name: "ReadFile"; path: string } | undefined;
   let pendingRecoveryInstruction: string | undefined;
+  let modelReplanCount = 0;
+  // A model can make real file mutations that change bytes without making
+  // any acceptance criterion closer to true. Keep this separate from the
+  // identical-call watchdog: rewriting the same artifact with different
+  // placeholder content is still a semantic loop. Once the threshold is
+  // reached, the LLM planner must choose a new repair/replacement node; the
+  // controller never invents the semantic repair itself.
+  const MODEL_MUTATION_STAGNATION_LIMIT = 3;
+  let criteriaProgressNodeId: string | undefined;
+  let criteriaProgressFingerprint: string | undefined;
+  let criteriaProgressMutationRevision = -1;
+  let stagnantMutationCount = 0;
+  let pendingModelPlanRecovery:
+    | {
+        cause: string;
+        issues: string[];
+        nextActions: string[];
+        supersedeNodeId?: string;
+      }
+    | undefined;
 
   const observeTool = (
     call: ToolCall,
@@ -1088,6 +1687,7 @@ export async function runAgent(
       (call.name === "Shell" || call.name === "RunTests") &&
       typeof output?.exitCode === "number" &&
       output.exitCode !== 0;
+    const nonGitRepository = isNonGitRepositoryFailure(call.name, result);
     recordTaskAction(ledger, {
       id: `${task.id}:tool:${call.id}`,
       kind,
@@ -1109,11 +1709,39 @@ export async function runAgent(
       typeof input.path === "string"
         ? input.path
         : undefined;
-    if (tool?.risk === "write" || tool?.risk === "destructive") {
+    const planBoundaryFailure =
+      !result.ok &&
+      (result.code === "CONFLICT" || result.code === "PERMISSION_DENIED") &&
+      result.error?.includes("LLM-authored plan node") === true;
+    if (
+      (tool?.risk === "write" || tool?.risk === "destructive") &&
+      !planBoundaryFailure
+    ) {
+      // A successful mutation is only an observation for an LLM-authored
+      // node. The node still needs objective/declared verification before it
+      // can become terminal; otherwise a placeholder or partial edit can
+      // make the plan appear complete and leave completion recovery without
+      // the failed node that needs supersession.
+      const successfulMutationStatus =
+        planningMode === "model" ? "verifying" : "passed";
+      const failedMutationStatus =
+        result.recoverable === false ? "failed" : "running";
       updateTaskNode(
         mutationNodeForPath(observedPath),
-        result.ok ? "passed" : "failed",
+        result.ok ? successfulMutationStatus : failedMutationStatus,
       );
+      if (result.ok) {
+        addTaskEvidence(ledger, {
+          id: `${task.id}:mutation-evidence:${call.id}`,
+          kind: "file",
+          source: call.name,
+          summary: observedPath
+            ? `Successful ${call.name} mutation recorded for ${normalizeWorkspacePath(observedPath)}.`
+            : `Successful ${call.name} mutation recorded by the host.`,
+          relevance: 0.85,
+          freshness: 1,
+        });
+      }
     } else if (result.ok && tool?.risk === "read") {
       updateTaskNode("discover", "passed");
     }
@@ -1138,7 +1766,6 @@ export async function runAgent(
     } else if (
       call.name === "EditFile" &&
       !result.ok &&
-      stagedTask &&
       typeof input === "object" &&
       input !== null &&
       "path" in input &&
@@ -1153,14 +1780,20 @@ export async function runAgent(
     ) {
       // A rejected exact edit is not recoverable by repeating the same
       // proposal. Force one fresh host observation before exposing EditFile
-      // again. This is the control-plane recovery boundary that prevents a
-      // small model from burning the remaining turns on an empty/stale or
-      // ambiguous oldText payload.
+      // again in both staged and LLM-authored execution. This is the
+      // control-plane recovery boundary that prevents a small model from
+      // burning the remaining turns on an empty/stale or ambiguous oldText
+      // payload.
       const recoveryPath = normalizeWorkspacePath(input.path);
       forcedRecoveryTool = { name: "ReadFile", path: recoveryPath };
       pendingRecoveryInstruction =
         `Host recovery: the EditFile proposal for ${recoveryPath} was rejected. ` +
         "Read that exact file now and construct a new exact oldText/newText edit; do not repeat the previous EditFile call.";
+    } else if (call.name === "Shell" && !result.ok && result.suggestedAction) {
+      // Shell failures are observations, not permission to repeat the same
+      // command. Put the typed host guidance in the next decision so the
+      // model can change strategy instead of guessing from a raw exit code.
+      pendingRecoveryInstruction = `Host recovery: the shell command failed. ${result.suggestedAction} Do not repeat the identical command.`;
     } else if (forcedRecoveryTool && call.name === forcedRecoveryTool.name) {
       const observedRecoveryPath =
         typeof input === "object" &&
@@ -1222,6 +1855,19 @@ export async function runAgent(
         relevance: evidenceRelevance,
         freshness: 1,
       });
+    if (nonGitRepository) {
+      addTaskEvidence(ledger, {
+        id: `${task.id}:evidence:${call.id}:git-not-applicable`,
+        kind: "git",
+        source: call.name,
+        summary:
+          "Git metadata is not applicable because the workspace is not a Git repository; continue with filesystem and mutation evidence.",
+        relevance: 0.35,
+        freshness: 1,
+      });
+      pendingRecoveryInstruction =
+        "Host observation: this workspace is not a Git repository, so GitStatus/GitDiff are not applicable. Do not retry Git metadata; continue using the successful filesystem, mutation, and objective-verification evidence.";
+    }
     if (tool?.risk === "write" || tool?.risk === "destructive") {
       if (result.ok) {
         readLoopRecoveryCount = 0;
@@ -1229,6 +1875,11 @@ export async function runAgent(
         stagedSupportingEvidenceObserved = false;
         lastMutationFailureKey = undefined;
         repeatedMutationFailureCount = 0;
+        if (observedPath) {
+          const normalizedMutationPath = normalizeWorkspacePath(observedPath);
+          observedExistingPaths.add(normalizedMutationPath);
+          observedMissingPaths.delete(normalizedMutationPath);
+        }
       } else if (stagedTask) {
         // A failed mutation invalidates the current edit proposal. Reopen
         // discovery so the model can acquire a fresh observation and recover.
@@ -1315,7 +1966,6 @@ export async function runAgent(
       }
     }
     if (
-      stagedTask &&
       call.name === "ReadFile" &&
       !result.ok &&
       ["NOT_FOUND", "PATH_NOT_FOUND"].includes(result.code ?? "") &&
@@ -1326,6 +1976,15 @@ export async function runAgent(
     ) {
       const normalizedPath = normalizeWorkspacePath(input.path);
       observedMissingPaths.add(normalizedPath);
+      if (forcedRecoveryTool?.path === normalizedPath) {
+        // The forced observation itself proved that the path is unavailable.
+        // Keeping the force marker would trap recovery in the same read.
+        forcedRecoveryTool = undefined;
+      }
+      pendingRecoveryInstruction =
+        `Host recovery: ReadFile confirmed that ${normalizedPath} does not exist. ` +
+        "Do not repeat ReadFile for that path. Use ListFiles, GlobFiles or SearchText to discover an existing path; " +
+        "if this is an intended new artifact, use the write operation allowed by the active plan node.";
       const activeTarget = criteriaWritePaths[0] ?? objectivePaths[0];
       if (
         activeTarget &&
@@ -1388,7 +2047,13 @@ export async function runAgent(
         completedAt: new Date().toISOString(),
       });
     }
-    if (!result.ok && result.code) {
+    if (nonGitRepository) {
+      // The command failure remains visible in toolRuns/actions, but it is a
+      // capability absence rather than a task error. Reset the repeated
+      // error detector so a valid non-Git workspace cannot enter a doom loop.
+      lastErrorCode = undefined;
+      repeatedErrorCount = 0;
+    } else if (!result.ok && result.code) {
       if (result.code === lastErrorCode) repeatedErrorCount += 1;
       else {
         lastErrorCode = result.code;
@@ -1544,6 +2209,43 @@ export async function runAgent(
     };
   };
 
+  const criteriaMutationStagnated = (criteria: { ready: boolean }): boolean => {
+    if (planningMode !== "model" || criteria.ready) {
+      criteriaProgressNodeId = undefined;
+      criteriaProgressFingerprint = undefined;
+      criteriaProgressMutationRevision = mutationRevision;
+      stagnantMutationCount = 0;
+      return false;
+    }
+    const node = currentModelNode();
+    if (!node) return false;
+    const fingerprint = JSON.stringify(
+      ledger.successCriteria
+        .filter((criterion) => criterion.required)
+        .map((criterion) => [criterion.id, criterion.satisfied]),
+    );
+    if (
+      criteriaProgressNodeId !== node.id ||
+      criteriaProgressFingerprint === undefined
+    ) {
+      criteriaProgressNodeId = node.id;
+      criteriaProgressFingerprint = fingerprint;
+      criteriaProgressMutationRevision = mutationRevision;
+      stagnantMutationCount = 0;
+      return false;
+    }
+    if (mutationRevision > criteriaProgressMutationRevision) {
+      const mutationDelta = mutationRevision - criteriaProgressMutationRevision;
+      stagnantMutationCount =
+        criteriaProgressFingerprint === fingerprint
+          ? stagnantMutationCount + mutationDelta
+          : 0;
+      criteriaProgressMutationRevision = mutationRevision;
+      criteriaProgressFingerprint = fingerprint;
+    }
+    return stagnantMutationCount >= MODEL_MUTATION_STAGNATION_LIMIT;
+  };
+
   const restoreRegressedMutations = async (criteria: {
     satisfiedCriterionIds: string[];
   }): Promise<{
@@ -1649,7 +2351,7 @@ export async function runAgent(
         .every((criterion) => criterion.satisfied);
     const finalReviewPerformed = await reviewFinalDiff();
     const preserved = await userWorkPreserved();
-    const completion = evaluateCompletionGate({
+    let completion = evaluateCompletionGate({
       mode,
       objectiveSatisfied:
         finalText.trim().length > 0 && (mode !== "coding" || mutated),
@@ -1666,6 +2368,15 @@ export async function runAgent(
       unresolvedBlockers,
       userWorkPreserved: preserved,
     });
+    if (!modelPlanIsComplete())
+      completion = {
+        ...completion,
+        canComplete: false,
+        reasons: [
+          ...completion.reasons,
+          "The LLM-authored plan still contains unverified work nodes.",
+        ],
+      };
     logger?.info("agent.completion.evaluated", {
       canComplete: completion.canComplete,
       verified: completion.canComplete,
@@ -1750,7 +2461,11 @@ export async function runAgent(
     return result;
   };
 
-  const finish = async (turns: number): Promise<AgentRunResult> => {
+  const CONTINUE_AGENT_LOOP = Symbol("continue-agent-loop");
+  const finish = async (
+    turns: number,
+    allowRecovery = true,
+  ): Promise<AgentRunResult | typeof CONTINUE_AGENT_LOOP> => {
     if (ledger.phase !== "review") {
       transitionPhase(ledger, "review", loopOptions);
       updateTaskNode("review", "running");
@@ -1759,7 +2474,41 @@ export async function runAgent(
     const preserved = await userWorkPreserved();
     const finalReviewPerformed = await reviewFinalDiff();
     const criteria = await verifySuccessCriteria();
+    if (
+      planningMode === "model" &&
+      (mode !== "coding" ||
+        (criteria.ready &&
+          (verificationPlan.length === 0 ||
+            (verified && verifiedMutationRevision === mutationRevision))))
+    )
+      completeCurrentModelNodeAfterVerification();
     if (!criteria.ready) {
+      if (planningMode === "model" && allowRecovery) {
+        const activeNodeId = currentModelNode()?.id;
+        const failedNodeId = activeNodeId ?? lastActionedModelNodeId;
+        if (activeNodeId) updateTaskNode(activeNodeId, "failed");
+        const replanned = await appendModelRecoveryPlan(
+          criteria.issues,
+          criteria.nextActions,
+          "OBJECTIVE_VERIFICATION_FAILED",
+          failedNodeId,
+        );
+        if (replanned) {
+          // A failed completion check is recoverable work, not a terminal
+          // result. The accepted append-only revision owns the next action;
+          // the outer loop must execute it before completion is evaluated
+          // again.
+          unresolvedBlockers = 0;
+          repeatedErrorCount = 0;
+          lastErrorCode = undefined;
+          repeatedCallCount = 0;
+          lastCallSignature = undefined;
+          noActionCount = 0;
+          transitionPhase(ledger, "plan", loopOptions);
+          persistLedger();
+          return CONTINUE_AGENT_LOOP;
+        }
+      }
       unresolvedBlockers = Math.max(1, unresolvedBlockers);
       addTaskBlocker(ledger, {
         id: `${task.id}:success-criteria`,
@@ -1838,6 +2587,367 @@ export async function runAgent(
     return result;
   };
 
+  const requiresMutationInNextModelPlan = (
+    recovery?: RecoveryContract,
+  ): boolean => {
+    if (mode !== "coding" || ledger.filesChanged.length > 0) return false;
+
+    // The initial proposal must establish a mutation path. A recovery
+    // proposal, however, is append-only and may be repairing a read/scope
+    // node while the original mutation node is still in the graph. Requiring
+    // every recovery response to repeat a mutation incorrectly rejects a
+    // valid LLM-authored replacement for that read node and strands the
+    // otherwise valid mutation plan. Only require a mutation when the failed
+    // node was the last mutation opportunity.
+    const supersedeNodeId = recovery?.supersedeNodeId;
+    const hasOtherMutationNode = (ledger.taskGraph?.nodes ?? []).some(
+      (node) =>
+        node.id !== supersedeNodeId &&
+        node.status !== "superseded" &&
+        node.status !== "failed" &&
+        node.scope.allowedTools.some((tool) =>
+          MODEL_PLAN_FILE_MUTATION_TOOLS.has(tool),
+        ),
+    );
+    return !recovery ? true : !hasOtherMutationNode;
+  };
+
+  const acceptModelPlan = (
+    proposal: PlanProposal,
+    reason?: string,
+    recovery?: RecoveryContract,
+  ): void => {
+    if (!ledger.taskGraph)
+      throw new Error(
+        "Cannot accept a model plan before the task graph exists.",
+      );
+    const accepted = appendModelPlanToGraph(ledger.taskGraph, proposal, {
+      objective: task.objective,
+      mode,
+      allowedTools: [...toolMap.keys()],
+      workspaceRoot: task.root,
+      requireWorkspaceMutation: requiresMutationInNextModelPlan(recovery),
+      ...(reason ? { reason } : {}),
+    });
+    ledger.taskGraph = accepted.graph;
+    recordPlanRevision(ledger, accepted.revision);
+    syncModelPlanScope();
+    projectModelPlan();
+    emitPlan();
+    logger?.info("agent.plan.accepted", {
+      revision: accepted.revision.revision,
+      proposalId: accepted.revision.proposalId,
+      addedNodeCount: accepted.revision.addedNodeIds.length,
+      supersededNodeCount: accepted.revision.supersededNodeIds.length,
+    });
+  };
+
+  const requestModelPlanForCurrentTask = async (
+    recovery?: RecoveryContract,
+    plannerRetryReason?: string,
+  ): Promise<PlanModelResult> =>
+    requestModelPlan({
+      provider: options.provider,
+      modelId: providerModelId(task),
+      objective: task.objective,
+      mode,
+      context: compiledTaskContext,
+      constraints: taskContract.constraints.map(
+        (constraint) => constraint.description,
+      ),
+      allowedTools: [...toolMap.keys()],
+      requireWorkspaceMutation: requiresMutationInNextModelPlan(recovery),
+      existingPlan:
+        ledger.taskGraph?.planSource === "model"
+          ? {
+              rootObjective: ledger.taskGraph.rootObjective,
+              revision: ledger.taskGraph.revision ?? 0,
+              currentNodeId: ledger.taskGraph.currentNodeId || undefined,
+              nodes: ledger.taskGraph.nodes.map((node) => ({
+                id: node.id,
+                objective: node.objective,
+                dependencies: [...node.dependencies],
+                kind:
+                  node.kind ??
+                  (node.scope.allowedTools.length > 0
+                    ? "workspace"
+                    : "semantic"),
+                scope: {
+                  candidateFiles: [...node.scope.candidateFiles],
+                  allowedTools: [...node.scope.allowedTools],
+                },
+                contextRequirements: [...node.contextRequirements],
+                requiredEvidence: [...node.contextRequirements],
+                acceptance: [...node.acceptance],
+                verification: [...(node.verification ?? [])],
+                status:
+                  node.status === "passed"
+                    ? ("verified" as const)
+                    : node.status,
+                source:
+                  node.source === "controller-recovery" ? node.source : "model",
+                revision: node.revision ?? 0,
+              })),
+              revisions: ledger.taskGraph.revisions ?? [],
+              acceptanceCriteria: [
+                ...(ledger.taskGraph.acceptanceCriteria ?? []),
+              ],
+              evidenceRequirements: [
+                ...(ledger.taskGraph.evidenceRequirements ?? []),
+              ],
+              constraints: [...ledger.taskGraph.globalConstraints],
+            }
+          : undefined,
+      ...(recovery
+        ? {
+            recovery: {
+              cause: recovery.cause,
+              evidence: recovery.evidence,
+              forbiddenRepeats: recovery.forbiddenRepeats,
+              ...(recovery.supersedeNodeId
+                ? { supersedeNodeId: recovery.supersedeNodeId }
+                : {}),
+              ...(plannerRetryReason
+                ? { retryReason: plannerRetryReason }
+                : {}),
+            },
+          }
+        : {}),
+      signal,
+    });
+
+  const initializeModelPlan = async (): Promise<AgentRunResult | undefined> => {
+    if (planningMode !== "model") return undefined;
+    transitionPhase(ledger, "plan", loopOptions);
+    const result = await requestModelPlanForCurrentTask();
+    if (!result.proposal) {
+      // Initial proposals are validated at the planner boundary too. A
+      // semantic model can therefore fail before acceptModelPlan is reached
+      // (for example by labelling repository discovery as a semantic node).
+      // Treat that rejection exactly like an invalid accepted proposal: keep
+      // the original objective, ask the same LLM planner for one bounded
+      // replacement, and only fail if that recovery is also unusable.
+      const reason =
+        result.error ?? "The LLM planner did not return a structured plan.";
+      const recovered = await appendModelRecoveryPlan(
+        [
+          `The controller rejected the initial LLM plan before execution: ${reason}`,
+          "Return a new plan that conforms to the node-kind rules, explicit workspace scope, dependencies, and tool schema.",
+        ],
+        [
+          "Do not repeat the rejected semantic label or invalid scope.",
+          "Keep semantic work LLM-authored, but represent repository reads and mutations as bounded workspace nodes.",
+        ],
+        "INVALID_INITIAL_PLAN",
+      );
+      if (recovered) return undefined;
+      return await failureResult(
+        0,
+        `The LLM planner did not produce an acceptable plan: ${reason}`,
+      );
+    }
+    try {
+      acceptModelPlan(
+        result.proposal,
+        "Initial semantic plan proposed by the LLM.",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const recovered = await appendModelRecoveryPlan(
+        [
+          `The controller rejected the initial LLM plan: ${message}`,
+          "Return a new plan that conforms to the declared node kinds, tool scopes, workspace boundaries, dependencies, and required schema.",
+        ],
+        [
+          "Do not repeat the invalid proposal.",
+          "Keep the plan semantic and LLM-authored, but make every executable path legal and bounded.",
+        ],
+        "INVALID_INITIAL_PLAN",
+      );
+      if (recovered) return undefined;
+      return await failureResult(0, message);
+    }
+    const firstNode = currentModelNode();
+    if (firstNode && modelNodeNeedsClarification(firstNode)) {
+      // A clarification node is a legitimate LLM decision only when the
+      // user's answer is genuinely required.  Weak local planners sometimes
+      // ask about optional style/format choices before doing any work. Give
+      // the same semantic planner one bounded, append-only opportunity to
+      // replace that blocker with a conventional-default plan. The
+      // controller does not invent the replacement; it only reports that
+      // there is no reason to stop before checking whether a safe default
+      // exists. If the planner still requires a decision, the task remains
+      // honestly blocked and the user can answer it in a later turn.
+      await appendModelRecoveryPlan(
+        [
+          `The initial LLM plan is blocked immediately by clarification node ${firstNode.id}: ${firstNode.objective}.`,
+          "Re-evaluate whether the original objective can proceed with a safe conventional default.",
+          "A clarification is justified only when alternatives are materially incompatible, irreversible, security-sensitive, or change the requested outcome.",
+        ],
+        [
+          "Do not repeat optional style, format, naming, or preference questions when a conventional default is sufficient.",
+          `If a safe default exists, return a new executable plan that supersedes ${firstNode.id}; preserve all valid prior plan history and do not reuse the superseded node id.`,
+        ],
+        "PLAN_CLARIFICATION_REVIEW",
+        firstNode.id,
+      );
+    }
+    return undefined;
+  };
+
+  const appendModelRecoveryPlan = async (
+    issues: readonly string[],
+    nextActions: readonly string[],
+    cause = "OBJECTIVE_VERIFICATION_FAILED",
+    supersedeNodeId?: string,
+  ): Promise<boolean> => {
+    if (planningMode !== "model" || modelReplanCount >= 2) return false;
+    const replanNumber = modelReplanCount + 1;
+    // Count attempts, not only accepted revisions. A malformed or unusable
+    // recovery proposal must not create an unbounded planner loop.
+    modelReplanCount = replanNumber;
+    const recovery = createRecoveryContract({
+      id: `${task.id}:recovery:${replanNumber}`,
+      cause,
+      failedRequirement: issues[0],
+      evidence: issues,
+      attemptedStrategies: [
+        ...ledger.recoveryContracts.flatMap((item) => item.attemptedStrategies),
+      ],
+      forbiddenRepeats: nextActions,
+      proposedRecovery: "replan",
+      ...(supersedeNodeId ? { supersedeNodeId } : {}),
+    });
+    recordRecoveryContract(ledger, recovery);
+    persistLedger();
+    try {
+      let result = await requestModelPlanForCurrentTask(recovery);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let rejectionReason: string | undefined;
+        if (!result.proposal) {
+          rejectionReason = result.error ?? "planner returned no proposal";
+        } else {
+          const normalizedProposal = supersedeNodeId
+            ? normalizeRecoveryPlanProposal(
+                result.proposal,
+                ledger.taskGraph?.nodes ?? [],
+                supersedeNodeId,
+              )
+            : {
+                ...normalizeAppendOnlyRecoveryPlanProposal(
+                  result.proposal,
+                  ledger.taskGraph?.nodes ?? [],
+                ),
+                inferred: false,
+              };
+          if (!normalizedProposal.proposal) {
+            rejectionReason =
+              normalizedProposal.reason ??
+              `Recovery proposal did not supersede failed node ${supersedeNodeId}.`;
+          } else {
+            try {
+              acceptModelPlan(
+                normalizedProposal.proposal,
+                `Model replan after ${cause.toLowerCase().replaceAll("_", " ")}.${
+                  normalizedProposal.inferred
+                    ? " Controller recorded the matching failed-node supersession."
+                    : ""
+                }`,
+                recovery,
+              );
+              return true;
+            } catch (error) {
+              rejectionReason =
+                error instanceof Error ? error.message : String(error);
+            }
+          }
+        }
+
+        logger?.warn("agent.plan.rejected", {
+          reason: rejectionReason,
+          replan: replanNumber,
+          attempt: attempt + 1,
+        });
+        if (attempt === 1 || !rejectionReason) return false;
+
+        // A local model can produce a useful initial plan and then fall back
+        // to prose or repeat stale node ids after a tool-boundary failure.
+        // Give the same semantic planner one bounded retry with the exact
+        // controller rejection. This preserves LLM plan authority while
+        // preventing a single malformed recovery response from becoming a
+        // terminal completion blocker.
+        result = await requestModelPlanForCurrentTask(
+          recovery,
+          rejectionReason,
+        );
+      }
+      return false;
+    } catch (error) {
+      if (
+        signal.aborted ||
+        (error instanceof DOMException && error.name === "AbortError")
+      )
+        return false;
+      logger?.warn("agent.plan.rejected", {
+        reason: error instanceof Error ? error.message : String(error),
+        replan: replanNumber,
+      });
+    }
+    return false;
+  };
+
+  const recoverModelPlanDeadEnd = async (turn: number): Promise<boolean> => {
+    if (
+      planningMode !== "model" ||
+      !modelPlanHasUnfinishedNodes() ||
+      currentModelNode()
+    )
+      return false;
+
+    const unfinishedNodes = (ledger.taskGraph?.nodes ?? []).filter(
+      (node) => node.status !== "passed" && node.status !== "superseded",
+    );
+    const staleNodeSummary = unfinishedNodes
+      .filter((node) => node.status === "failed" || node.status === "blocked")
+      .map((node) => `${node.id} (${node.status})`)
+      .slice(0, 12)
+      .join(", ");
+    const issues = [
+      `The accepted LLM-authored plan has no ready or running node at turn ${turn}.`,
+      staleNodeSummary
+        ? `The following plan history is failed or blocked and may be preventing progress: ${staleNodeSummary}.`
+        : "The remaining plan nodes are not executable from the current dependency state.",
+    ];
+    const nextActions = [
+      "Return a fresh append-only continuation for the remaining objective.",
+      "Supersede every obsolete failed or blocked node required to reopen the remaining path; preserve valid passed history.",
+      "Add fresh nodes for the complete remaining semantic work, including any required workspace mutation and verification.",
+      "Do not make a new node depend on a blocked, failed, or superseded node.",
+    ];
+    const replanned = await appendModelRecoveryPlan(
+      issues,
+      nextActions,
+      "PLAN_DEAD_END",
+    );
+    if (!replanned) return false;
+
+    // This recovery is still a planner proposal. The controller only resets
+    // transient execution counters and schedules the newly accepted graph;
+    // it does not manufacture semantic nodes or reorder the LLM's plan.
+    unresolvedBlockers = 0;
+    repeatedErrorCount = 0;
+    lastErrorCode = undefined;
+    repeatedCallCount = 0;
+    lastCallSignature = undefined;
+    noActionCount = 0;
+    transitionPhase(ledger, "plan", loopOptions);
+    persistLedger();
+    return true;
+  };
+
+  const initialPlanResult = await initializeModelPlan();
+  if (initialPlanResult) return initialPlanResult;
+
   for (let turn = 1; turn <= maxTurns; turn += 1) {
     if (signal.aborted) return await cancellationResult(turn - 1);
     const turnToolChoice = forceNoToolsOnNextTurn
@@ -1862,6 +2972,7 @@ export async function runAgent(
       messages.push({ role: "user", content: pendingRecoveryInstruction });
       pendingRecoveryInstruction = undefined;
     }
+    syncModelPlanScope();
     refreshStagedWorkUnitPrompt();
     const activeWorkUnitTarget = criteriaWritePaths[0] ?? objectivePaths[0];
     const activeTargetExists =
@@ -1897,7 +3008,97 @@ export async function runAgent(
     // required mutation indefinitely. Narrow the next schema to mutation
     // tools. A failed edit on an existing target reopens only the exact read /
     // edit recovery pair; it must not fall through to arbitrary Shell calls.
+    const activeModelNode = currentModelNode();
+    const runnableModelNode =
+      activeModelNode &&
+      ["ready", "running", "verifying"].includes(activeModelNode.status)
+        ? activeModelNode
+        : undefined;
+    if (
+      planningMode === "model" &&
+      modelPlanHasUnfinishedNodes() &&
+      !runnableModelNode
+    ) {
+      if (await recoverModelPlanDeadEnd(turn)) continue;
+      // A failed/blocked LLM node cannot be used as an implicit permission
+      // surface. If its recovery plan was rejected, stop with the exact
+      // blocker instead of making another provider call that can only emit
+      // stale or unexposed tools.
+      finalText =
+        finalText.trim() ||
+        "The LLM-authored plan has no executable ready node after recovery failed; a new semantic replacement plan is required before continuing.";
+      unresolvedBlockers = Math.max(1, unresolvedBlockers);
+      addTaskBlocker(ledger, {
+        id: `${task.id}:plan-no-runnable-node:${turn}`,
+        summary: finalText,
+        recoverable: true,
+        suggestedAction:
+          "Request a new LLM-authored replacement plan for the failed node.",
+      });
+      const finished = await finish(turn, false);
+      if (finished === CONTINUE_AGENT_LOOP)
+        throw new Error("A failed LLM plan has no runnable recovery node.");
+      return finished;
+    }
+    const plannedTools = activeModelNode?.scope.allowedTools ?? [];
+    const planCanMutate = plannedTools.some((name) =>
+      ["EditFile", "WriteFile", "CreateFile", "DeleteFile", "Shell"].includes(
+        name,
+      ),
+    );
+    const modelAllowedTools = activeModelNode
+      ? [
+          ...new Set([
+            ...plannedTools,
+            ...(planCanMutate ? MODEL_PLAN_CONTEXT_TOOLS : []),
+          ]),
+        ]
+      : [];
+    // An empty tool scope is meaningful: it is either a bounded semantic
+    // decision or an explicit user clarification. Never reinterpret it as
+    // access to the complete host tool catalog.
+    if (
+      planningMode === "model" &&
+      activeModelNode &&
+      activeModelNode.status === "ready" &&
+      modelNodeNeedsClarification(activeModelNode)
+    ) {
+      updateTaskNode(activeModelNode.id, "blocked");
+      unresolvedBlockers = Math.max(1, unresolvedBlockers);
+      finalText = `The LLM-authored plan requires a user decision before continuing: ${activeModelNode.objective}`;
+      const finished = await finish(turn, false);
+      if (finished === CONTINUE_AGENT_LOOP)
+        throw new Error("A non-executable LLM plan node cannot continue.");
+      return finished;
+    }
+    if (
+      planningMode === "model" &&
+      activeModelNode &&
+      activeModelNode.status === "ready" &&
+      modelAllowedTools.length === 0 &&
+      !modelNodeIsSemantic(activeModelNode)
+    ) {
+      updateTaskNode(activeModelNode.id, "blocked");
+      unresolvedBlockers = Math.max(1, unresolvedBlockers);
+      finalText = `The LLM-authored plan contains a node with no executable action: ${activeModelNode.objective}`;
+      const finished = await finish(turn, false);
+      if (finished === CONTINUE_AGENT_LOOP)
+        throw new Error("A non-executable LLM plan node cannot continue.");
+      return finished;
+    }
+    if (
+      planningMode === "model" &&
+      activeModelNode &&
+      activeModelNode.status === "ready" &&
+      modelNodeIsSemantic(activeModelNode)
+    )
+      updateTaskNode(activeModelNode.id, "running");
     const turnTools = options.tools.filter((tool) => {
+      if (
+        planningMode === "model" &&
+        (!activeModelNode || !modelAllowedTools.includes(tool.name))
+      )
+        return false;
       if (forcedRecoveryTool) return tool.name === forcedRecoveryTool.name;
       if (activeTargetExists && tool.name === "CreateFile") return false;
       if (activeTargetRejected)
@@ -1956,6 +3157,7 @@ export async function runAgent(
     let sawText = false;
     let reasoningChars = 0;
     let lastReasoningNotice = 0;
+    let recoverableProviderFailure: ProviderFailure | undefined;
     let done = false;
     const presentAssistantText = (text: string): void => {
       if (!text) return;
@@ -2004,9 +3206,17 @@ export async function runAgent(
         } else if (event.type === "tool.call") {
           toolCalls.push(event.call);
         } else if (event.type === "error") {
-          const message = failureMessage(event);
           if (signal.aborted || event.error.code === "CANCELLED")
             return await cancellationResult(turn);
+          if (event.error.code === "MODEL_PROTOCOL_ERROR") {
+            // The provider boundary has already quarantined the malformed
+            // textual envelope, so the bad payload must never be echoed back
+            // to the provider. Leave the current turn, add only a typed
+            // correction, and let the next bounded model decision recover.
+            recoverableProviderFailure = event.error;
+            break;
+          }
+          const message = failureMessage(event);
           return await failureResult(turn, message, event.error);
         } else if (event.type === "done") {
           done = true;
@@ -2033,6 +3243,44 @@ export async function runAgent(
         failure,
       );
     }
+    if (recoverableProviderFailure) {
+      modelProtocolRecoveryCount += 1;
+      const message = failureMessage({
+        type: "error",
+        error: recoverableProviderFailure,
+      });
+      logger?.warn("agent.model.protocol_recovery", {
+        turn,
+        count: modelProtocolRecoveryCount,
+        maximum: MAX_MODEL_PROTOCOL_RECOVERIES,
+        code: recoverableProviderFailure.code,
+      });
+      if (modelProtocolRecoveryCount > MAX_MODEL_PROTOCOL_RECOVERIES)
+        return await failureResult(turn, message, recoverableProviderFailure);
+
+      const assistantText = assistantTextParts.join("").trim();
+      if (assistantText && !isToolShapedAssistantText(assistantText))
+        messages.push({ role: "assistant", content: assistantText });
+      messages.push({
+        role: "user",
+        content: JSON.stringify({
+          type: "model_protocol_error",
+          code: recoverableProviderFailure.code,
+          message: recoverableProviderFailure.message,
+          recoverable: true,
+          instruction:
+            "Discard the malformed envelope. Continue the current task with exactly one native structured tool call matching the available schema, or plain text only when this node is semantic. Never emit JSON, XML, Markdown fences, or pseudo-tool syntax as prose.",
+        }),
+      });
+      finalText = message;
+      transitionPhase(ledger, "reflect", loopOptions);
+      persistLedger();
+      continue;
+    }
+    // A valid provider response resets only the consecutive protocol-error
+    // budget; later independent model/runtime failures get their own bounded
+    // opportunity without making the task unbounded.
+    modelProtocolRecoveryCount = 0;
     if (!done && !sawText && toolCalls.length === 0)
       return await failureResult(turn, "Provider ended without a response.");
     if (toolCalls.length > MAX_TOOL_CALLS_PER_RESPONSE) {
@@ -2092,6 +3340,52 @@ export async function runAgent(
       textLength: presentedAssistantText.length,
       toolCallCount: toolCalls.length,
     });
+
+    // A local runtime may still turn a textual pseudo-tool envelope into a
+    // tool event even when this request deliberately exposed no tools. Do
+    // not let that event fall through to the ordinary permission path: that
+    // would manufacture a misleading PERMISSION_DENIED result and could
+    // execute a call with an empty argument object on the next retry. Treat
+    // it as a provider/model protocol defect, quarantine the call, and give
+    // the model one bounded correction turn instead.
+    if (toolCalls.length > 0 && turnToolChoice === "none") {
+      const protocolError: ProviderFailure = {
+        code: "MODEL_PROTOCOL_ERROR",
+        message:
+          "The model emitted a tool call although this decision exposed no tools.",
+      };
+      const suggestedAction =
+        "Answer from the available observation or wait for the next turn with an explicitly exposed tool.";
+      modelProtocolRecoveryCount += 1;
+      logger?.warn("agent.model.protocol_recovery", {
+        turn,
+        count: modelProtocolRecoveryCount,
+        maximum: MAX_MODEL_PROTOCOL_RECOVERIES,
+        code: protocolError.code,
+        reason: "tool_call_when_tools_disabled",
+      });
+      if (modelProtocolRecoveryCount > MAX_MODEL_PROTOCOL_RECOVERIES)
+        return await failureResult(turn, protocolError.message, {
+          code: protocolError.code,
+          message: protocolError.message,
+        });
+      messages.push({
+        role: "user",
+        content: JSON.stringify({
+          type: "model_protocol_error",
+          code: protocolError.code,
+          message: protocolError.message,
+          recoverable: true,
+          suggestedAction,
+          instruction:
+            "Discard the attempted tool call. This turn has no tools. Continue with plain text only, or wait for a later turn that explicitly exposes the required native tool.",
+        }),
+      });
+      finalText = protocolError.message;
+      transitionPhase(ledger, "reflect", loopOptions);
+      persistLedger();
+      continue;
+    }
 
     if (toolCalls.length > 0) {
       const signature = [...toolCalls]
@@ -2258,7 +3552,9 @@ export async function runAgent(
           .join(", ")}) repeated ${repeatedCallCount} times in a row.`;
         unresolvedBlockers = 1;
         finalText = message;
-        return await finish(turn);
+        const finished = await finish(turn);
+        if (finished === CONTINUE_AGENT_LOOP) continue;
+        return finished;
       }
     }
 
@@ -2272,7 +3568,9 @@ export async function runAgent(
       finalText =
         presentedAssistantText ||
         "This turn does not use workspace tools, so I skipped the requested action.";
-      return await finish(turn);
+      const finished = await finish(turn);
+      if (finished === CONTINUE_AGENT_LOOP) continue;
+      return finished;
     }
 
     // A repeated call is an observation failure, not permission to execute
@@ -2345,6 +3643,47 @@ export async function runAgent(
         : {}),
     });
 
+    // A semantic node is an LLM-authored bounded decision, not a missing
+    // workspace permission.  Let the worker return its decision as evidence,
+    // keep it in the task transcript for the dependent node, and advance the
+    // graph without pretending that prose was a file mutation.
+    if (
+      planningMode === "model" &&
+      activeModelNode &&
+      modelNodeIsSemantic(activeModelNode) &&
+      toolCalls.length === 0 &&
+      !isToolShapedAssistantText(presentedAssistantText)
+    ) {
+      const semanticText = presentedAssistantText.trim();
+      if (semanticText.length > 0) {
+        const timestamp = new Date().toISOString();
+        modelNodeActionState(activeModelNode.id).semanticCount += 1;
+        recordTaskAction(ledger, {
+          id: `${task.id}:semantic:${activeModelNode.id}:${turn}`,
+          kind: "decide",
+          target: activeModelNode.id,
+          status: "succeeded",
+          startedAt: timestamp,
+          completedAt: timestamp,
+          summary: "The LLM completed a bounded semantic plan node.",
+        });
+        addTaskEvidence(ledger, {
+          id: `${task.id}:decision-evidence:${activeModelNode.id}:${turn}`,
+          kind: "decision",
+          source: "LLM semantic worker",
+          summary: summarizeFailure(semanticText),
+          relevance: 0.75,
+          freshness: 1,
+        });
+        updateTaskNode(activeModelNode.id, "passed");
+        modelReplanCount = 0;
+        transitionPhase(ledger, "reflect", loopOptions);
+        persistLedger();
+        finalText = semanticText;
+        continue;
+      }
+    }
+
     if (toolCalls.length > 0) {
       noActionCount = 0;
       const firstMutationCallIndex = toolCalls.findIndex((call) => {
@@ -2352,9 +3691,61 @@ export async function runAgent(
         return tool?.risk === "write" || tool?.risk === "destructive";
       });
       let responseMutationSeen = false;
+      // An LLM-authored plan node is an observation boundary. Once its first
+      // action has returned, the graph may advance to a different scope, so
+      // later calls from the same provider response are stale by definition.
+      // Keep the tool-result envelope valid, but defer those calls to a fresh
+      // model turn instead of executing them against the next node.
+      let modelPlanObservationClosed = false;
       for (const [callIndex, call] of toolCalls.entries()) {
         transitionPhase(ledger, "act", loopOptions);
         const tool = toolMap.get(call.name);
+        // Capture the LLM-authored node before any result handling. Parsing or
+        // schema validation can fail before the executor is reached, but the
+        // failure still belongs to this node and must remain visible to the
+        // same plan/recovery boundary.
+        const planNodeIdBeforeCall =
+          planningMode === "model" ? currentModelNode()?.id : undefined;
+        if (planningMode === "model" && modelPlanObservationClosed) {
+          let deferredInput: unknown = {};
+          try {
+            deferredInput = parseToolInput(call);
+          } catch {
+            deferredInput = {};
+          }
+          const result: ToolResult = {
+            tool: call.name,
+            ok: false,
+            error:
+              "The host deferred this call because the preceding LLM plan-node action already produced an observation in this response.",
+            code: "CONFLICT",
+            recoverable: true,
+            suggestedAction:
+              "Use the preceding tool result and choose the next action in a new model turn.",
+            durationMs: 0,
+          };
+          emit(loopOptions, {
+            type: "tool.started",
+            callId: call.id,
+            tool: call.name,
+            input: deferredInput,
+            ...(tool?.risk ? { risk: tool.risk } : {}),
+          });
+          toolRuns.push(result);
+          messages.push({
+            role: "tool",
+            toolCallId: call.id,
+            content: toolMessageContent(result, task),
+          });
+          emit(loopOptions, {
+            type: "tool.finished",
+            callId: call.id,
+            tool: call.name,
+            result,
+          });
+          continue;
+        }
+        if (planningMode === "model") modelPlanObservationClosed = true;
         if (!tool) {
           let input: unknown = {};
           try {
@@ -2442,7 +3833,10 @@ export async function runAgent(
         // boundary. The skipped call still receives a structured tool result
         // so the provider message remains valid, but it never reaches the
         // executor.
-        if (responseMutationSeen && (stagedTask || isMutationCall)) {
+        if (
+          responseMutationSeen &&
+          (stagedTask || planningMode === "model" || isMutationCall)
+        ) {
           const result: ToolResult = {
             tool: call.name,
             ok: false,
@@ -2462,6 +3856,7 @@ export async function runAgent(
             risk: tool.risk,
           });
           toolRuns.push(result);
+          observeModelPlanAction(call, tool, result, {}, planNodeIdBeforeCall);
           observeTool(call, tool, result, {});
           messages.push({
             role: "tool",
@@ -2481,7 +3876,11 @@ export async function runAgent(
           const result: ToolResult = {
             tool: call.name,
             ok: false,
-            error: `Tool ${call.name} is not allowed in the current staged work unit.`,
+            error: `Tool ${call.name} is not allowed in the current ${
+              planningMode === "model"
+                ? "LLM-authored plan node"
+                : "staged work unit"
+            }.`,
             code: "PERMISSION_DENIED",
             recoverable: true,
             suggestedAction:
@@ -2498,6 +3897,7 @@ export async function runAgent(
             risk: tool.risk,
           });
           toolRuns.push(result);
+          observeModelPlanAction(call, tool, result, {}, planNodeIdBeforeCall);
           observeTool(call, tool, result, {});
           messages.push({
             role: "tool",
@@ -2529,6 +3929,13 @@ export async function runAgent(
             durationMs: 0,
           };
           toolRuns.push(result);
+          observeModelPlanAction(
+            call,
+            tool,
+            result,
+            input,
+            planNodeIdBeforeCall,
+          );
           observeTool(call, tool, result, input);
           messages.push({
             role: "tool",
@@ -2568,6 +3975,13 @@ export async function runAgent(
             durationMs: 0,
           };
           toolRuns.push(result);
+          observeModelPlanAction(
+            call,
+            tool,
+            result,
+            input,
+            planNodeIdBeforeCall,
+          );
           observeTool(call, tool, result, input);
           messages.push({
             role: "tool",
@@ -2583,6 +3997,7 @@ export async function runAgent(
           continue;
         }
         const started = performance.now();
+        let planNodeIdAtAction: string | undefined = planNodeIdBeforeCall;
         let mutationBefore: FileMutationSnapshot | undefined;
         let mutationProtectedCriterionIds: string[] = [];
         try {
@@ -2593,6 +4008,141 @@ export async function runAgent(
             typeof input.path === "string"
               ? normalizeWorkspacePath(input.path)
               : undefined;
+          const context = await createExecutionContext();
+          const requestControllerApproval = async (
+            risk: ToolRisk,
+            description: string,
+          ): Promise<void> => {
+            if (context.approvalGranted === true) return;
+            if (!context.requestApproval)
+              throw new ToolError(
+                "PERMISSION_DENIED",
+                `Approval is required before ${tool.name} can execute this action.`,
+                {
+                  recoverable: true,
+                  ...(requestedPath ? { path: requestedPath } : {}),
+                  suggestedAction:
+                    "Run this task from an interactive session and approve the exact action, or choose an explicit non-interactive permission mode.",
+                },
+              );
+            const allowed = await context.requestApproval({
+              description,
+              risk,
+              tool: tool.name,
+              ...(requestedPath ? { path: requestedPath } : {}),
+            });
+            if (!allowed)
+              throw new ToolError(
+                "PERMISSION_DENIED",
+                "The user denied this exact workspace action.",
+                {
+                  recoverable: true,
+                  ...(requestedPath ? { path: requestedPath } : {}),
+                  suggestedAction:
+                    "Do not repeat the identical action. Replan around the user's decision or ask again only for a changed action.",
+                  details: { reason: "user_denied" },
+                },
+              );
+            // The approval is scoped to this single invocation. The workspace
+            // tool consumes it so ASK/PLAN does not display a duplicate prompt.
+            context.approvalGranted = true;
+          };
+          const asksForPlanBoundary =
+            context.permissionMode === "ASK" ||
+            context.permissionMode === "PLAN";
+          if (planningMode === "model") {
+            planNodeIdAtAction ??= currentModelNode()?.id;
+            const planNode = currentModelNode();
+            if (!planNode)
+              throw new ToolError(
+                "PERMISSION_DENIED",
+                "The LLM-authored plan has no ready node for this action.",
+                {
+                  recoverable: true,
+                  suggestedAction:
+                    "Wait for the controller to expose the next ready plan node; do not invent work outside the plan.",
+                },
+              );
+            const planAllowsTool =
+              planNode.scope.allowedTools.length === 0 ||
+              planNode.scope.allowedTools.includes(tool.name) ||
+              (tool.risk === "read" && MODEL_PLAN_CONTEXT_TOOLS.has(tool.name));
+            if (!planAllowsTool) {
+              if (asksForPlanBoundary)
+                await requestControllerApproval(
+                  tool.risk,
+                  `Allow ${tool.name} outside the tools declared by LLM plan node ${planNode.id}${requestedPath ? ` for ${requestedPath}` : ""}`,
+                );
+              else
+                throw new ToolError(
+                  "PERMISSION_DENIED",
+                  `Tool ${tool.name} is not allowed by the current LLM-authored plan node ${planNode.id}.`,
+                  {
+                    recoverable: true,
+                    suggestedAction: `Use one of the tools allowed by plan node ${planNode.id}: ${planNode.scope.allowedTools.join(", ")}.`,
+                  },
+                );
+            }
+            const scopedPaths = planNode.scope.candidateFiles.map(
+              normalizeWorkspacePath,
+            );
+            if (
+              tool.risk === "read" &&
+              requestedPath &&
+              scopedPaths.length > 0 &&
+              !scopedPaths.includes(requestedPath)
+            ) {
+              if (asksForPlanBoundary)
+                await requestControllerApproval(
+                  "read",
+                  `Allow ${tool.name} to access ${requestedPath} outside the paths declared by LLM plan node ${planNode.id}`,
+                );
+              else
+                throw new ToolError(
+                  "CONFLICT",
+                  `Read ${requestedPath} is outside the bounded scope of LLM-authored plan node ${planNode.id}.`,
+                  {
+                    path: requestedPath,
+                    recoverable: true,
+                    suggestedAction: `The planner must provide a replacement workspace node whose explicit candidateFiles include ${requestedPath}, or choose a path inside the current node scope.`,
+                  },
+                );
+            }
+            if (tool.risk === "write" || tool.risk === "destructive") {
+              if (
+                scopedPaths.length === 0 ||
+                !requestedPath ||
+                !scopedPaths.includes(requestedPath)
+              ) {
+                if (!requestedPath)
+                  throw new ToolError(
+                    "CONFLICT",
+                    `Mutation without a path is outside the bounded scope of LLM-authored plan node ${planNode.id}.`,
+                    {
+                      recoverable: true,
+                      suggestedAction: `The planner must provide an explicit workspace path for node ${planNode.id} before mutating.`,
+                    },
+                  );
+                if (asksForPlanBoundary)
+                  await requestControllerApproval(
+                    tool.risk,
+                    `Allow ${tool.name} to mutate ${requestedPath} outside the paths declared by LLM plan node ${planNode.id}`,
+                  );
+                else
+                  throw new ToolError(
+                    "CONFLICT",
+                    `Mutation ${requestedPath} is outside the bounded scope of LLM-authored plan node ${planNode.id}.`,
+                    {
+                      path: requestedPath,
+                      recoverable: true,
+                      suggestedAction: `The planner must provide a replacement node whose explicit candidateFiles include ${requestedPath}.`,
+                    },
+                  );
+              }
+            }
+            if (planNode.status === "ready")
+              updateTaskNode(planNode.id, "running");
+          }
           if (
             forcedRecoveryTool &&
             tool.name === forcedRecoveryTool.name &&
@@ -2605,6 +4155,23 @@ export async function runAgent(
                 ...(requestedPath ? { path: requestedPath } : {}),
                 recoverable: true,
                 suggestedAction: `Use ReadFile on the exact recovery path ${forcedRecoveryTool.path}; do not select another file until that observation succeeds.`,
+              },
+            );
+          if (
+            tool.name === "ReadFile" &&
+            requestedPath &&
+            observedMissingPaths.has(requestedPath) &&
+            forcedRecoveryTool?.path !== requestedPath
+          )
+            throw new ToolError(
+              "CONFLICT",
+              `ReadFile already confirmed that ${requestedPath} does not exist at the current workspace revision.`,
+              {
+                path: requestedPath,
+                recoverable: true,
+                suggestedAction:
+                  "Do not repeat ReadFile. Use ListFiles, GlobFiles or SearchText to discover an existing path, or use the write operation allowed by the active plan node if this is a new artifact.",
+                details: { reason: "MISSING_PATH_ALREADY_OBSERVED" },
               },
             );
           if (
@@ -2671,6 +4238,8 @@ export async function runAgent(
               mode,
               declaredState: declaredEvidenceState,
               evidence: ledger.evidence,
+              repositoryState: task.repositoryState,
+              greenfieldIntent: task.greenfieldIntent,
             });
             if (!evidenceGate.allowed)
               throw new ToolError(
@@ -2686,6 +4255,7 @@ export async function runAgent(
               );
           }
           if (
+            planningMode !== "model" &&
             (tool.risk === "write" || tool.risk === "destructive") &&
             criteriaWritePaths.length > 0 &&
             requestedPath &&
@@ -2708,6 +4278,7 @@ export async function runAgent(
               },
             );
           if (
+            planningMode !== "model" &&
             tool.name === "ReadFile" &&
             criteriaFeedbackActive &&
             criteriaReadPaths.length > 0 &&
@@ -2761,7 +4332,6 @@ export async function runAgent(
                   "Read the current file again, then construct a new exact edit from that observation.",
               },
             );
-          const context = await createExecutionContext();
           if (context.checkpoint)
             checkpointPreservationCheck = async (activeCheckpoint) =>
               activeCheckpoint
@@ -2865,6 +4435,9 @@ export async function runAgent(
           }
           toolRuns.push(result);
           observeTool(call, tool, result, input);
+          observeModelPlanAction(call, tool, result, input, planNodeIdAtAction);
+          if (result.ok)
+            completeCurrentModelNodeAfterAction(planNodeIdAtAction);
           messages.push({
             role: "tool",
             toolCallId: call.id,
@@ -2886,6 +4459,9 @@ export async function runAgent(
           };
           toolRuns.push(result);
           observeTool(call, tool, result, input);
+          observeModelPlanAction(call, tool, result, input, planNodeIdAtAction);
+          if (result.ok)
+            completeCurrentModelNodeAfterAction(planNodeIdAtAction);
           messages.push({
             role: "tool",
             toolCallId: call.id,
@@ -2901,6 +4477,60 @@ export async function runAgent(
       }
       transitionPhase(ledger, "reflect", loopOptions);
       persistLedger();
+      if (pendingModelPlanRecovery) {
+        const recoveryRequest = pendingModelPlanRecovery;
+        pendingModelPlanRecovery = undefined;
+        const replanned = await appendModelRecoveryPlan(
+          recoveryRequest.issues,
+          recoveryRequest.nextActions,
+          recoveryRequest.cause,
+          recoveryRequest.supersedeNodeId,
+        );
+        if (replanned) {
+          // The failed boundary is represented by the superseded node in the
+          // append-only plan. It must not remain as a completion blocker while
+          // the replacement node is being executed.
+          unresolvedBlockers = 0;
+          repeatedErrorCount = 0;
+          lastErrorCode = undefined;
+          repeatedCallCount = 0;
+          lastCallSignature = undefined;
+          noActionCount = 0;
+          transitionPhase(ledger, "plan", loopOptions);
+          persistLedger();
+          continue;
+        }
+      }
+      // A failed LLM-authored node has no legal next worker turn until the
+      // semantic planner supplies a replacement. Calling the model with an
+      // empty tool surface here is both misleading and unsafe: local models
+      // commonly repeat the last textual tool envelope, which turns a plan
+      // recovery failure into an unrelated provider BAD_REQUEST. Finish the
+      // task as a truthful, structured blocker instead.
+      if (
+        planningMode === "model" &&
+        modelPlanHasUnfinishedNodes() &&
+        !currentModelNode()
+      ) {
+        if (await recoverModelPlanDeadEnd(turn)) continue;
+        finalText =
+          finalText.trim() ||
+          "The LLM-authored plan has no ready node after recovery failed; a new semantic plan is required before continuing.";
+        unresolvedBlockers = Math.max(1, unresolvedBlockers);
+        addTaskBlocker(ledger, {
+          id: `${task.id}:plan-recovery-unavailable`,
+          summary: finalText,
+          recoverable: true,
+          suggestedAction:
+            "Ask the LLM planner for a monotonic replacement node with an explicit workspace scope, then resume the task.",
+        });
+        const finished = await finish(turn, false);
+        if (finished === CONTINUE_AGENT_LOOP)
+          throw new Error(
+            "A blocked LLM plan cannot continue without a ready node.",
+          );
+        return finished;
+      }
       if (repeatedErrorCount >= NON_PROGRESS_LIMIT) {
         logger?.warn("agent.non_progress.detected", {
           reason: "repeated_tool_error",
@@ -2909,7 +4539,9 @@ export async function runAgent(
         });
         unresolvedBlockers = 1;
         finalText = `Agent made no progress after ${repeatedErrorCount} ${lastErrorCode ?? "recoverable"} errors.`;
-        return await finish(turn);
+        const finished = await finish(turn);
+        if (finished === CONTINUE_AGENT_LOOP) continue;
+        return finished;
       }
       if (repeatedMutationFailureCount >= MUTATION_FAILURE_LIMIT) {
         logger?.warn("agent.non_progress.detected", {
@@ -2920,11 +4552,13 @@ export async function runAgent(
         unresolvedBlockers = 1;
         finalText =
           "Agent could not produce a valid mutation after repeated attempts; the workspace was left unchanged for this work unit.";
-        return await finish(turn);
+        const finished = await finish(turn);
+        if (finished === CONTINUE_AGENT_LOOP) continue;
+        return finished;
       }
       if (
         !mutated ||
-        verificationPlan.length === 0 ||
+        (verificationPlan.length === 0 && planningMode !== "model") ||
         mutationRevision === verifiedMutationRevision
       )
         continue;
@@ -3028,6 +4662,18 @@ export async function runAgent(
       updateTaskNode("verify", verified ? "passed" : "failed");
       transitionPhase(ledger, "reflect", loopOptions);
       persistLedger();
+      if (verified && planningMode === "model") {
+        // A model-authored workspace node may intentionally cover several
+        // coupled files. Its mutation remains `verifying` until the
+        // verification contract declared by that node has produced host
+        // evidence. Close that node before evaluating the global objective;
+        // otherwise the objective verifier can require a passed node while
+        // the node itself is waiting for the exact verification that just
+        // succeeded (a completion deadlock).
+        const node = currentModelNode();
+        if (node?.verification && node.verification.length > 0)
+          completeCurrentModelNodeAfterVerification(lastModelMutationNodeId);
+      }
       if (explicitSuccessCriteria) {
         const criteria = await verifySuccessCriteria();
         const regression = await restoreRegressedMutations(criteria);
@@ -3036,7 +4682,9 @@ export async function runAgent(
           finalText =
             regression.notice ??
             "A criteria regression could not be restored safely.";
-          return await finish(turn);
+          const finished = await finish(turn);
+          if (finished === CONTINUE_AGENT_LOOP) continue;
+          return finished;
         }
         if (!regression.regressed) {
           pendingMutations.length = 0;
@@ -3045,13 +4693,55 @@ export async function runAgent(
           verified = false;
           verifiedMutationRevision = -1;
         }
+        if (!criteria.ready && !modelPlanHasRunnableContinuation()) {
+          // Objective verification belongs to the currently active LLM node.
+          // Carry that identity into recovery so the planner can append a new
+          // semantic replacement instead of echoing the whole old plan. If
+          // the model returns a full snapshot, normalizeRecoveryPlanProposal
+          // can preserve identical valid history while requiring a fresh
+          // replacement node for the failed work.
+          const failedNodeId =
+            planningMode === "model"
+              ? (currentModelNode()?.id ?? lastActionedModelNodeId)
+              : undefined;
+          await appendModelRecoveryPlan(
+            criteria.issues,
+            criteria.nextActions,
+            "OBJECTIVE_VERIFICATION_FAILED",
+            failedNodeId,
+          );
+        } else if (!criteria.ready && planningMode === "model") {
+          // A configured project check can legitimately fail between two
+          // LLM-authored work nodes. For example, a migration may temporarily
+          // leave tests red until the planned consumer/test node runs. That
+          // failure is useful evidence for the next ready node, not proof that
+          // the next node should be superseded. Do not let an intermediate
+          // check invalidate valid semantic plan history or trigger a replan
+          // before the LLM has executed its own declared continuation.
+          logger?.info("agent.verification.deferred", {
+            reason: "llm_plan_has_runnable_continuation",
+            currentNodeId: currentModelNode()?.id,
+            failedVerificationCount: ledger.verificationRuns.filter(
+              (run) => run.status === "failed",
+            ).length,
+          });
+        }
         if (verified && criteria.ready && !regression.regressed) {
           syncTargetPlan([]);
           if (updateTaskPlanStep(ledger, "step-verify", "done")) emitPlan();
+          if (planningMode === "model")
+            completeCurrentModelNodeAfterVerification(lastModelMutationNodeId);
           criteriaWritePaths = [];
           criteriaReadPaths = [];
           criteriaFeedbackActive = false;
           stagedMutationRequired = false;
+          if (planningMode === "model" && modelPlanHasUnfinishedNodes()) {
+            syncModelPlanScope();
+            finalText =
+              finalText.trim() ||
+              "The current plan node was verified; continuing with the next ready node.";
+            continue;
+          }
           finalText =
             finalText.trim() ||
             "Changes were applied and verified by host verification.";
@@ -3059,7 +4749,9 @@ export async function runAgent(
             turn,
             reason: "verification_and_success_criteria_passed",
           });
-          return await finish(turn);
+          const finished = await finish(turn);
+          if (finished === CONTINUE_AGENT_LOOP) continue;
+          return finished;
         }
         criteriaFeedbackActive = true;
         const changedPaths = [
@@ -3144,13 +4836,87 @@ export async function runAgent(
       mode === "coding" && explicitSuccessCriteria
         ? await verifySuccessCriteria()
         : undefined;
+    if (
+      planningMode === "model" &&
+      criteria &&
+      criteria.ready &&
+      (verificationPlan.length === 0 ||
+        (verified && verifiedMutationRevision === mutationRevision))
+    )
+      completeCurrentModelNodeAfterVerification();
+    if (
+      criteria &&
+      criteriaMutationStagnated(criteria) &&
+      planningMode === "model"
+    ) {
+      const stagnantNodeId = currentModelNode()?.id;
+      if (stagnantNodeId) updateTaskNode(stagnantNodeId, "failed");
+      const replanned = await appendModelRecoveryPlan(
+        criteria.issues,
+        criteria.nextActions.length > 0
+          ? criteria.nextActions
+          : [
+              "Do not repeat another mutation in the same semantic direction; propose a different repair or ask for the missing product decision.",
+            ],
+        "NO_OBJECTIVE_PROGRESS",
+        stagnantNodeId,
+      );
+      if (replanned) {
+        criteriaProgressNodeId = undefined;
+        criteriaProgressFingerprint = undefined;
+        criteriaProgressMutationRevision = mutationRevision;
+        stagnantMutationCount = 0;
+        unresolvedBlockers = 0;
+        repeatedErrorCount = 0;
+        lastErrorCode = undefined;
+        repeatedCallCount = 0;
+        lastCallSignature = undefined;
+        noActionCount = 0;
+        criteriaFeedbackActive = false;
+        stagedMutationRequired = false;
+        transitionPhase(ledger, "plan", loopOptions);
+        persistLedger();
+        continue;
+      }
+      // The planner remains the source of semantic work. If it cannot provide
+      // a valid monotonic repair, stop with truthful evidence instead of
+      // allowing the worker to keep rewriting the same artifact.
+      unresolvedBlockers = Math.max(1, unresolvedBlockers);
+      finalText =
+        "The LLM worker made repeated mutations without satisfying a new objective criterion, and the semantic planner did not provide a valid repair plan.";
+      const finished = await finish(turn, false);
+      if (finished === CONTINUE_AGENT_LOOP)
+        throw new Error(
+          "Stagnant execution cannot continue without a repair plan.",
+        );
+      return finished;
+    }
+    const modelPlanNeedsAction = modelPlanHasUnfinishedNodes();
+    // A completed LLM-authored plan has no legal model action left. Evaluate
+    // completion or create a controller-driven recovery revision immediately;
+    // never issue another provider turn with an empty tool surface and let a
+    // local model invent a post-plan action.
+    if (
+      mode === "coding" &&
+      planningMode === "model" &&
+      modelPlanIsComplete() &&
+      criteria?.ready === false
+    ) {
+      finalText =
+        finalText.trim() ||
+        "The authored plan is complete; the host is verifying the requested outcome.";
+      const finished = await finish(turn);
+      if (finished === CONTINUE_AGENT_LOOP) continue;
+      return finished;
+    }
     const codingRequiresAction =
       mode === "coding" &&
       (!mutated ||
         (verificationPlan.length > 0 &&
           mutationRevision !== verifiedMutationRevision) ||
         (verificationRan && !verified) ||
-        criteria?.ready === false);
+        criteria?.ready === false ||
+        modelPlanNeedsAction);
     if (codingRequiresAction) {
       noActionCount += 1;
       if (noActionCount < NON_PROGRESS_LIMIT) {
@@ -3201,43 +4967,69 @@ export async function runAgent(
                 .slice(0, 4)
                 .join(" ")}.`
             : "";
+        const semanticNodeFeedback =
+          planningMode === "model" && currentModelNode()
+            ? modelNodeIsSemantic(currentModelNode()!)
+              ? "The current LLM-authored node is semantic and has no workspace tools. Return one concise plain-text decision for that node now; do not emit a tool call, JSON, XML, or a code block pretending to be a tool call."
+              : modelNodeNeedsClarification(currentModelNode()!)
+                ? "The current LLM-authored node requires a user decision. Do not invent a workspace action."
+                : ""
+            : "";
         messages.push({
           role: "user",
-          content: hasReadEvidence
-            ? "Host observation: relevant repository evidence is already available." +
-              criteriaFeedback +
-              criteriaActions +
-              freshReadFeedback +
-              protectedFeedback +
-              " " +
-              "Stop narrating and execute exactly one implementation workspace tool " +
-              "now; use EditFile or WriteFile with valid arguments for the next " +
-              "required change. Do not emit prose or tool-shaped JSON."
-            : "Host observation: the previous assistant turn produced no workspace tool action." +
-              criteriaFeedback +
-              criteriaActions +
-              freshReadFeedback +
-              protectedFeedback +
-              " " +
-              "This coding task is not complete. Execute exactly one available workspace tool " +
-              "now with valid arguments. Do not explain a future action or emit tool-shaped " +
-              "JSON in prose. Continue only from repository evidence.",
+          content: semanticNodeFeedback
+            ? semanticNodeFeedback + criteriaFeedback + criteriaActions
+            : hasReadEvidence
+              ? "Host observation: relevant repository evidence is already available." +
+                criteriaFeedback +
+                criteriaActions +
+                freshReadFeedback +
+                protectedFeedback +
+                " " +
+                "Stop narrating and execute exactly one implementation workspace tool " +
+                "now; use EditFile or WriteFile with valid arguments for the next " +
+                "required change. Do not emit prose or tool-shaped JSON."
+              : "Host observation: the previous assistant turn produced no workspace tool action." +
+                criteriaFeedback +
+                criteriaActions +
+                freshReadFeedback +
+                protectedFeedback +
+                " " +
+                "This coding task is not complete. Execute exactly one available workspace tool " +
+                "now with valid arguments. Do not explain a future action or emit tool-shaped " +
+                "JSON in prose. Continue only from repository evidence.",
         });
         continue;
       }
       unresolvedBlockers = 1;
       finalText =
         "The model produced no executable workspace action after bounded recovery attempts.";
-      return await finish(turn);
+      const finished = await finish(turn);
+      if (finished === CONTINUE_AGENT_LOOP) continue;
+      return finished;
     }
     noActionCount = 0;
 
-    return await finish(turn);
+    if (planningMode === "model" && modelPlanHasUnfinishedNodes()) {
+      messages.push({
+        role: "user",
+        content:
+          "The current LLM-authored plan is not complete. Continue with exactly one action for the ready node shown in the authoritative plan context; do not declare completion until every required node is verified.",
+      });
+      continue;
+    }
+
+    const finished = await finish(turn);
+    if (finished === CONTINUE_AGENT_LOOP) continue;
+    return finished;
   }
 
   unresolvedBlockers = 1;
   finalText =
     finalText ||
     `Agent stopped after reaching the maximum turn budget (${maxTurns}).`;
-  return await finish(maxTurns);
+  const finalResult = await finish(maxTurns, false);
+  if (finalResult === CONTINUE_AGENT_LOOP)
+    throw new Error("Completion recovery cannot continue after max turns.");
+  return finalResult;
 }

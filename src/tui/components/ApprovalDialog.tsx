@@ -50,7 +50,7 @@ export function ApprovalDialog(props: {
           <strong>Approval required</strong>
         </text>
         <text fg={themeColor(props.theme, colors.text.primary)}>
-          Run command
+          Allow workspace action
         </text>
         <text fg={themeColor(props.theme, colors.text.secondary)}>
           {props.action ?? "npm publish"}

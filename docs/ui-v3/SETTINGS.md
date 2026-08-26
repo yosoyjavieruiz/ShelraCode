@@ -8,7 +8,10 @@ These values are written to `.localcode/config.json` and mirrored into the local
 
 - Repository privacy: `private`, `private_zdr_only`, `local_only`, `public_free`.
 - Routing mode: `strict-zero`, `ask-before-paid`.
-- Permission mode: `PLAN`, `EDIT`, `AUTO`.
+- Permission mode: `ASK`, `PLAN`, `EDIT`, `AUTO`. New workspaces default to
+  `ASK`, which asks before every workspace tool action. `PLAN` permits reads
+  and asks before writes/commands; `EDIT` permits ordinary edits and asks for
+  destructive actions; `AUTO` is the explicit less-interactive policy.
 
 On persistence failure the candidate value is restored in memory and the failure remains in the status notice.
 

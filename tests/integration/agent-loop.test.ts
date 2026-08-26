@@ -1524,6 +1524,87 @@ describe("agent loop", () => {
     expect(requests[2]?.toolChoice).toBe("none");
   });
 
+  test("quarantines a tool call emitted while the controller disabled tools", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-tool-disabled-envelope-"),
+    );
+    await writeFile(path.join(root, "demo.txt"), "hello\n", "utf8");
+    let turn = 0;
+    const requests: NormalizedModelRequest[] = [];
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Tool-disabled envelope fixture",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream(request) {
+        requests.push(structuredClone(request));
+        turn += 1;
+        if (turn === 1) {
+          yield {
+            type: "text.delta",
+            text: '{"name":"ReadFile","arguments":{"path":"demo.txt"}}',
+          };
+        } else {
+          yield {
+            type: "text.delta",
+            text: "The controller intentionally kept this decision read-only.",
+          };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-tool-disabled-envelope",
+        objective: "Answer without using workspace tools",
+        root,
+        candidate,
+        repositoryPolicy: "private",
+        permissionMode: "PLAN",
+        mode: "conversation",
+        maxTurns: 3,
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        toolChoice: "none",
+        async createExecutionContext() {
+          return {
+            root,
+            permissionMode: "PLAN",
+            signal: new AbortController().signal,
+          };
+        },
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.toolRuns).toHaveLength(0);
+    expect(result.text).toContain("controller intentionally kept");
+    expect(requests[0]?.toolChoice).toBe("none");
+    expect(
+      result.ledger.actions.some((action) => action.status === "failed"),
+    ).toBe(false);
+  });
+
   test("recovers the LM Studio <tools> wrapper without leaking its JSON", async () => {
     const root = await mkdtemp(
       path.join(os.tmpdir(), "localcode-lmstudio-tools-"),
@@ -1986,6 +2067,107 @@ describe("agent loop", () => {
       }),
     ]);
     expect(requests[1]?.messages.at(-2)?.toolCalls?.[0]?.arguments).toBe("{}");
+  });
+
+  test("recovers a malformed textual provider envelope after a real model turn", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-protocol-recovery-"),
+    );
+    await writeFile(
+      path.join(root, "demo.txt"),
+      "protocol recovery works\n",
+      "utf8",
+    );
+    const requests: NormalizedModelRequest[] = [];
+    let turn = 0;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Malformed textual envelope fixture",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream(request) {
+        requests.push(structuredClone(request));
+        turn += 1;
+        if (turn === 1) {
+          yield {
+            type: "text.delta",
+            text: '<tool_call>{"name":"ReadFile","arguments":{"path":"demo.txt"}',
+          };
+        } else if (turn === 2) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "protocol-recovery-read",
+              name: "ReadFile",
+              arguments: JSON.stringify({ path: "demo.txt" }),
+            },
+          };
+        } else {
+          yield {
+            type: "text.delta",
+            text: "demo.txt contains protocol recovery works.",
+          };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-protocol-recovery",
+        objective: "Read demo.txt and report its contents",
+        root,
+        candidate,
+        repositoryPolicy: "local_only",
+        permissionMode: "PLAN",
+        mode: "workspace_question",
+        systemPromptProfile: "workspace",
+        maxTurns: 4,
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        async createExecutionContext() {
+          return {
+            root,
+            permissionMode: "PLAN" as const,
+            signal: new AbortController().signal,
+          };
+        },
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.toolRuns).toEqual([
+      expect.objectContaining({ tool: "ReadFile", ok: true }),
+    ]);
+    expect(requests).toHaveLength(3);
+    expect(
+      requests[1]?.messages.some((message) =>
+        message.content.includes('"type":"model_protocol_error"'),
+      ),
+    ).toBe(true);
+    expect(requests.map((request) => JSON.stringify(request))).not.toContain(
+      "<tool_call>",
+    );
+    expect(result.text).toContain("protocol recovery works");
   });
 
   test("rejects unknown tool fields before a permissive validator can execute", async () => {
@@ -2697,7 +2879,7 @@ describe("agent loop", () => {
     expect(result.toolRuns[1]?.ok).toBe(false);
     expect(result.toolRuns[1]?.code).toBe("NOT_FOUND");
     expect(result.toolRuns[2]?.ok).toBe(false);
-    expect(result.toolRuns[2]?.code).toBe("CONFLICT");
+    expect(result.toolRuns[2]?.code).toBe("PERMISSION_DENIED");
     expect(await readFile(path.join(root, "value.ts"), "utf8")).toContain(
       "value = 2",
     );

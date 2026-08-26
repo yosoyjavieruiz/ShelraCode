@@ -1,24 +1,55 @@
+import path from "node:path";
+
 type SmokeCase = { label: string; command: string[] };
 
+const projectRoot = path.resolve(import.meta.dir, "..");
 const entrypoints = [
-  { label: "source", entry: "src/index.ts" },
-  { label: "bundle", entry: "dist/index.js" },
+  {
+    label: "source",
+    command: (args: string[]) => [
+      process.execPath,
+      "--conditions=browser",
+      "run",
+      path.join(projectRoot, "src", "index.ts"),
+      ...args,
+    ],
+  },
+  {
+    label: "bundle",
+    command: (args: string[]) => [
+      process.execPath,
+      "--conditions=browser",
+      "run",
+      path.join(projectRoot, "dist", "index.js"),
+      ...args,
+    ],
+  },
 ];
 
-const cases: SmokeCase[] = entrypoints.flatMap(({ label, entry }) => [
-  { label: `${label} help`, command: ["run", entry, "--help"] },
-  { label: `${label} version`, command: ["run", entry, "--version"] },
-  { label: `${label} doctor`, command: ["run", entry, "doctor"] },
+const standalonePath = path.join(
+  projectRoot,
+  "dist",
+  process.platform === "win32" ? "shelra.exe" : "shelra",
+);
+if (await Bun.file(standalonePath).exists()) {
+  entrypoints.push({
+    label: "standalone",
+    command: (args: string[]) => [standalonePath, ...args],
+  });
+}
+
+const cases: SmokeCase[] = entrypoints.flatMap(({ label, command }) => [
+  { label: `${label} help`, command: command(["--help"]) },
+  { label: `${label} version`, command: command(["--version"]) },
+  { label: `${label} doctor`, command: command(["doctor"]) },
 ]);
 
 for (const smoke of cases) {
-  const proc = Bun.spawn(
-    [process.execPath, "--conditions=browser", ...smoke.command],
-    {
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
+  const proc = Bun.spawn(smoke.command, {
+    cwd: projectRoot,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

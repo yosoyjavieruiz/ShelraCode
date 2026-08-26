@@ -97,9 +97,9 @@ existing application service provides the underlying state/action.
 - `localcode setup` opens the staged setup view; Enter advances, P cycles
   privacy, R cycles routing and the final step persists through existing
   repository/database settings services.
-- A first `localcode` launch enters the same setup view automatically when the
-  repository has not persisted both policy decisions; completing it transitions
-  directly into the conversation workspace.
+- Every no-argument `shelra`/`localcode` launch enters the conversation
+  workspace consistently, even when the repository has no persisted policy
+  decisions. `shelra setup`/`localcode setup` opens the setup view explicitly.
 - Overlays own focus and close highest-first with Escape.
 - Long-running task work continues to use `AbortSignal`.
 - The renderer owns alternate-screen cleanup; the interactive path uses

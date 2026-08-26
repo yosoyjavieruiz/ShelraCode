@@ -15,9 +15,9 @@
 
 ShelraCode routes repository work through local runtimes first and can use
 verified-free cloud capacity when the active privacy and cost policy allows
-it. It never silently upgrades to a paid route. The package and CLI are still
-named `localcode`; **ShelraCode** is the product name shown by the terminal UI
-while the rename is completed.
+it. It never silently upgrades to a paid route. The package and primary CLI are
+named `shelra`; `localcode` remains a compatibility command while
+**ShelraCode** is the product name shown by the terminal UI.
 
 The central idea is simple:
 
@@ -57,16 +57,17 @@ through a coding task merely because it exposes a tools flag. Verification,
 the final diff review, and user-work preservation still decide whether the
 task is complete.
 
-## Current evidence — 2026-08-25
+## Current evidence — 2026-08-26
 
 The following was run from the current checkout:
 
 ```text
-bun run test       -> 499 pass, 1 skip, 0 fail
+bun run test       -> 593 pass, 1 skip, 0 fail (594 tests across 104 files)
 bun run typecheck  -> PASS
-bun run build      -> PASS; current source bundled to dist/index.js
-bun run smoke      -> PASS for source and bundle help/version/doctor
-scoped Prettier    -> PASS for every changed file
+bun run build      -> PASS; bundles dist/index.js, compiles dist/shelra.exe, installs the active version, and registers the user PATH
+bun run smoke      -> PASS for source, bundle, and standalone help/version/doctor
+installation tests -> PASS; atomic activation, previous-version backup, shim, and idempotent PATH handling
+global CLI smoke   -> PASS; shelra resolves from a disposable project directory outside this repository
 real TUI smoke     -> PASS; type, submit, Esc cancel, /models, Ctrl+C exit
 ```
 
@@ -77,8 +78,12 @@ The deterministic suite proves the admission boundary and bounded fixture
 workflow, but it does not prove that every installed 1.5B model will finish
 complex repository work.
 
-The verified artifact is the Bun bundle plus OpenTUI's platform runtime
-assets. No standalone `.exe` is produced yet.
+The verified Windows artifacts are `dist/index.js` and `dist/shelra.exe`.
+`bun run build` copies the standalone executable to
+`%USERPROFILE%\.shelra\bin\shelra.exe`, writes the active installation
+manifest, creates the `localcode.cmd` compatibility shim, and adds that bin
+directory to the user PATH. Open a new terminal after the build so the new PATH
+is inherited.
 
 ## Product contract
 
@@ -102,7 +107,7 @@ requiring a powerful workstation or an unexpected bill.
 
 ## Quickstart
 
-There is no published package yet. Run the repository directly:
+Run the repository directly during development:
 
 ```bash
 git clone https://github.com/yosoyjavieruiz/shelra.git
@@ -111,9 +116,26 @@ bun install
 bun run src/index.ts
 ```
 
-The first launch opens onboarding for hardware, local runtimes, providers,
-privacy, permissions, and routing mode. After onboarding it enters the full
-screen TUI. To reopen setup intentionally:
+To build and install the active Windows CLI version:
+
+```bash
+bun run build
+```
+
+Open a new terminal, move to any project, and run:
+
+```bash
+shelra
+shelra --version
+```
+
+The no-argument command uses the current directory as the workspace. Existing
+`localcode` command invocations remain supported through the compatibility
+shim.
+
+Every no-argument launch opens the same main conversation TUI, regardless of
+the current project or whether that project has local configuration. Setup is
+explicit and can be opened intentionally with:
 
 ```bash
 bun run src/index.ts setup
@@ -518,9 +540,10 @@ OpenCode, or any other frontier-backed product. The main remaining gaps are:
 
 ### Product/release work
 
-5. **Standalone executable packaging.** The current release artifact is
-   `dist/index.js` plus platform-specific OpenTUI assets; no native `.exe`
-   installer is published.
+5. **Standalone executable distribution.** `bun run build` now produces and
+   installs a Windows `.exe` for the current user. A signed public installer,
+   cross-platform release artifacts, and update distribution service are not
+   yet published.
 6. **Hardware recommendation depth.** `llmfit` integration has a fallback, but
    this machine did not have `llmfit` installed during the latest evidence run.
 7. **Delegation and isolation.** The deterministic read-only code-review agent

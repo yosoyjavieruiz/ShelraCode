@@ -29,7 +29,16 @@ const priorityNames = new Set([
 ]);
 
 function isIgnoredContextFile(relative: string): boolean {
-  return relative.replaceAll("\\", "/").startsWith(".agents/");
+  const normalized = relative.replaceAll("\\", "/");
+  return (
+    // The CLI may be configured to write its JSONL trace at the workspace
+    // root. That is LocalCode runtime state, not project evidence. Counting
+    // it as a project file makes a genuinely empty workspace look non-empty
+    // and deadlocks the first user-approved creation.
+    normalized === "agent.jsonl" ||
+    normalized.startsWith(".agents/") ||
+    normalized.startsWith(".localcode/")
+  );
 }
 
 async function filesFromGit(
@@ -119,7 +128,9 @@ async function discoverFiles(
   if (gitFiles.length > 0) return gitFiles;
   const rgFiles = await filesFromRg(root, signal, logger);
   if (rgFiles.length > 0) return rgFiles;
-  return filesFromWalk(root);
+  return (await filesFromWalk(root)).filter(
+    (file) => !isIgnoredContextFile(file),
+  );
 }
 
 const OBJECTIVE_STOP_WORDS = new Set([

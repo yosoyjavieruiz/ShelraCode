@@ -26,16 +26,22 @@ import type { ProviderStatus } from "../providers/registry.js";
 import type { SessionSummary } from "../storage/database.js";
 import { verifyStructuralCodingCriteria } from "../agent/verification-criteria.js";
 import type { AgentTaskLedger } from "../agent/task-state.js";
+import { reviewWorkspaceChange } from "../agent/workspace-review.js";
 import { runCodeReview } from "../agent/code-review-agent.js";
 import {
   extractObjectivePaths,
   reviewCodingObjective,
 } from "../agent/objective-review.js";
+import { isGreenfieldObjective } from "../agent/task-contract.js";
 import {
   selectProgressiveTargets,
   verifiedPreparationTargets,
 } from "../agent/progressive-plan.js";
 import { recommendedAgentContextChars } from "../agent/context-budget.js";
+import {
+  requiresModelPlan,
+  selectExecutionProfile,
+} from "../agent/execution-profile.js";
 import { repositorySnapshotMemoryFacts } from "../context/repository-snapshot.js";
 import { createTaskEpisodeMemoryFact } from "../shared/memory.js";
 import { AppEventBus } from "../shared/events.js";
@@ -472,7 +478,7 @@ export function AppShell(
   const [routingMode, setRoutingMode] =
     createSignal<RoutingMode>("strict-zero");
   const [permissionMode, setPermissionMode] =
-    createSignal<PermissionMode>("EDIT");
+    createSignal<PermissionMode>("ASK");
   const [density, setDensity] = createSignal<"comfortable" | "compact">(
     "comfortable",
   );
@@ -1184,6 +1190,10 @@ export function AppShell(
         const verificationPlan =
           turnMode === "coding" ? selectVerificationPlan(projectCommands) : [];
         const analyzedTask = analyzeTask(objective);
+        const repositoryIsEmpty =
+          routingContext.files.length === 0 &&
+          routingContext.searchBackend !== "unavailable";
+        const greenfieldIntent = isGreenfieldObjective(objective);
         const explicitObjectivePaths = extractObjectivePaths(objective);
         const progressiveTargets =
           analyzedTask.complexity >= 0.7
@@ -1301,10 +1311,16 @@ export function AppShell(
           requiredCapability !== "advanced_coding_agent" &&
           verifiedCodingScope &&
           hasMeasuredCodingRoute;
+        const emptyGreenfieldExecution =
+          turnMode === "coding" &&
+          repositoryIsEmpty &&
+          greenfieldIntent &&
+          hasMeasuredCodingRoute;
         const discoveryExecution =
           turnMode === "coding" &&
           !progressiveExecution &&
-          !directCodingExecution;
+          !directCodingExecution &&
+          !emptyGreenfieldExecution;
         const routeCapability = progressiveExecution
           ? "coding_agent"
           : discoveryExecution
@@ -1458,8 +1474,40 @@ export function AppShell(
                 explicitPaths: contextFiles(),
                 memoryFacts: semanticMemoryFacts,
                 logger: taskLogger,
-              })
+            })
             : routingContext;
+          const adaptiveProfile = selectExecutionProfile({
+            mode: executionMode,
+            complexity: analyzedTask.complexity,
+            // Inferred preparation targets are not user intent. An empty
+            // greenfield request still has unresolved semantic scope until
+            // the LLM proposes the plan and its deliverables.
+            explicitPathCount: explicitObjectivePaths.length,
+            deliverableCount: Math.max(1, boundedScope.length),
+            risk: analyzedTask.risk,
+            uncertaintyCount:
+              executionMode === "coding" &&
+              (boundedScope.length === 0 ||
+                (repositoryIsEmpty &&
+                  greenfieldIntent &&
+                  explicitObjectivePaths.length === 0))
+                ? 1
+                : 0,
+            contextPressure:
+              activeContextBudget > 0
+                ? agentContext.prompt.length / activeContextBudget
+                : 0,
+          });
+          const modelPlanning =
+            strategy !== "discovery" &&
+            (requiresModelPlan(adaptiveProfile) ||
+              // Empty greenfield work has no host-localizable target. The
+              // semantic plan must come from the LLM; the controller only
+              // validates the proposed scope and executes it.
+              (executionMode === "coding" &&
+                repositoryIsEmpty &&
+                greenfieldIntent &&
+                explicitObjectivePaths.length === 0));
           trace.record({
             taskId: turnId,
             type: "context.built",
@@ -1483,22 +1531,18 @@ export function AppShell(
                 root: process.cwd(),
                 candidate: selected,
                 mode: executionMode,
+                executionProfile: adaptiveProfile,
+                planningMode: modelPlanning ? "model" : "none",
+                enforceTaskContract: executionMode === "coding",
                 ...(executionMode === "coding" && boundedScope.length > 0
                   ? { stagedPaths: [...boundedScope] }
-                  : {}),
-                ...(executionMode === "coding"
-                  ? {
-                      successCriteria: [
-                        "The user's concrete coding objective is satisfied and its relevant files or areas are covered.",
-                        "Configured project verification passes.",
-                        "The final diff is reviewed and pre-existing work is preserved.",
-                      ],
-                    }
                   : {}),
                 repositoryPolicy: controlPlane.settings.privacy,
                 permissionMode: controlPlane.settings.permissionMode,
                 context: agentContext.prompt || undefined,
                 contextEvidenceState: agentContext.evidenceState,
+                repositoryState: repositoryIsEmpty ? "empty" : "non_empty",
+                greenfieldIntent,
                 containsHighConfidenceSecret:
                   agentContext.containsHighConfidenceSecret,
                 verificationCommand:
@@ -1511,7 +1555,7 @@ export function AppShell(
                   executionMode === "coding"
                     ? verificationPlan.length > 0
                       ? "required"
-                      : "unavailable"
+                      : "not_required"
                     : "not_required",
                 // Coding work is a multi-step execution, not a single chat
                 // response. Keep conversation/read-only turns short, while
@@ -1543,34 +1587,13 @@ export function AppShell(
                     }),
                 checkUserWorkPreserved: (checkpointId) =>
                   checkpointId ? checkpoint.isPreserved(checkpointId) : true,
-                async reviewFinalDiff(currentTask) {
-                  if (signal.aborted) return false;
-                  const { runCommand } = await import("../shared/process.js");
-                  try {
-                    const [diff, status] = await Promise.all([
-                      runCommand("git", ["diff", "--"], {
-                        cwd: currentTask.root,
-                        signal,
-                        timeoutMs: 10_000,
-                        logger: taskLogger,
-                      }),
-                      runCommand("git", ["status", "--short"], {
-                        cwd: currentTask.root,
-                        signal,
-                        timeoutMs: 10_000,
-                        logger: taskLogger,
-                      }),
-                    ]);
-                    return diff.exitCode === 0 && status.exitCode === 0;
-                  } catch (error) {
-                    if (
-                      signal.aborted ||
-                      (error instanceof DOMException &&
-                        error.name === "AbortError")
-                    )
-                      return false;
-                    throw error;
-                  }
+                async reviewFinalDiff(currentTask, ledger) {
+                  return reviewWorkspaceChange({
+                    root: currentTask.root,
+                    ledger,
+                    signal,
+                    logger: taskLogger,
+                  });
                 },
                 async verifySuccessCriteria(currentTask, ledger) {
                   return verifyStructuralCodingCriteria(ledger, {
@@ -1578,7 +1601,7 @@ export function AppShell(
                       executionMode === "coding"
                         ? verificationPlan.length > 0
                           ? "available"
-                          : "unavailable"
+                          : "not_required"
                         : "not_required",
                     reviewObjective: () =>
                       reviewCodingObjective(
@@ -1588,34 +1611,12 @@ export function AppShell(
                         signal,
                       ),
                     reviewFinalDiff: async () => {
-                      if (signal.aborted) return false;
-                      const { runCommand } =
-                        await import("../shared/process.js");
-                      try {
-                        const [diff, status] = await Promise.all([
-                          runCommand("git", ["diff", "--"], {
-                            cwd: process.cwd(),
-                            signal,
-                            timeoutMs: 10_000,
-                            logger: taskLogger,
-                          }),
-                          runCommand("git", ["status", "--short"], {
-                            cwd: process.cwd(),
-                            signal,
-                            timeoutMs: 10_000,
-                            logger: taskLogger,
-                          }),
-                        ]);
-                        return diff.exitCode === 0 && status.exitCode === 0;
-                      } catch (error) {
-                        if (
-                          signal.aborted ||
-                          (error instanceof DOMException &&
-                            error.name === "AbortError")
-                        )
-                          return false;
-                        throw error;
-                      }
+                      return reviewWorkspaceChange({
+                        root: currentTask.root,
+                        ledger,
+                        signal,
+                        logger: taskLogger,
+                      });
                     },
                     userWorkPreserved: () =>
                       lastCheckpointId
@@ -1636,7 +1637,7 @@ export function AppShell(
                           verificationState:
                             verificationPlan.length > 0
                               ? "available"
-                              : "unavailable",
+                              : "not_required",
                           finalReviewPerformed: true,
                           userWorkPreserved: lastCheckpointId
                             ? await checkpoint.isPreserved(lastCheckpointId)
@@ -2065,11 +2066,11 @@ export function AppShell(
           "strict-zero",
       );
     } else if (index === 6) {
-      const options: PermissionMode[] = ["PLAN", "EDIT", "AUTO"];
+      const options: PermissionMode[] = ["ASK", "PLAN", "EDIT", "AUTO"];
       const current = options.indexOf(permissionMode());
       setPermissionMode(
         options[(current + direction + options.length) % options.length] ??
-          "EDIT",
+          "ASK",
       );
     } else {
       setNotice("This setting is fixed by the current product policy");

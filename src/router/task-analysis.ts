@@ -35,7 +35,15 @@ function requiredCapability(
 }
 
 function has(text: string, ...terms: string[]): boolean {
-  return terms.some((term) => text.includes(term));
+  return terms.some((term) => {
+    const escaped = term
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\s+/gu, "\\s+");
+    return new RegExp(
+      `(?:^|[^\\p{L}\\p{N}_])${escaped}(?:$|[^\\p{L}\\p{N}_])`,
+      "iu",
+    ).test(text);
+  });
 }
 
 export function analyzeTask(input: string): TaskAnalysis {
@@ -125,11 +133,20 @@ export function analyzeTask(input: string): TaskAnalysis {
       text,
       "edit",
       "change",
+      "create",
+      "write",
+      "build",
+      "make",
+      "generate",
       "update",
       "rename",
       "implement",
       "fix",
       "cambia",
+      "crea",
+      "escribe",
+      "construye",
+      "genera",
       "actualiza",
       "renombra",
       "implementa",
