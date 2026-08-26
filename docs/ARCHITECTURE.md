@@ -38,8 +38,8 @@ Durable settings, sessions, route records, quotas, health, observations and chec
 
 ```text
 user task → task analysis → sensitivity/context → candidate generation
-→ privacy gate → cost gate → executable-tool/context/health/quota gates
-→ capability quality signal → score/explain
+→ privacy gate → capability admission → cost gate
+→ executable-tool/context/health/quota gates → score/explain
 → stream response/tool calls → permission check
 → execute tool → verify → accept, reroute, or stop
 ```
@@ -51,3 +51,11 @@ External JSON, headers and subprocess output are validated at adapters. Provider
 ## Current vertical slice
 
 The MVP uses a deterministic local/fake provider path in tests, HTTP OpenAI-compatible adapters for legitimate endpoints, real filesystem/Git tools, llmfit fallback detection, and a real OpenTUI app. Optional provider entries are only shown as configured/available when their adapter and policy metadata support the action.
+
+## Authoritative agent flow
+
+The runtime order is privacy, capability admission, cost, executable-tool,
+context, health/circuit-breaker and quota gates, followed by score selection.
+Capability is therefore a hard admission requirement for the requested role;
+it is not merely a quality score. A small model can be selected for a bounded
+role only when that role's measured requirement is satisfied.

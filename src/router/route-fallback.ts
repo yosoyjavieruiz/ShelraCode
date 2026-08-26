@@ -2,6 +2,7 @@ import type { ProviderFailureCode } from "../providers/types.js";
 import type { ToolErrorCode } from "../tools/errors.js";
 import { selectRoute } from "./router.js";
 import type {
+  AgentCapabilityClass,
   ModelCandidate,
   RouteDecision,
   RouteRequest,
@@ -63,6 +64,51 @@ const ROUTE_ESCALATION_CODES = new Set<
   "AGENT_INCOMPLETE",
 ]);
 
+const CAPABILITY_RANK: Record<AgentCapabilityClass, number> = {
+  chat_only: 0,
+  workspace_reader: 1,
+  coding_agent: 2,
+  advanced_coding_agent: 3,
+};
+
+function candidateCapability(candidate: ModelCandidate): AgentCapabilityClass {
+  return candidate.agentProbe?.agentCapabilityClass ?? "chat_only";
+}
+
+/**
+ * A route that produced no verified action is not allowed to fall back to an
+ * equal or weaker route merely because it happens to be available. That
+ * pattern turns a local model failure into a slower repeat of the same
+ * failure, which is especially harmful for progressive work units.
+ *
+ * Capability rank is the primary signal. Within the same measured role, the
+ * existing quality evidence is only a tie-breaker; it is never a promotion
+ * of an unmeasured model. Provider/runtime failures keep the older
+ * availability fallback behavior because a lower route may still be healthy.
+ */
+function isStrongerIncompleteFallback(
+  previous: ModelCandidate,
+  next: ModelCandidate,
+): boolean {
+  const previousRank = CAPABILITY_RANK[candidateCapability(previous)];
+  const nextRank = CAPABILITY_RANK[candidateCapability(next)];
+  if (nextRank !== previousRank) return nextRank > previousRank;
+
+  if (
+    previous.quality.confidence !== "measured" ||
+    next.quality.confidence !== "measured"
+  )
+    return false;
+
+  const previousStrength =
+    (previous.quality.coding ?? 0) * 0.6 +
+    (previous.quality.toolUse ?? 0) * 0.4;
+  const nextStrength =
+    (next.quality.coding ?? 0) * 0.6 + (next.quality.toolUse ?? 0) * 0.4;
+
+  return nextStrength > previousStrength + 0.05;
+}
+
 export function shouldEscalateRoute(failure: RouteFailureEvidence): boolean {
   return (
     !failure.mutationOccurred &&
@@ -85,12 +131,37 @@ export function selectFallbackRoute(
     return selectRoute({ ...request, candidates: [] }, logger);
 
   const attempted = new Set(attemptedCandidateIds);
+  let candidates = request.candidates.filter(
+    (candidate) => !attempted.has(candidate.id),
+  );
+
+  if (failure.code === "AGENT_INCOMPLETE") {
+    const previousId = attemptedCandidateIds.at(-1);
+    const previous = request.candidates.find(
+      (candidate) => candidate.id === previousId,
+    );
+    if (previous) {
+      const eligibleImprovement = candidates.filter((candidate) =>
+        isStrongerIncompleteFallback(previous, candidate),
+      );
+      if (eligibleImprovement.length !== candidates.length) {
+        logger?.warn("route.fallback.rejected_weaker", {
+          previousCandidateId: previous.id,
+          previousCapability: candidateCapability(previous),
+          rejectedCandidateIds: candidates
+            .filter((candidate) => !eligibleImprovement.includes(candidate))
+            .map((candidate) => candidate.id),
+          failureCode: failure.code,
+        });
+      }
+      candidates = eligibleImprovement;
+    }
+  }
+
   return selectRoute(
     {
       ...request,
-      candidates: request.candidates.filter(
-        (candidate) => !attempted.has(candidate.id),
-      ),
+      candidates,
     },
     logger,
   );

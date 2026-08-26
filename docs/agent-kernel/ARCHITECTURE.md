@@ -51,10 +51,16 @@ stream can be reconstructed byte-for-byte.
 Provider adapters own protocol translation. The kernel never renders raw
 provider events as assistant prose and never lets a model widen its policy.
 
-Current routing correction (2026-08-25): empirical capability classes are
-score/fallback evidence, not an independent eligibility veto. Required
-executable tools, privacy, cost, context, health, quota, permissions, and
-host-owned verification remain hard boundaries.
+Current routing correction (2026-08-25): empirical capability classes are a
+hard admission gate for the required task role, before quality scoring. A
+`chat_only` candidate cannot enter a `coding_agent` or
+`advanced_coding_agent` task, and an unmeasured candidate cannot be presented
+as coding-capable. Bounded single-file work may require only
+`workspace_reader`, but the host still scopes mutation, evidence, verification
+and completion. Required executable tools, privacy, cost, context, health,
+quota and permissions remain hard boundaries as well. Older status notes that
+describe capability as score-only are historical and superseded by this
+paragraph.
 
 ## Explicit success-criteria authority - 2026-08-24
 

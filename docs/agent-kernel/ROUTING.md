@@ -2,13 +2,13 @@
 
 ## Current policy — 2026-08-25
 
-The capability class is no longer a hard stop by itself. A measured
-`chat_only`, `workspace_reader`, or missing probe can influence task-fit score
-and fallback preference, but an otherwise policy-valid candidate with the
-required executable tools remains selectable. This keeps accessible 1.5B
-local routes usable while leaving completion, verification, permissions,
-privacy, cost, quota, and runtime health under host control. The historical
-results below are retained as evidence from the previous hard-gate policy.
+Capability is an admission gate before scoring. A candidate must have measured
+capability at or above the task requirement; a `chat_only` candidate cannot be
+selected for coding, and an unmeasured candidate cannot be advertised as
+coding-capable. Bounded single-file work can deliberately require the lower
+`workspace_reader` role, while complex refactors and multi-file work require
+`advanced_coding_agent`. This keeps an accessible 1.5B route useful for small
+verified work without pretending it is a frontier autonomous worker.
 
 Routing order is structural:
 
@@ -18,17 +18,34 @@ Routing order is structural:
 4. context fit, health, circuit breaker, and freshness;
 5. quality/latency/headroom scoring.
 
+### Complex-task preparation route — 2026-08-25
+
+The TUI no longer jumps directly from an unlocalized complex coding objective
+to `advanced_coding_agent`. When the host has not proven a bounded mutation
+scope, it requests a `discovery` execution strategy. This is a local,
+read-only preparation stage: `chat_only` may be selected there because the
+route has `toolNeed=false` and receives no mutation tools. The model/context
+stage can propose or read candidate files, but every proposed path is checked
+against the current workspace before it becomes scope.
+
+Only after a non-empty, host-validated scope exists does the controller issue a
+second route request with `strategy=progressive`. That request still requires a
+measured `coding_agent`; `chat_only` is never promoted to write authority.
+Therefore the explainable route should show `Local discovery execution` for
+the first stage instead of `STOP · ASK USER` merely because the preferred local
+model cannot own the entire advanced objective in one invocation.
+
 `LOCAL ONLY`/strict-zero rejects remote paid or unverified-free candidates at
 the route boundary. Local candidates have no artificial request, token, RPD,
 RPM, or billing quota. They remain constrained by hardware, runtime,
 context, and the non-progress watchdog.
 
 Task requirements map conversational questions to `chat_only`, repository
-questions to `workspace_reader`, ordinary edits to `coding_agent`, and
-complex refactors/multi-file work to `advanced_coding_agent`. These are target
-signals for scoring and context, not unconditional route floors. A failed
-capability probe is execution evidence for fallback/verification, not by
-itself a reason to stop before attempting an executable route.
+questions to `workspace_reader`, bounded edits to `workspace_reader` or
+`coding_agent` according to the analyzed complexity, and complex
+refactors/multi-file work to `advanced_coding_agent`. These are executable
+route floors. A failed or missing capability probe is an honest route
+rejection, not a reason to force an unproven model into mutation.
 
 Deterministic router tests cover stronger-local fallback, no local quota,
 strict-zero remote rejection, soft capability preference, and per-task

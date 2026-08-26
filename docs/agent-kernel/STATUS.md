@@ -1,24 +1,73 @@
 # Agent Kernel Status
 
+<!-- Latest root-cause evidence is maintained below the historical sections. -->
+
+## Latest root-cause closure - 2026-08-25
+
+This pass addressed the two runtime causes behind the repeated local-model
+failure instead of only changing the routing message:
+
+- A complex task with a controller-proven, non-empty bounded scope may now use
+  a local `chat_only` candidate as a **host-scaffolded progressive fallback**.
+  This is not an advanced-capability promotion: the controller owns the tool
+  set, path scope, checkpoints, verification and completion gate. Direct
+  advanced execution without a proven scope remains rejected.
+- The TUI enters progressive execution as soon as the scope is proven; it no
+  longer requires an already measured coding route before it can attempt the
+  bounded local work unit. This removes the old `chat_only -> STOP / ASK USER`
+  dead end for scoped local tasks.
+- `ReadFile({ startLine })` now returns a bounded 160-line window when
+  `endLine` is omitted, with `hasMore` and `nextStartLine` continuation
+  metadata. Previously it read to EOF, was truncated again for the model, and
+  caused small local models to repeat reads instead of editing.
+
+Fresh deterministic evidence:
+
+```text
+bun run typecheck
+  PASS
+
+Focused routing/kernel suite
+  96 pass / 0 fail / 334 expectations
+```
+
+Fresh source-TUI evidence from the pre-window-contract smoke run:
+
+```text
+route: lm-studio/qwen3.5-4b-claude-4.6-opus-reasoning-distilled-v2
+capability: coding_agent
+route stop: no
+tool turns: 15
+mutation: 1 valid EditFile
+verification runs: 3
+criteria: pass
+final diff review: PASS, score 9
+task result: completed, verified=true
+```
+
+That real run proves the former `chat_only` stop was not active on the
+available 4B route and that a local model can complete a bounded mutation. It
+does not yet prove arbitrary multi-file frontier-level autonomy; the next
+live smoke should measure whether the bounded `ReadFile` contract reduces the
+15-turn read overhead.
+
 Living status for the agent-kernel workstream. See [AUDIT.md](AUDIT.md) for
 the full component table and [ROOT-CAUSES.md](ROOT-CAUSES.md) for the
 reported-failure investigation.
 
 ## Routing policy addendum — 2026-08-25
 
-The former empirical capability-class veto has been removed from active
-selection. A measured `chat_only`/`workspace_reader` result, or a missing
-probe, no longer produces `STOP · ASK USER` by itself. Capability evidence is
-now a bounded score preference; a policy-valid candidate with executable tools
-can be attempted, including an accessible 1.5B local model. Privacy,
-`strict-zero`, paid-model exclusion, quota, health, context, tool permissions,
-workspace safety, and host-owned verification remain hard controls. A model
-that cannot complete the task is handled by the agent loop, verification, and
-bounded fallback rather than by a capability-label rejection.
+The active router applies empirical capability as a hard admission gate before
+scoring. A `chat_only` or unmeasured candidate cannot enter direct coding, and
+a `workspace_reader` candidate cannot enter an `advanced_coding_agent` task.
+The only exception is a host-scaffolded progressive route with a non-empty,
+controller-proven scope: a local/free `chat_only` model may attempt that one
+bounded unit while the controller retains tool, checkpoint, verification and
+completion authority. This keeps 1.5B routes accessible without making an
+unsupported frontier-parity claim.
 
-This supersedes older status paragraphs below that describe a capability class
-as an unconditional route gate. Those paragraphs remain historical evidence
-of the earlier failure and are not the current runtime policy.
+The older score-only wording below is retained as historical evidence of a
+previous implementation and is not the current runtime policy.
 
 ## Done (this pass)
 
@@ -495,3 +544,147 @@ operations, typed file-vs-directory/missing-path errors, checkpoints, and
 bounded redaction-aware diffs. The TUI labels rejected requests `BLOCKED`
 instead of making them look like successful writes, and shows safe model
 progress metadata without revealing private reasoning text.
+
+## Current authoritative closure - 2026-08-25
+
+This section supersedes the older snapshots above for the current checkout.
+
+```text
+bun run test       -> 499 pass / 1 skip / 0 fail / 1583 expectations
+bun run typecheck  -> PASS
+bun run build      -> PASS; current source bundled to dist/
+bun run smoke      -> PASS; source and bundle help/version/doctor
+scoped Prettier    -> PASS for all changed files
+git diff --check   -> PASS; only Git line-ending warnings
+real TUI PTY       -> PASS; type, submit, Esc cancel, /models, Ctrl+C exit
+```
+
+The global `bun run format:check` remains red only because it reports 14
+pre-existing files outside this change. The changed-file check is clean; no
+unrelated historical UI/document files were reformatted to hide that boundary.
+
+The current JSONL report contains 152,097 valid records and zero malformed
+lines. Its volume is still a product issue: it contains 92,380 route
+rejections, 40 tool failures, 35 checkpoint-preservation failures, and three
+watchdog interventions across historical and fixture tasks. Recent records
+include repeated `task-provider-crash`, `PATH_IS_FILE`, and
+`changed-external` events. They are now typed and observable, but runtime
+stability and log rotation remain open work; these counts must not be read as
+failures from the final deterministic suite.
+
+The kernel now includes a read-only `code-review` host agent. It checks the
+task ledger, objective criteria, verification state, final diff check, and
+user-work preservation without editing or asking a model to self-approve. It
+is a behavioral comparison point against Claude Code's public
+context/action/verification loop, not a claim of internal Claude parity.
+
+Free cloud routing now has an explicit bounded protocol-probe path. When the
+coding turn has no eligible measured local route and policy permits remote
+free capacity, at most one verified-free candidate per provider is probed.
+The probe sends only generic tool-loop prompts, never repository context, and
+stores exact capability evidence in the local cache. It does not claim local
+sandbox or remote test execution; account quota/privacy and full remote
+coding journeys remain live evidence gates.
+
+### Remaining release blockers
+
+The deterministic kernel P0 regressions are closed. The following P1 maturity
+areas remain explicitly open:
+
+- Windows process isolation is centralized and network-denying, but not yet a
+  proven OS-level filesystem/network sandbox for every child-process escape.
+- The task graph is persisted and host-owned, but its dependency scheduler is
+  not yet fully autonomous; the worker still chooses actions inside a bounded
+  node.
+- Explore/Build/Verify model subagents and isolated worktrees are not yet a
+  production path; the current verifier is deterministic and read-only.
+- Long-horizon arbitrary-repository coding, resume after compaction, and
+  repeated 1.5B/7B/14B model-runtime-template matrices remain unproven.
+- Remote Groq/OpenRouter capability probes are structurally implemented but
+  were not run as live inference in this validation pass.
+- Full PTY resize/cross-width acceptance and standalone executable packaging
+  remain outside the current artifact proof.
+
+## Authoritative routing correction — 2026-08-25
+
+The prior `STOP · ASK USER` behavior for a complex local task with no
+pre-localized scope was a controller defect. The router was correctly refusing
+`chat_only` for mutation, but the TUI had no preparation stage and terminated
+the task instead of localizing it first.
+
+The current source adds an explicit `discovery` strategy:
+
+```text
+complex coding objective without proven scope
+  -> local discovery, no mutation tools
+  -> validate proposed/read paths against the workspace
+  -> progressive route request
+  -> measured coding_agent only
+  -> bounded mutation + host verification
+```
+
+This preserves the capability hard gate while removing the false early stop.
+If no validated scope can be found, the task is reported as preparation
+paused/blocked; it is not marked completed and no file is mutated.
+
+Fresh current evidence:
+
+```text
+bun run typecheck                                      -> PASS
+bun test routing + kernel acceptance                   -> 85 pass / 0 fail
+bun test full suite                                    -> 495 pass / 1 skip / 22 fail
+focused TUI rerun (--max-concurrency=1)               -> 14 pass / 1 skip / 11 fail
+doctor --agent                                        -> Qwen3.5 2B, coding_agent,
+                                                        recovery FAIL,
+                                                        autonomous coding NOT READY,
+                                                        progressive/bounded READY
+```
+
+The 22 full-suite failures are concentrated in pre-existing OpenTUI/Solid
+controlled-renderer tests (animation ticks, composer signal synchronization,
+slash sheets, status updates and streaming). The same failures reproduce when
+those files run alone and serially; they are not evidence that the routing or
+agent-kernel correction failed. They remain an open TUI test-harness blocker
+and must not be represented as a green release suite.
+
+The live local boundary is now explicit: Qwen3.5 2B can participate in
+progressive/bounded work, but its probe still fails recovery, so it is not
+advertised as an unrestricted autonomous coding model. Qwen2.5 Coder 1.5B and
+7B remain workspace-reader profiles in the current matrix. No raw 1.5B/frontier
+parity claim is made.
+
+## Capability-probe integrity correction — 2026-08-25
+
+The previous probe had two control-plane defects that could create misleading
+`chat_only` results:
+
+- the plain greeting probe advertised `ReadFile` with `toolChoice=auto`, so a
+  model could be penalized for selecting a tool that the probe itself offered;
+- provider/runtime timeouts were persisted as if they were behavioral model
+  measurements, poisoning the next route decision.
+
+The greeting probe now sends no tools and `toolChoice=none` (probe version 12).
+Transport failures are not persisted as capability evidence, failed cache rows
+are never considered current, and a compatible previous measurement is reused
+temporarily while the runtime is retried. LM Studio native model discovery also
+records `loaded_instances` and orders the selected/loaded model first during
+probing.
+
+Focused evidence after this correction:
+
+```text
+bun test capability-cache + capability-probe + runtime -> PASS
+bun run typecheck                               -> PASS
+```
+
+The current local database was refreshed by a diagnostic run while several
+models were unloaded; those timeout rows are intentionally no longer trusted.
+The 1.5B classification must be re-established with that model loaded and a
+fresh version-12 probe. This is a measurement-status limitation, not evidence
+that the model is inherently chat-only.
+
+The real TUI journey then exposed one remaining routing branch: a debugging
+objective requiring `coding_agent` could still skip discovery when its scope
+was not proven. The discovery condition now applies to every coding task
+without verified scope, not only `advanced_coding_agent` tasks. The capability
+gate remains intact for the subsequent mutation route.

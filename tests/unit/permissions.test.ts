@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   classifyShellCommand,
   checkPermission,
+  commandRequiresNetwork,
 } from "../../src/tools/permissions.js";
 import {
   safeExecutionEnvironment,
@@ -9,6 +10,7 @@ import {
   writeFileTool,
 } from "../../src/tools/workspace.js";
 import { ToolError } from "../../src/tools/errors.js";
+import { ProcessPolicyError, runCommand } from "../../src/shared/process.js";
 
 test("classifies destructive shell commands conservatively", () => {
   expect(classifyShellCommand("git status")).toBe("read");
@@ -124,4 +126,38 @@ test("shell blocks network-capable commands when the turn policy disables networ
     code: "PERMISSION_DENIED",
     recoverable: false,
   });
+});
+
+test("classifies network-capable package commands for every executor", () => {
+  expect(commandRequiresNetwork("bun install")).toBe(true);
+  expect(commandRequiresNetwork("npm install --ignore-scripts")).toBe(true);
+  expect(commandRequiresNetwork("bun test")).toBe(false);
+});
+
+test("RunTests cannot bypass the turn network policy", async () => {
+  const { runTestsTool } = await import("../../src/tools/workspace.js");
+
+  await expect(
+    runTestsTool.execute(
+      { command: "bun install" },
+      {
+        root: process.cwd(),
+        permissionMode: "AUTO",
+        signal: new AbortController().signal,
+        network: false,
+      },
+    ),
+  ).rejects.toMatchObject({
+    code: "PERMISSION_DENIED",
+    recoverable: false,
+  });
+});
+
+test("the shared process runner enforces the same lower-level egress policy", async () => {
+  await expect(
+    runCommand("cmd.exe", ["/c", "echo", "blocked"], {
+      network: "deny",
+      policyCommand: "bun install",
+    }),
+  ).rejects.toBeInstanceOf(ProcessPolicyError);
 });

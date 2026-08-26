@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   AGENT_CAPABILITY_PROBE_VERSION,
   probeAgentCapability,
+  probeFreeCloudModelCapabilities,
   probeLocalModelCapabilities,
 } from "../../src/agent/capability-probe.js";
 import type { ProviderAdapter } from "../../src/providers/types.js";
@@ -105,7 +106,7 @@ test("a well-behaved model probes as agentic-coding eligible", async () => {
   expect(result.readTool).toBe(true);
   expect(result.multiTurnTools).toBe(true);
   expect(result.agenticCodingEligible).toBe(true);
-  expect(result.agentCapabilityClass).toBe("advanced_coding_agent");
+  expect(result.agentCapabilityClass).toBe("coding_agent");
   expect(result.profile?.runtimeId).toBe("good");
   expect(result.profile?.editReliability.status).toBe("pass");
   expect(result.profile?.verificationBehavior.status).toBe("pass");
@@ -207,6 +208,102 @@ test("an eligible protocol model must also complete disposable edit and test ite
   expect(result.agentCapabilityClass).toBe("advanced_coding_agent");
 });
 
+test("an inconclusive executable probe keeps protocol-capable models in the bounded coding tier", async () => {
+  let call = 0;
+  const provider: ProviderAdapter = {
+    ...fakeHealthQuota("protocol-only"),
+    async *stream(request) {
+      call += 1;
+      const user = [...request.messages]
+        .reverse()
+        .find((message) => message.role === "user")?.content;
+      if (user?.startsWith("CAPABILITY EDIT")) {
+        yield {
+          type: "text.delta",
+          text: "I could not apply the disposable edit.",
+        };
+      } else if (user?.startsWith("CAPABILITY TEST")) {
+        yield {
+          type: "text.delta",
+          text: "I could not complete the disposable test.",
+        };
+      } else if (call === 1) {
+        yield { type: "text.delta", text: "Hi." };
+      } else if (call === 2) {
+        yield {
+          type: "tool.call",
+          call: {
+            id: "read",
+            name: "ReadFile",
+            arguments: JSON.stringify({ path: "demo.txt" }),
+          },
+        };
+      } else if (call === 3) {
+        yield { type: "text.delta", text: "demo.txt contains hello." };
+      } else if (call === 4) {
+        yield {
+          type: "tool.call",
+          call: {
+            id: "edit",
+            name: "EditFile",
+            arguments: JSON.stringify({
+              path: "demo.txt",
+              oldText: "hello",
+              newText: "hello world",
+            }),
+          },
+        };
+      } else if (call === 5) {
+        yield { type: "text.delta", text: "The edit is complete." };
+      } else if (call === 6) {
+        yield {
+          type: "tool.call",
+          call: {
+            id: "tests",
+            name: "RunTests",
+            arguments: JSON.stringify({ command: "bun test" }),
+          },
+        };
+      } else if (call === 7) {
+        yield { type: "text.delta", text: "The test observation is complete." };
+      } else if (call === 8) {
+        yield {
+          type: "tool.call",
+          call: {
+            id: "list",
+            name: "ListFiles",
+            arguments: JSON.stringify({ path: "demo.txt" }),
+          },
+        };
+      } else if (call === 9) {
+        yield {
+          type: "tool.call",
+          call: {
+            id: "read-after-error",
+            name: "ReadFile",
+            arguments: JSON.stringify({ path: "demo.txt" }),
+          },
+        };
+      } else {
+        yield { type: "text.delta", text: "The probe is complete." };
+      }
+      yield { type: "done" };
+    },
+  };
+
+  const result = await probeAgentCapability(
+    provider,
+    "protocol-only-model",
+    new AbortController().signal,
+    { root: process.cwd() },
+  );
+
+  expect(result.execution?.editApplied).toBe(false);
+  expect(result.agenticCodingEligible).toBe(true);
+  expect(result.agentCapabilityClass).toBe("coding_agent");
+  expect(result.profile?.editReliability.status).toBe("fail");
+});
+
 test("textual JSON tool envelopes are measured through the same recovery path as the agent loop", async () => {
   let call = 0;
   const envelope = (name: string, args: Record<string, unknown>) =>
@@ -250,7 +347,7 @@ test("textual JSON tool envelopes are measured through the same recovery path as
   expect(result.readTool).toBe(true);
   expect(result.multiTurnTools).toBe(true);
   expect(result.agenticCodingEligible).toBe(true);
-  expect(result.agentCapabilityClass).toBe("advanced_coding_agent");
+  expect(result.agentCapabilityClass).toBe("coding_agent");
   expect(result.profile?.editReliability.status).toBe("pass");
   expect(result.profile?.verificationBehavior.status).toBe("pass");
 });
@@ -335,7 +432,7 @@ test("capability probes measure recovery after a textual duplicate before reject
   expect(result.readTool).toBe(true);
   expect(result.multiTurnTools).toBe(true);
   expect(result.agenticCodingEligible).toBe(true);
-  expect(result.agentCapabilityClass).toBe("advanced_coding_agent");
+  expect(result.agentCapabilityClass).toBe("coding_agent");
 });
 
 test("a model that calls tools during plain conversation fails the chat probe", async () => {
@@ -355,6 +452,22 @@ test("a model that calls tools during plain conversation fails the chat probe", 
   expect(result.conversation).toBe(false);
   expect(result.agenticCodingEligible).toBe(false);
   expect(result.notes.join(" ")).toMatch(/tool call/i);
+});
+
+test("the plain-conversation probe does not advertise repository tools", async () => {
+  const requests: Array<{ tools?: unknown[]; toolChoice?: unknown }> = [];
+  const provider: ProviderAdapter = {
+    ...fakeHealthQuota("no-tool-advertising"),
+    async *stream(request) {
+      requests.push({ tools: request.tools, toolChoice: request.toolChoice });
+      yield { type: "text.delta", text: "Probe response." };
+      yield { type: "done" };
+    },
+  };
+
+  await probeAgentCapability(provider, "no-tool-advertising");
+
+  expect(requests[0]).toEqual({ tools: [], toolChoice: "none" });
 });
 
 test("a model that never calls the requested tool fails the read probe", async () => {
@@ -482,11 +595,85 @@ test("local model probing attaches evidence to the exact model candidate", async
     },
   );
 
-  expect(result?.agentProbe?.agentCapabilityClass).toBe(
-    "advanced_coding_agent",
-  );
+  expect(result?.agentProbe?.agentCapabilityClass).toBe("coding_agent");
   expect(result?.agentProbe?.agenticCodingEligible).toBe(true);
   expect(result?.agentProbe?.environment?.hardware?.cpuCores).toBe(8);
+});
+
+test("free-cloud probing is explicit and never probes local candidates", async () => {
+  let calls = 0;
+  const provider: ProviderAdapter = {
+    ...fakeHealthQuota("free-cloud"),
+    async *stream() {
+      calls += 1;
+      if (calls === 1) yield { type: "text.delta", text: "Hello" };
+      else if (calls === 2)
+        yield {
+          type: "tool.call",
+          call: {
+            id: "read",
+            name: "ReadFile",
+            arguments: JSON.stringify({ path: "demo.txt" }),
+          },
+        };
+      else if (calls === 3) yield { type: "text.delta", text: "hello" };
+      else if (calls === 4)
+        yield {
+          type: "tool.call",
+          call: {
+            id: "edit",
+            name: "EditFile",
+            arguments: JSON.stringify({
+              path: "demo.txt",
+              oldText: "hello",
+              newText: "hello world",
+            }),
+          },
+        };
+      else if (calls === 6)
+        yield {
+          type: "tool.call",
+          call: { id: "test", name: "RunTests", arguments: "{}" },
+        };
+      else yield { type: "text.delta", text: "Complete." };
+      yield { type: "done" };
+    },
+  };
+  const remoteCandidate: ModelCandidate = {
+    id: "free-cloud/model",
+    providerId: "free-cloud",
+    modelId: "model",
+    displayName: "Free model",
+    source: "free_cloud",
+    capabilities: {
+      tools: true,
+      structuredOutput: true,
+      reasoning: false,
+      vision: false,
+    },
+    free: { status: "verified_free" },
+    privacy: { classification: "zdr_capable", retentionKnown: true },
+    quality: { confidence: "unknown" },
+    health: { state: "healthy" },
+  };
+  const localCandidate: ModelCandidate = {
+    ...remoteCandidate,
+    id: "local/model",
+    providerId: "local",
+    displayName: "Local model",
+    source: "local",
+    privacy: { classification: "local", retentionKnown: true },
+  };
+
+  const [remote, local] = await probeFreeCloudModelCapabilities(
+    [remoteCandidate, localCandidate],
+    [provider],
+    new AbortController().signal,
+  );
+
+  expect(remote?.agentProbe?.agentCapabilityClass).toBe("coding_agent");
+  expect(local?.agentProbe).toBeUndefined();
+  expect(calls).toBeGreaterThan(0);
 });
 
 test("capability probing sends the provider model id instead of the display label", async () => {

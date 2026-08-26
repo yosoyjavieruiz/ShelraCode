@@ -31,6 +31,10 @@ test("phase.changed records an abstract phase for AgentMatrixPulse to read", () 
   expect(state.agentPhase).toBe("discover");
 });
 
+test("a submitted turn immediately exposes an initial agent phase", () => {
+  expect(withTurn().agentPhase).toBe("frame");
+});
+
 test("phase.changed to a non-abstract phase (act) clears agentPhase rather than showing it", () => {
   let state = presentAppEvent(withTurn(), {
     type: "phase.changed",

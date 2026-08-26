@@ -72,3 +72,47 @@ test("context relevance does not promote ignored credential paths", async () => 
   expect(context.prompt).not.toContain("do-not-load");
   expect(context.secretPaths).toContain(".env");
 });
+
+test("context marks coding discovery insufficient when no objective evidence matches", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "localcode-context-"));
+  temporaryRoots.push(root);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(
+    path.join(root, "package.json"),
+    JSON.stringify({ name: "context-fixture" }),
+  );
+  await writeFile(
+    path.join(root, "src", "known.ts"),
+    "export const known = true;\n",
+  );
+
+  const context = await buildRepositoryContext({
+    root,
+    objective: "Fix the nonexistent quantum teleportation subsystem.",
+    maxChars: 12_000,
+  });
+
+  expect(context.relevantMatches).toEqual([]);
+  expect(context.evidenceState).toBe("INSUFFICIENT");
+});
+
+test("direct repository language facts are sufficient when manifests or language evidence exist", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "localcode-context-"));
+  temporaryRoots.push(root);
+  await writeFile(
+    path.join(root, "package.json"),
+    JSON.stringify({ name: "language-fixture" }),
+  );
+  await writeFile(path.join(root, "index.ts"), "export const value = 1;\n");
+
+  const context = await buildRepositoryContext({
+    root,
+    objective: "What programming language is this project using?",
+    maxChars: 12_000,
+  });
+
+  expect(context.evidenceState).toBe("SUFFICIENT");
+  expect(
+    context.snapshot?.manifests.map((manifest) => manifest.path),
+  ).toContain("package.json");
+});

@@ -70,6 +70,7 @@ export function beginTranscriptTurn(
   return {
     ...state,
     activeTurnId: input.turnId,
+    agentPhase: "frame",
     items: [
       ...state.items,
       {

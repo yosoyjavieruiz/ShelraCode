@@ -17,6 +17,8 @@ export type ToolErrorCode =
   | "CONFLICT"
   | "RUNTIME_UNAVAILABLE"
   | "MODEL_ERROR"
+  | "TOOL_BATCH_TOO_LARGE"
+  | "INSUFFICIENT_CONTEXT"
   | "CANCELLED";
 
 export interface ToolErrorOptions {

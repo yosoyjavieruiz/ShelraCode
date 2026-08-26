@@ -1,5 +1,7 @@
 import type { PermissionMode } from "../shared/types.js";
 
+export { commandRequiresNetwork } from "../shared/process-policy.js";
+
 export type ShellRisk = "read" | "execute" | "destructive";
 export type ToolRisk = "read" | "write" | "execute" | "destructive";
 

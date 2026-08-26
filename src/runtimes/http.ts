@@ -87,6 +87,9 @@ export class OpenAICompatibleLocalRuntime implements LocalRuntimeAdapter {
 
         const quantization = record(model?.quantization);
         const capabilities = record(model?.capabilities);
+        const loadedInstances = Array.isArray(model?.loaded_instances)
+          ? model.loaded_instances
+          : [];
         const sizeBytes = finiteNumber(model?.size_bytes);
         const maxContext = finiteNumber(model?.max_context_length);
         const quant = text(quantization?.name) ?? text(model?.quantization);
@@ -120,6 +123,7 @@ export class OpenAICompatibleLocalRuntime implements LocalRuntimeAdapter {
             health: { state: "healthy", latencyMs: 0 },
             local: {
               runtime: this.id,
+              loaded: loadedInstances.length > 0,
               ...(quant ? { quant } : {}),
               ...(architecture ? { architecture } : {}),
               ...(parameters ? { parameters } : {}),

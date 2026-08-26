@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { runCommand } from "../shared/process.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
+import { memoryFactId, type MemoryFact } from "../shared/memory.js";
 
 export interface ProjectManifest {
   path: string;
@@ -23,6 +24,7 @@ export interface InstructionFile {
 export interface RepositorySnapshot {
   cwd: string;
   gitRoot?: string;
+  revision?: string;
   branch?: string;
   topLevelEntries: string[];
   manifests: ProjectManifest[];
@@ -32,6 +34,87 @@ export interface RepositorySnapshot {
   buildFiles: string[];
   instructionFiles: InstructionFile[];
   gitStatus?: string;
+}
+
+/**
+ * Convert deterministic repository observations into bounded semantic memory.
+ * The facts are retrieval hints only: callers must still use the current
+ * snapshot and required file reads as authoritative evidence.
+ */
+export function repositorySnapshotMemoryFacts(
+  snapshot: RepositorySnapshot,
+  repository = snapshot.gitRoot ?? snapshot.cwd,
+  now = new Date().toISOString(),
+): MemoryFact[] {
+  const revision = snapshot.revision;
+  const evidence = (sources: readonly string[]) =>
+    sources.slice(0, 12).map((source) => ({
+      source,
+      ...(revision ? { revision } : {}),
+    }));
+  const facts: MemoryFact[] = [];
+  const manifestSources = snapshot.manifests.map((manifest) => manifest.path);
+  const languageNames = snapshot.languages.map((language) => language.language);
+
+  if (languageNames.length > 0 || manifestSources.length > 0) {
+    facts.push({
+      id: memoryFactId(repository, "semantic", "project-languages"),
+      repository,
+      kind: "semantic",
+      fact: `The repository uses ${languageNames.join(", ") || "an undetermined language"}; manifests: ${manifestSources.join(", ") || "none detected"}.`,
+      evidence: evidence(
+        manifestSources.length > 0
+          ? manifestSources
+          : ["source-extension-scan"],
+      ),
+      provenance: "observed",
+      confidence: manifestSources.length > 0 ? 0.95 : 0.8,
+      scope: ["repository", "language"],
+      tags: [
+        "language",
+        ...languageNames.map((language) => language.toLowerCase()),
+      ],
+      createdAt: now,
+      lastValidatedAt: now,
+    });
+  }
+
+  if (snapshot.sourceRoots.length > 0 || snapshot.testRoots.length > 0) {
+    facts.push({
+      id: memoryFactId(repository, "semantic", "project-layout"),
+      repository,
+      kind: "semantic",
+      fact: `Source roots: ${snapshot.sourceRoots.join(", ") || "none detected"}; test roots: ${snapshot.testRoots.join(", ") || "none detected"}.`,
+      evidence: evidence([...snapshot.sourceRoots, ...snapshot.testRoots]),
+      provenance: "observed",
+      confidence: 0.9,
+      scope: ["repository", "layout"],
+      tags: ["source", "tests"],
+      createdAt: now,
+      lastValidatedAt: now,
+    });
+  }
+
+  const commandSources = snapshot.manifests.filter(
+    (manifest) => manifest.scripts.length > 0,
+  );
+  if (commandSources.length > 0) {
+    facts.push({
+      id: memoryFactId(repository, "semantic", "project-commands"),
+      repository,
+      kind: "semantic",
+      fact: `Project command scripts are available in ${commandSources.map((manifest) => `${manifest.path}: ${manifest.scripts.join(", ")}`).join("; ")}.`,
+      evidence: evidence(commandSources.map((manifest) => manifest.path)),
+      provenance: "observed",
+      confidence: 0.9,
+      scope: ["repository", "commands"],
+      tags: ["commands", "verification"],
+      createdAt: now,
+      lastValidatedAt: now,
+    });
+  }
+
+  return facts;
 }
 
 const manifestKinds: Record<string, string> = {
@@ -224,26 +307,23 @@ export async function inspectRepositorySnapshot(
 
   if (signal?.aborted)
     throw new DOMException("Repository snapshot aborted", "AbortError");
+  const gitRoot = await gitValue(
+    absoluteRoot,
+    ["rev-parse", "--show-toplevel"],
+    logger,
+  );
+  const revision = await gitValue(absoluteRoot, ["rev-parse", "HEAD"], logger);
+  const branch = await gitValue(
+    absoluteRoot,
+    ["branch", "--show-current"],
+    logger,
+  );
+  const gitStatus = await gitValue(absoluteRoot, ["status", "--short"], logger);
   return {
     cwd: absoluteRoot,
-    ...((await gitValue(absoluteRoot, ["rev-parse", "--show-toplevel"], logger))
-      ? {
-          gitRoot: await gitValue(
-            absoluteRoot,
-            ["rev-parse", "--show-toplevel"],
-            logger,
-          ),
-        }
-      : {}),
-    ...((await gitValue(absoluteRoot, ["branch", "--show-current"], logger))
-      ? {
-          branch: await gitValue(
-            absoluteRoot,
-            ["branch", "--show-current"],
-            logger,
-          ),
-        }
-      : {}),
+    ...(gitRoot ? { gitRoot } : {}),
+    ...(revision ? { revision } : {}),
+    ...(branch ? { branch } : {}),
     topLevelEntries,
     manifests,
     languages,
@@ -251,14 +331,6 @@ export async function inspectRepositorySnapshot(
     testRoots,
     buildFiles,
     instructionFiles,
-    ...((await gitValue(absoluteRoot, ["status", "--short"], logger))
-      ? {
-          gitStatus: await gitValue(
-            absoluteRoot,
-            ["status", "--short"],
-            logger,
-          ),
-        }
-      : {}),
+    ...(gitStatus ? { gitStatus } : {}),
   };
 }

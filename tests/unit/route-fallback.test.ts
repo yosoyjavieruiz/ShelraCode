@@ -284,3 +284,121 @@ test("an incomplete model can escalate before it mutates the workspace", async (
   expect(attempts).toEqual([first.id, second.id]);
   expect(result.outcome?.status).toBe("completed");
 });
+
+test("progressive coding fallback never downgrades to a read-only model", () => {
+  const coding = candidate({
+    id: "local/coding",
+    providerId: "lm-studio",
+    agentProbe: {
+      conversation: true,
+      readTool: true,
+      multiTurnTools: true,
+      agenticCodingEligible: true,
+      agentCapabilityClass: "coding_agent",
+      notes: [],
+    },
+  });
+  const reader = candidate({
+    id: "local/reader",
+    providerId: "llama.cpp",
+    agentProbe: {
+      conversation: true,
+      readTool: true,
+      multiTurnTools: true,
+      agenticCodingEligible: false,
+      agentCapabilityClass: "workspace_reader",
+      notes: [],
+    },
+  });
+  const route = {
+    ...request([coding, reader]),
+    task: {
+      ...request([coding, reader]).task,
+      requiredCapability: "advanced_coding_agent" as const,
+    },
+    execution: {
+      strategy: "progressive" as const,
+      boundedScope: ["src/router/router.ts"],
+    },
+  };
+
+  expect(
+    selectFallbackRoute(route, [coding.id], {
+      code: "AGENT_INCOMPLETE",
+      message: "the coding model stopped before acting",
+      mutationOccurred: false,
+    }).selected,
+  ).toBeUndefined();
+});
+
+test("progressive incomplete fallback does not retry an equal or weaker coding route", () => {
+  const first = candidate({
+    id: "local/qwen-4b",
+    providerId: "lm-studio",
+    quality: { coding: 0.88, toolUse: 0.88, confidence: "measured" },
+  });
+  const weaker = candidate({
+    id: "local/qwen-2b",
+    providerId: "lm-studio",
+    quality: { coding: 0.88, toolUse: 0.88, confidence: "measured" },
+  });
+  const route = {
+    ...request([first, weaker]),
+    task: {
+      ...request([first, weaker]).task,
+      requiredCapability: "advanced_coding_agent" as const,
+    },
+    execution: {
+      strategy: "progressive" as const,
+      boundedScope: ["src/router/router.ts"],
+    },
+  };
+
+  expect(
+    selectFallbackRoute(route, [first.id], {
+      code: "AGENT_INCOMPLETE",
+      message: "the first coding route made no verified progress",
+      mutationOccurred: false,
+    }).selected,
+  ).toBeUndefined();
+});
+
+test("progressive incomplete fallback may escalate to a stronger measured route", () => {
+  const first = candidate({
+    id: "local/qwen-4b",
+    providerId: "lm-studio",
+    quality: { coding: 0.72, toolUse: 0.72, confidence: "measured" },
+  });
+  const stronger = candidate({
+    id: "local/qwen-7b",
+    providerId: "lm-studio",
+    quality: { coding: 0.92, toolUse: 0.92, confidence: "measured" },
+    agentProbe: {
+      conversation: true,
+      readTool: true,
+      multiTurnTools: true,
+      agenticCodingEligible: true,
+      agentCapabilityClass: "advanced_coding_agent",
+      notes: [],
+    },
+  });
+  const route = {
+    ...request([first, stronger]),
+    task: {
+      ...request([first, stronger]).task,
+      requiredCapability: "advanced_coding_agent" as const,
+    },
+    execution: {
+      strategy: "progressive" as const,
+      boundedScope: ["src/router/router.ts"],
+    },
+  };
+
+  expect(
+    selectFallbackRoute(route, [first.id], {
+      code: "AGENT_INCOMPLETE",
+      message: "the first coding route made no verified progress",
+      mutationOccurred: false,
+    }).selected?.candidate.id,
+  ).toBe(stronger.id);
+});

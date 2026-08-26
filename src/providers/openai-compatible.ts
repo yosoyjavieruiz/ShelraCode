@@ -13,6 +13,7 @@ import type {
   ToolCall,
   Usage,
 } from "./types.js";
+import { normalizeProviderEvents } from "./stream-normalizer.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -30,6 +31,16 @@ function numberValue(value: unknown): number | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function toolArgumentsFragment(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
 }
 
 function providerError(
@@ -304,7 +315,7 @@ export class GenericOpenAICompatibleProvider implements ProviderAdapter {
         };
         return;
       }
-      yield* this.readStream(response.body, signal);
+      yield* normalizeProviderEvents(this.readStream(response.body, signal));
       this.logger?.info("provider.stream.completed", {
         modelId: request.modelId,
         durationMs: Math.round(performance.now() - started),
@@ -436,7 +447,7 @@ export class GenericOpenAICompatibleProvider implements ProviderAdapter {
         const id = stringValue(tool?.id) ?? previous?.id;
         const name = stringValue(fn?.name) ?? previous?.name;
         const args =
-          (previous?.arguments ?? "") + (stringValue(fn?.arguments) ?? "");
+          (previous?.arguments ?? "") + toolArgumentsFragment(fn?.arguments);
         if (id && name)
           pendingToolCalls.set(index, { id, name, arguments: args });
       }

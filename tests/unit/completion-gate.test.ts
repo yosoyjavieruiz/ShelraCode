@@ -80,3 +80,18 @@ test("coding work cannot complete when explicit criteria remain unsatisfied", ()
   expect(decision.canComplete).toBe(false);
   expect(decision.reasons).toContain("success criteria are not satisfied");
 });
+
+test("coding work cannot claim verification when the host found no check", () => {
+  const decision = evaluateCompletionGate({
+    ...base,
+    mode: "coding",
+    mutationOccurred: true,
+    verificationState: "unavailable",
+    evidenceCount: 2,
+  });
+
+  expect(decision.canComplete).toBe(false);
+  expect(decision.reasons).toContain(
+    "required verification is unavailable; completion cannot be claimed as verified",
+  );
+});

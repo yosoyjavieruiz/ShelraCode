@@ -1,5 +1,6 @@
 import type { TurnMode } from "./turn-policy.js";
 import type { VerificationCommand } from "./verification-plan.js";
+import type { TaskGraph } from "./task-graph.js";
 
 export type AgentPhase =
   | "frame"
@@ -97,6 +98,8 @@ export interface AgentTaskLedger {
   hypotheses: Hypothesis[];
   plan?: TaskPlan;
   verificationPlan: VerificationCommand[];
+  /** Controller-owned long-horizon execution graph; model context is only a view. */
+  taskGraph?: TaskGraph;
   actions: AgentAction[];
   filesRead: string[];
   filesChanged: string[];

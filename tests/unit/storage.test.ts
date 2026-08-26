@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { LocalCodeDatabase } from "../../src/storage/database.js";
 import { createTaskLedger, setTaskPhase } from "../../src/agent/task-state.js";
+import { createTaskEpisodeMemoryFact } from "../../src/shared/memory.js";
 
 test("storage migrations are idempotent and preserve settings", () => {
   const storage = new LocalCodeDatabase(":memory:");
@@ -12,7 +13,7 @@ test("storage migrations are idempotent and preserve settings", () => {
 
   expect(storage.getSetting("routing.mode")).toBe("strict-zero");
   expect(storage.getSetting("privacy.policy")).toBe("private");
-  expect(storage.schemaVersion()).toBe(3);
+  expect(storage.schemaVersion()).toBe(4);
 
   storage.close();
 });
@@ -41,6 +42,42 @@ test("storage caches exact model capability probe results", () => {
   expect(
     storage.getModelCapability("lm-studio", "fixture-model")?.version,
   ).toBe(1);
+  storage.close();
+});
+
+test("storage persists typed semantic and episodic memory facts", () => {
+  const storage = new LocalCodeDatabase(":memory:");
+  const semantic = {
+    id: "semantic:repo:language",
+    repository: "repo",
+    kind: "semantic" as const,
+    fact: "The repository uses TypeScript.",
+    evidence: [{ source: "package.json", revision: "abc" }],
+    provenance: "observed" as const,
+    confidence: 0.95,
+    scope: ["repository", "language"],
+    tags: ["typescript"],
+    createdAt: "2026-08-25T00:00:00.000Z",
+    lastValidatedAt: "2026-08-25T00:00:00.000Z",
+  };
+  storage.saveMemoryFact(semantic);
+  storage.saveMemoryFact(
+    createTaskEpisodeMemoryFact({
+      repository: "repo",
+      taskId: "task-episode",
+      objective: "Fix the TypeScript auth test",
+      status: "completed",
+      phase: "complete",
+      verified: true,
+      filesChanged: ["src/auth.ts"],
+      verification: [{ command: "bun test", status: "passed" }],
+    }),
+  );
+
+  expect(storage.listMemoryFacts("repo", "semantic")).toEqual([semantic]);
+  expect(storage.listMemoryFacts("repo", "episodic")).toHaveLength(1);
+  storage.invalidateMemoryFact(semantic.id);
+  expect(storage.listMemoryFacts("repo", "semantic")).toHaveLength(0);
   storage.close();
 });
 

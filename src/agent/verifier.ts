@@ -7,6 +7,7 @@ export interface VerificationIssue {
     | "NO_EVIDENCE"
     | "NO_MUTATION"
     | "VERIFICATION_MISSING"
+    | "VERIFICATION_UNAVAILABLE"
     | "VERIFICATION_FAILED"
     | "FINAL_REVIEW_MISSING"
     | "BLOCKER_PRESENT"
@@ -21,6 +22,7 @@ export interface IndependentVerificationInput {
   ledger: AgentTaskLedger;
   verificationRequired: boolean;
   verificationCommands?: VerificationCommand[];
+  verificationState?: "not_required" | "available" | "unavailable";
   finalReviewPerformed: boolean;
   userWorkPreserved: boolean;
 }
@@ -65,6 +67,13 @@ export function independentlyVerifyTask(
     });
   if (input.verificationRequired) {
     const requiredCommands = input.verificationCommands ?? [];
+    if (input.verificationState === "unavailable")
+      issues.push({
+        code: "VERIFICATION_UNAVAILABLE",
+        message:
+          "No host-owned verification command is available for this coding task.",
+        severity: "error",
+      });
     if (requiredCommands.length > 0) {
       for (const required of requiredCommands) {
         const latest = [...input.ledger.verificationRuns]

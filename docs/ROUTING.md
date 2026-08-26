@@ -7,13 +7,14 @@
 ## Gate order
 
 1. Privacy hard gate.
-2. Cost hard gate.
-3. Required executable-tool gate. Empirical capability evidence is a weighted
-   selection signal, not a hard stop by itself.
-4. Usable context gate with safety margin.
-5. Health/circuit-breaker gate.
-6. Quota freshness/headroom gate.
-7. Configurable score.
+2. Required capability admission gate.
+3. Cost/billing hard gate (`strict-zero` excludes paid and unverified free
+   routes).
+4. Required executable-tool gate.
+5. Usable context gate with safety margin.
+6. Health/circuit-breaker gate.
+7. Quota freshness/headroom gate.
+8. Configurable score and selection.
 
 No score can revive a rejected candidate.
 
@@ -46,10 +47,20 @@ The initial weights are configurable and deliberately heuristic:
 ## Local-first
 
 Search, file inspection, deterministic edits, tests, lint/typecheck and Git
-inspection remain local. Capability evidence influences score and fallback
-preference, but it is not an independent reason to stop before attempting an
-otherwise executable route. The agent loop, host verification, and bounded
-fallback still decide whether the selected model actually completes the task.
+inspection remain local. Capability evidence is an admission requirement
+before score selection. A model may be useful for a smaller bounded role, but
+no score can promote a `chat_only` model into `advanced_coding_agent`, and
+missing evidence cannot authorize a non-chat autonomous role. The agent loop,
+host verification, and bounded work units decide whether the admitted model
+actually completes the task.
+
+For complex coding objectives without a host-proven scope, the controller uses
+a read-only `discovery` stage before progressive coding. That stage may select
+a local `chat_only` model only with `toolNeed=false` and no mutation tools; it
+validates any proposed paths against the workspace, then re-runs routing with
+`progressive` and requires a measured `coding_agent`. This prevents the UI from
+turning a safe preparation step into `STOP · ASK USER` while preserving the
+mutation capability gate.
 
 ## Explanation
 

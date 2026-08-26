@@ -14,19 +14,17 @@ pass:
 
 ## Current routing policy — 2026-08-25
 
-Probe results remain valuable reproducible evidence, but the resulting class
-is not an unconditional route veto. The router can attempt a policy-valid
-local candidate with executable tools even when the class is `chat_only`,
-`workspace_reader`, or unmeasured. The class affects score and fallback
-preference; the agent loop, host verification, and completion gate decide
-whether the task actually succeeded. The live probe and doctor reports below
-remain model-behavior evidence, not a claim of frontier parity.
+Probe results are reproducible evidence and a hard admission boundary. The
+router rejects a candidate when its measured class is below the required task
+role or when the required probe is missing. The class is scored only after
+this gate. A bounded task may therefore be eligible for a lower role than a
+complex refactor, but no model is silently promoted from `chat_only` to a
+coding role.
 
 The result is persisted on `ModelCandidate.agentProbe` during capability-aware
-discovery and is consumed by the router as a score/fallback signal. Unprobed
-local candidates are reported as unmeasured rather than silently claimed to be
-coding agents, but they are not rejected solely for lacking a probe when their
-tools and policy boundary are executable.
+discovery. Unprobed local or free-cloud candidates are reported as unmeasured
+and remain eligible only for tasks whose policy does not require a measured
+agentic role. This is an execution boundary, not a claim of frontier parity.
 
 The current probe intentionally distinguishes deterministic harness evidence
 from live-model evidence. It classifies `chat_only`, `workspace_reader`,

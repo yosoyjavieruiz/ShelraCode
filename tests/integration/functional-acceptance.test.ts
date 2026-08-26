@@ -348,7 +348,13 @@ test("a failing command cannot be reported as completed", async () => {
     ],
     { stopAfter: true },
   );
-  const { result } = await runTurn("Run the tests.", root, provider, undefined, events);
+  const { result } = await runTurn(
+    "Run the tests.",
+    root,
+    provider,
+    undefined,
+    events,
+  );
 
   expect(result.status).toBe("blocked");
   expect(result.verified).toBe(false);
@@ -582,6 +588,49 @@ test("small edit: reads then edits the right file and verifies", async () => {
   expect(content).toContain("hello world");
 });
 
+test("mutation is blocked until a relevant read supplies evidence", async () => {
+  const root = await createFunctionalFixtureRepo();
+  const provider = createScriptedProvider(
+    [
+      toolTurn("write-before-read", "WriteFile", {
+        path: "src/message.ts",
+        content: 'export const greeting = "hello world";\n',
+      }),
+      toolTurn("read-1", "ReadFile", { path: "src/message.ts" }),
+      toolTurn("edit-1", "EditFile", {
+        path: "src/message.ts",
+        oldText: '"hello"',
+        newText: '"hello world"',
+      }),
+      textTurn("Updated the greeting after reading the current file."),
+      textTurn("Updated and verified the greeting."),
+    ],
+    { stopAfter: true },
+  );
+  const { result } = await runTurn(
+    'Cambia el texto "hello" por "hello world" en src/message.ts.',
+    root,
+    provider,
+  );
+
+  expect(result.toolRuns[0]).toEqual(
+    expect.objectContaining({
+      tool: "WriteFile",
+      ok: false,
+      code: "INSUFFICIENT_CONTEXT",
+    }),
+  );
+  expect(result.toolRuns.map((run) => run.tool)).toEqual([
+    "WriteFile",
+    "ReadFile",
+    "EditFile",
+  ]);
+  expect(result.status).toBe("completed");
+  expect(
+    await readFile(path.join(root, "src", "message.ts"), "utf8"),
+  ).toContain("hello world");
+});
+
 test("feature plus tests creates both implementation and regression coverage", async () => {
   const root = await createFunctionalFixtureRepo();
   const provider = createScriptedProvider(
@@ -666,6 +715,11 @@ test("file-versus-directory recovery switches from ListFiles to ReadFile", async
     expect.objectContaining({ code: "PATH_IS_FILE", recoverable: true }),
   );
   expect(result.toolRuns[1]?.ok).toBe(true);
+  const recoveryTools = provider.requests[1]?.tools?.map(
+    (tool) => (tool as { function?: { name?: string } }).function?.name,
+  );
+  expect(recoveryTools).toContain("ReadFile");
+  expect(recoveryTools).not.toContain("ListFiles");
   expect(result.status).toBe("completed");
 });
 

@@ -25,12 +25,19 @@ import type { HardwareInspection } from "../hardware/types.js";
 import type { ProviderStatus } from "../providers/registry.js";
 import type { SessionSummary } from "../storage/database.js";
 import { verifyStructuralCodingCriteria } from "../agent/verification-criteria.js";
+import type { AgentTaskLedger } from "../agent/task-state.js";
+import { runCodeReview } from "../agent/code-review-agent.js";
 import {
   extractObjectivePaths,
   reviewCodingObjective,
 } from "../agent/objective-review.js";
-import { inferProgressiveTargets } from "../agent/progressive-plan.js";
+import {
+  selectProgressiveTargets,
+  verifiedPreparationTargets,
+} from "../agent/progressive-plan.js";
 import { recommendedAgentContextChars } from "../agent/context-budget.js";
+import { repositorySnapshotMemoryFacts } from "../context/repository-snapshot.js";
+import { createTaskEpisodeMemoryFact } from "../shared/memory.js";
 import { AppEventBus } from "../shared/events.js";
 import { CircuitBreaker } from "../providers/circuit-breaker.js";
 import { persistRepositorySettings } from "../config/settings.js";
@@ -99,6 +106,7 @@ import {
 type AppScreen = "conversation" | "setup" | CenterScreen;
 type Overlay =
   "none" | "palette" | "slash" | "context-picker" | "model-picker" | "approval";
+type RouteExecutionStrategy = "direct" | "progressive" | "discovery";
 
 interface ActiveApproval {
   description: string;
@@ -919,11 +927,24 @@ export function AppShell(
         } else if (target === "context") {
           const { buildRepositoryContext } =
             await import("../context/repository.js");
+          const repository = process.cwd();
           const context = await buildRepositoryContext({
-            root: process.cwd(),
+            root: repository,
             objective: activeObjective() || "inspect this repository",
+            memoryFacts: controlPlane.db.listMemoryFacts(
+              repository,
+              "semantic",
+            ),
             logger: controlPlane.logger,
           });
+          if (context.snapshot) {
+            for (const fact of repositorySnapshotMemoryFacts(
+              context.snapshot,
+              repository,
+            )) {
+              controlPlane.db.saveMemoryFact(fact);
+            }
+          }
           setContextFiles(context.files);
           show("context", [
             `Files discovered  ${context.files.length}`,
@@ -1057,7 +1078,11 @@ export function AppShell(
         { createAgentTraceRecorder },
         { workspaceTools },
         { CheckpointService },
-        { resolveTurnMode, resolveTurnPolicyForObjective },
+        {
+          requiredCapabilityForTurn,
+          resolveTurnMode,
+          resolveTurnPolicyForObjective,
+        },
       ] = await Promise.all([
         import("../cli/control-plane.js"),
         import("../router/task-analysis.js"),
@@ -1099,6 +1124,9 @@ export function AppShell(
         const turnMode = resolveTurnMode(objective, analyzeTask(objective));
         const turnPolicy = resolveTurnPolicyForObjective(turnMode, objective);
         const needsRepositoryContext = turnPolicy.repositoryRead;
+        let semanticMemoryFacts = needsRepositoryContext
+          ? controlPlane.db.listMemoryFacts(process.cwd(), "semantic")
+          : [];
         if (needsRepositoryContext) setNotice("Preparing repository context…");
         // Build a bounded routing context first. The selected model is not
         // known until discovery/routing completes, so this snapshot is only
@@ -1111,6 +1139,7 @@ export function AppShell(
               maxChars: 12_000,
               signal,
               explicitPaths: contextFiles(),
+              memoryFacts: semanticMemoryFacts,
               logger: taskLogger,
             })
           : {
@@ -1120,7 +1149,21 @@ export function AppShell(
               relevantMatches: [],
               containsHighConfidenceSecret: false,
               secretPaths: [],
+              evidenceState: "SUFFICIENT" as const,
+              searchBackend: "not_needed" as const,
             };
+        if (routingContext.snapshot) {
+          for (const fact of repositorySnapshotMemoryFacts(
+            routingContext.snapshot,
+            process.cwd(),
+          )) {
+            controlPlane.db.saveMemoryFact(fact);
+          }
+          semanticMemoryFacts = controlPlane.db.listMemoryFacts(
+            process.cwd(),
+            "semantic",
+          );
+        }
         trace.record({
           taskId: turnId,
           type: "context.built",
@@ -1129,6 +1172,8 @@ export function AppShell(
             files: routingContext.files.length,
             instructions: routingContext.instructions?.length ?? 0,
             objectiveMatches: routingContext.relevantMatches?.length ?? 0,
+            evidenceState: routingContext.evidenceState,
+            searchBackend: routingContext.searchBackend,
             containsHighConfidenceSecret:
               routingContext.containsHighConfidenceSecret,
           },
@@ -1140,34 +1185,68 @@ export function AppShell(
           turnMode === "coding" ? selectVerificationPlan(projectCommands) : [];
         const analyzedTask = analyzeTask(objective);
         const explicitObjectivePaths = extractObjectivePaths(objective);
-        const inferredProgressiveTargets =
+        const progressiveTargets =
           analyzedTask.complexity >= 0.7
-            ? inferProgressiveTargets(
+            ? selectProgressiveTargets(
                 objective,
+                explicitObjectivePaths,
                 routingContext.relevantMatches ?? [],
               )
-            : [];
-        const progressiveTargets = [
-          ...new Set([
-            ...explicitObjectivePaths,
-            ...inferredProgressiveTargets,
-          ]),
-        ].slice(0, 8);
+            : explicitObjectivePaths.slice(0, 8);
         const requiredCapability: AgentCapabilityClass =
-          turnPolicy.repositoryRead
-            ? analyzedTask.requiredCapability === "advanced_coding_agent" ||
-              analyzedTask.requiredCapability === "coding_agent"
-              ? analyzedTask.requiredCapability
-              : "workspace_reader"
-            : "chat_only";
-        const task = {
-          ...analyzedTask,
-          toolNeed: turnPolicy.allowedTools.length > 0,
-          requiredCapability,
-        };
+          requiredCapabilityForTurn(
+            turnMode,
+            turnPolicy.repositoryRead,
+            analyzedTask,
+          );
+        // A complex parent objective does not require one frontier-class
+        // model when the host has already localized a bounded mutation scope.
+        // The route remains a coding route, and runAgent enforces one target
+        // at a time with checkpoints, verification and the final completion
+        // gate. This is the controller-owned decomposition that lets an
+        // measured local coding_agent contribute without relabelling it as
+        // advanced_coding_agent.
+        const verifiedProgressiveTargets =
+          turnMode === "coding"
+            ? await verifiedPreparationTargets(
+                process.cwd(),
+                objective,
+                progressiveTargets,
+              )
+            : [];
+        const verifiedCodingScope =
+          routingContext.evidenceState === "SUFFICIENT" &&
+          verifiedProgressiveTargets.length > 0;
+        // Any coding task without a host-proven scope must enter a safe local
+        // discovery stage. The previous condition only covered the
+        // advanced_coding_agent branch, so an ordinary coding_agent task could
+        // still fall through to STOP · ASK USER before localization. Discovery
+        // never receives mutation tools; its only job is to produce validated
+        // scope for the next route selection.
+        const probeCapability =
+          turnMode === "coding" ? "chat_only" : requiredCapability;
+        // Local capability probes execute a complete, disposable tool loop.
+        // Thirty seconds is shorter than the observed cold/contended latency
+        // of the loaded local models, so a transport timeout was being turned
+        // into "no coding route" before the router ever saw behavioral
+        // evidence. Keep ordinary discovery fast, but give a coding probe a
+        // real budget; the probe itself remains bounded and cancellable.
         const catalog = await controlPlane.discoverModels(
-          AbortSignal.timeout(turnPolicy.repositoryRead ? 30_000 : 2_000),
-          { probeLocalCapabilities: turnPolicy.repositoryRead },
+          AbortSignal.timeout(
+            turnPolicy.repositoryRead
+              ? turnMode === "coding"
+                ? 120_000
+                : 30_000
+              : 2_000,
+          ),
+          {
+            probeLocalCapabilities: turnPolicy.repositoryRead,
+            probeFreeCloudCapabilities:
+              turnMode === "coding" &&
+              controlPlane.settings.privacy !== "local_only",
+            requiredCapability: probeCapability,
+            preferredModelId: activeModelId(),
+          },
         );
         setModelData(catalog);
         setQuotas(catalog.quotas);
@@ -1177,9 +1256,8 @@ export function AppShell(
         const selectedModel = activeModelId()
           ? catalog.models.find((model) => model.id === activeModelId())
           : undefined;
-        const candidates = selectedModel ? [selectedModel] : catalog.models;
         const providerForCandidate = (
-          candidate: (typeof candidates)[number],
+          candidate: import("../shared/types.js").ModelCandidate,
         ) => {
           const runtime = catalog.runtime.adapters.find(
             (adapter) => adapter.id === candidate.providerId,
@@ -1194,29 +1272,59 @@ export function AppShell(
         // Recommendations remain visible in the catalog, but only adapters
         // that can execute now may enter the route decision. This keeps an
         // advisory llmfit row from becoming a selected-but-unrunnable route.
-        const executableCandidates = candidates.filter((candidate) =>
+        // A manually selected model is a preference, not a capability or
+        // privacy bypass. Keep the complete executable catalog available so
+        // an ineligible chat-only selection cannot suppress an eligible local
+        // or verified-free fallback.
+        const executableCandidates = catalog.models.filter((candidate) =>
           Boolean(providerForCandidate(candidate)),
         );
-        const hasAdvancedCodingCandidate = executableCandidates.some(
-          (candidate) =>
-            candidate.agentProbe?.agentCapabilityClass ===
-            "advanced_coding_agent",
+        const hasMeasuredCodingRoute = executableCandidates.some(
+          (candidate) => {
+            const capability = candidate.agentProbe?.agentCapabilityClass;
+            return (
+              capability === "coding_agent" ||
+              capability === "advanced_coding_agent"
+            );
+          },
         );
-        const progressiveCodingFallback =
+        // Capability is a hard admission gate for mutation. If the current
+        // local catalog has no measured coding route, keep the task alive in
+        // a read-only preparation stage instead of surfacing STOP before the
+        // host can gather better evidence.
+        const progressiveExecution =
           turnMode === "coding" &&
-          analyzedTask.requiredCapability === "advanced_coding_agent" &&
-          !hasAdvancedCodingCandidate &&
-          progressiveTargets.length > 1 &&
-          executableCandidates.some(
-            (candidate) =>
-              candidate.agentProbe?.agentCapabilityClass === "workspace_reader",
-          );
-        const effectiveTask = progressiveCodingFallback
-          ? {
-              ...task,
-              requiredCapability: "workspace_reader" as const,
-            }
-          : task;
+          requiredCapability === "advanced_coding_agent" &&
+          verifiedCodingScope;
+        const directCodingExecution =
+          turnMode === "coding" &&
+          requiredCapability !== "advanced_coding_agent" &&
+          verifiedCodingScope &&
+          hasMeasuredCodingRoute;
+        const discoveryExecution =
+          turnMode === "coding" &&
+          !progressiveExecution &&
+          !directCodingExecution;
+        const routeCapability = progressiveExecution
+          ? "coding_agent"
+          : discoveryExecution
+            ? "chat_only"
+            : requiredCapability;
+        const task = {
+          ...analyzedTask,
+          toolNeed: discoveryExecution
+            ? false
+            : turnPolicy.allowedTools.length > 0,
+          requiredCapability,
+        };
+        // Capability is an admission gate. Progressive execution is the only
+        // bounded exception: the parent still requires advanced coding, while
+        // the route request explicitly authorizes one host-scoped work unit.
+        // A measured coding_agent is preferred, but a local chat_only model is
+        // still allowed through the router's host-scaffolded fallback once the
+        // controller has proven the scope. This prevents the old
+        // chat_only -> STOP path without pretending that the model is advanced.
+        const effectiveTask = task;
         const routeRequest = {
           now: new Date(),
           task: effectiveTask,
@@ -1227,6 +1335,17 @@ export function AppShell(
             Math.ceil(routingContext.prompt.length / 4),
           ),
           candidates: executableCandidates,
+          preferredCandidateId: selectedModel?.id,
+          execution: {
+            strategy: (progressiveExecution
+              ? "progressive"
+              : discoveryExecution
+                ? "discovery"
+                : "direct") as RouteExecutionStrategy,
+            ...(progressiveExecution
+              ? { boundedScope: verifiedProgressiveTargets }
+              : {}),
+          },
           quotas: catalog.quotas,
           circuitBreaker: routeCircuitBreaker,
           containsHighConfidenceSecret:
@@ -1241,9 +1360,13 @@ export function AppShell(
             selected: decision.selected?.candidate.id ?? "STOP",
             provider: decision.selected?.candidate.providerId ?? "none",
             requiredCapability: effectiveTask.requiredCapability,
-            ...(progressiveCodingFallback
-              ? { mode: "progressive_coding_fallback" }
-              : {}),
+            admissionCapability: routeCapability,
+            executionStrategy: discoveryExecution
+              ? "discovery"
+              : progressiveExecution
+                ? "progressive"
+                : "direct",
+            boundedScopeCount: verifiedProgressiveTargets.length,
             routingMode: controlPlane.settings.routingMode,
           },
         });
@@ -1276,7 +1399,24 @@ export function AppShell(
         );
         const runSelectedAgent = async (
           selected: (typeof executableCandidates)[number],
+          strategy: RouteExecutionStrategy = discoveryExecution
+            ? "discovery"
+            : progressiveExecution
+              ? "progressive"
+              : "direct",
+          boundedScope: readonly string[] = verifiedProgressiveTargets,
         ) => {
+          const executionMode = strategy === "discovery" ? "plan" : turnMode;
+          const executionPolicy = resolveTurnPolicyForObjective(
+            executionMode,
+            objective,
+          );
+          const executionTools =
+            strategy === "discovery" && !selected.capabilities.tools
+              ? []
+              : workspaceTools.filter((tool) =>
+                  executionPolicy.allowedTools.includes(tool.name),
+                );
           const runtime = catalog.runtime.adapters.find(
             (adapter) => adapter.id === selected.providerId,
           );
@@ -1296,9 +1436,10 @@ export function AppShell(
           setNotice(
             `Running ${selected.providerId} · ${selected.displayName}…`,
           );
+          if (strategy === "discovery") setNotice("Localizing task...");
           const activeContextBudget = recommendedAgentContextChars(
             selected,
-            turnMode,
+            executionMode,
             analyzedTask.complexity,
           );
           const agentContext = needsRepositoryContext
@@ -1315,6 +1456,7 @@ export function AppShell(
                 signal,
                 snapshot: routingContext.snapshot,
                 explicitPaths: contextFiles(),
+                memoryFacts: semanticMemoryFacts,
                 logger: taskLogger,
               })
             : routingContext;
@@ -1326,6 +1468,8 @@ export function AppShell(
               files: agentContext.files.length,
               instructions: agentContext.instructions?.length ?? 0,
               objectiveMatches: agentContext.relevantMatches?.length ?? 0,
+              evidenceState: agentContext.evidenceState,
+              searchBackend: agentContext.searchBackend,
               activeContextBudget,
               executionContextChars: agentContext.prompt.length,
             },
@@ -1338,11 +1482,11 @@ export function AppShell(
                 objective,
                 root: process.cwd(),
                 candidate: selected,
-                mode: turnMode,
-                ...(progressiveCodingFallback
-                  ? { stagedPaths: progressiveTargets }
+                mode: executionMode,
+                ...(executionMode === "coding" && boundedScope.length > 0
+                  ? { stagedPaths: [...boundedScope] }
                   : {}),
-                ...(turnMode === "coding"
+                ...(executionMode === "coding"
                   ? {
                       successCriteria: [
                         "The user's concrete coding objective is satisfied and its relevant files or areas are covered.",
@@ -1354,33 +1498,49 @@ export function AppShell(
                 repositoryPolicy: controlPlane.settings.privacy,
                 permissionMode: controlPlane.settings.permissionMode,
                 context: agentContext.prompt || undefined,
+                contextEvidenceState: agentContext.evidenceState,
                 containsHighConfidenceSecret:
                   agentContext.containsHighConfidenceSecret,
-                verificationCommand: verificationPlan[0]?.command,
-                verificationCommands: verificationPlan,
+                verificationCommand:
+                  executionMode === "coding"
+                    ? verificationPlan[0]?.command
+                    : undefined,
+                verificationCommands:
+                  executionMode === "coding" ? verificationPlan : [],
+                verificationPolicy:
+                  executionMode === "coding"
+                    ? verificationPlan.length > 0
+                      ? "required"
+                      : "unavailable"
+                    : "not_required",
                 // Coding work is a multi-step execution, not a single chat
                 // response. Keep conversation/read-only turns short, while
                 // giving staged local agents enough turns to read, mutate,
                 // verify, recover, and review without imposing an inference
                 // quota on the user.
                 maxTurns:
-                  turnMode === "coding"
+                  executionMode === "coding"
                     ? Math.max(16, Math.ceil(analyzedTask.complexity * 32))
                     : 8,
                 contextBudgetChars: activeContextBudget,
-                systemPromptProfile: turnPolicy.systemPromptProfile,
+                systemPromptProfile: executionPolicy.systemPromptProfile,
               },
               {
                 provider,
-                tools: workspaceTools.filter((tool) =>
-                  turnPolicy.allowedTools.includes(tool.name),
-                ),
-                toolChoice: turnPolicy.toolChoice,
+                tools: executionTools,
+                toolChoice:
+                  executionTools.length > 0
+                    ? executionPolicy.toolChoice
+                    : "none",
                 trace,
                 logger: taskLogger,
-                events: appEvents,
-                persistTask: (ledger) =>
-                  controlPlane.db.saveAgentTask(ledger, sessionId),
+                ...(strategy === "discovery"
+                  ? {}
+                  : {
+                      events: appEvents,
+                      persistTask: (ledger: AgentTaskLedger) =>
+                        controlPlane.db.saveAgentTask(ledger, sessionId),
+                    }),
                 checkUserWorkPreserved: (checkpointId) =>
                   checkpointId ? checkpoint.isPreserved(checkpointId) : true,
                 async reviewFinalDiff(currentTask) {
@@ -1414,6 +1574,12 @@ export function AppShell(
                 },
                 async verifySuccessCriteria(currentTask, ledger) {
                   return verifyStructuralCodingCriteria(ledger, {
+                    verificationState:
+                      executionMode === "coding"
+                        ? verificationPlan.length > 0
+                          ? "available"
+                          : "unavailable"
+                        : "not_required",
                     reviewObjective: () =>
                       reviewCodingObjective(
                         currentTask,
@@ -1457,12 +1623,37 @@ export function AppShell(
                         : true,
                   });
                 },
+                ...(executionMode === "coding"
+                  ? {
+                      independentVerifier: async (currentTask, ledger) => {
+                        const report = await runCodeReview({
+                          root: currentTask.root,
+                          objective: currentTask.objective,
+                          mode: currentTask.mode ?? "coding",
+                          ledger,
+                          verificationRequired: verificationPlan.length > 0,
+                          verificationCommands: verificationPlan,
+                          verificationState:
+                            verificationPlan.length > 0
+                              ? "available"
+                              : "unavailable",
+                          finalReviewPerformed: true,
+                          userWorkPreserved: lastCheckpointId
+                            ? await checkpoint.isPreserved(lastCheckpointId)
+                            : true,
+                          signal,
+                          logger: taskLogger,
+                        });
+                        return report.verification;
+                      },
+                    }
+                  : {}),
                 async createExecutionContext(currentTask) {
                   return {
                     root: currentTask.root,
                     permissionMode: currentTask.permissionMode,
                     signal,
-                    network: turnPolicy.network,
+                    network: executionPolicy.network,
                     checkpoint,
                     env: process.env,
                     requestApproval: (request) =>
@@ -1578,8 +1769,120 @@ export function AppShell(
             },
           },
         );
-        setLastDecision(routeExecution.decision);
-        const result = routeExecution.outcome?.result;
+        let finalRouteExecution = routeExecution;
+        let preparationHadNoScope = false;
+        if (discoveryExecution) {
+          const preparationResult = routeExecution.outcome?.result;
+          const preparationCandidates = [
+            ...(preparationResult?.ledger.filesRead ?? []),
+            ...(routingContext.relevantMatches ?? []),
+            ...explicitObjectivePaths,
+            ...extractObjectivePaths(preparationResult?.text ?? ""),
+          ];
+          const discoveredTargets = await verifiedPreparationTargets(
+            process.cwd(),
+            objective,
+            preparationCandidates,
+          );
+          trace.record({
+            taskId: turnId,
+            type: "context.built",
+            phase: "reflect",
+            data: {
+              preparation: true,
+              discoveredTargetCount: discoveredTargets.length,
+              discoveredTargets,
+            },
+          });
+          if (discoveredTargets.length > 0) {
+            setNotice(`Scope verified Â· selecting a local coding routeâ€¦`);
+            const progressiveRouteRequest = {
+              ...routeRequest,
+              task: { ...routeRequest.task, toolNeed: true },
+              execution: {
+                strategy: "progressive" as const,
+                boundedScope: discoveredTargets,
+              },
+            };
+            const codingDecision = selectRoute(
+              progressiveRouteRequest,
+              taskLogger,
+            );
+            setLastDecision(codingDecision);
+            appEvents.emit({
+              type: "route.selected",
+              decision: codingDecision,
+            });
+            controlPlane.db.recordRoute(
+              sessionId,
+              codingDecision.selected?.candidate.id ?? "STOP",
+              codingDecision,
+            );
+            const codingExecution = await runWithRouteFallback(
+              progressiveRouteRequest,
+              async (selected) => {
+                const outcome = await runSelectedAgent(
+                  selected,
+                  "progressive",
+                  discoveredTargets,
+                );
+                if (!outcome)
+                  throw new Error(
+                    `No execution result was produced for ${selected.id}.`,
+                  );
+                return outcome;
+              },
+              {
+                logger: taskLogger,
+                onOutcome(candidate, outcome) {
+                  if (
+                    outcome.status === "failed" ||
+                    (outcome.status === "blocked" && outcome.failure)
+                  )
+                    routeCircuitBreaker.recordFailure(
+                      candidate.providerId,
+                      candidate.id,
+                    );
+                  else if (outcome.status !== "cancelled")
+                    routeCircuitBreaker.recordSuccess(
+                      candidate.providerId,
+                      candidate.id,
+                    );
+                },
+                onRouteChange(nextDecision, previous, failure) {
+                  const next = nextDecision.selected?.candidate;
+                  if (!next) return;
+                  const reason =
+                    `Route ${previous.displayName} failed with ${failure.code}; ` +
+                    `trying ${next.displayName}.`;
+                  setLastDecision(nextDecision);
+                  trace.record({
+                    taskId: turnId,
+                    type: "route.selected",
+                    phase: "reflect",
+                    data: {
+                      selected: next.id,
+                      provider: next.providerId,
+                      reason,
+                    },
+                  });
+                  appEvents.emit({
+                    type: "route.selected",
+                    decision: nextDecision,
+                    reason,
+                  });
+                  controlPlane.db.recordRoute(sessionId, next.id, nextDecision);
+                  setNotice(`Route fallback Â· ${next.displayName}`);
+                },
+              },
+            );
+            finalRouteExecution = codingExecution;
+          } else {
+            preparationHadNoScope = true;
+          }
+        }
+        setLastDecision(finalRouteExecution.decision);
+        const result = finalRouteExecution.outcome?.result;
         if (!result) {
           appendError(
             "The selected model did not produce an execution result.",
@@ -1589,14 +1892,33 @@ export function AppShell(
           return;
         }
         controlPlane.db.appendMessage(sessionId, "assistant", result.text);
+        const reportedStatus = preparationHadNoScope
+          ? ("blocked" as const)
+          : result.status;
+        controlPlane.db.saveMemoryFact(
+          createTaskEpisodeMemoryFact({
+            repository: process.cwd(),
+            taskId: result.ledger.id,
+            objective: result.ledger.objective,
+            status: reportedStatus,
+            phase: result.ledger.phase,
+            verified: result.verified,
+            filesChanged: result.ledger.filesChanged,
+            verification: result.ledger.verificationRuns,
+          }),
+        );
         taskLogger.info("tui.task.result", {
-          status: result.status,
+          status: reportedStatus,
           verified: result.verified,
           textLength: result.text.length,
           filesChanged: result.ledger.filesChanged.length,
           verificationRuns: result.ledger.verificationRuns.length,
         });
-        if (result.status === "cancelled") setNotice("Task cancelled");
+        if (preparationHadNoScope)
+          setNotice(
+            "Local preparation paused Â· no verified mutation scope was found",
+          );
+        else if (result.status === "cancelled") setNotice("Task cancelled");
         else if (result.status === "completed" && result.verified)
           setNotice("Task completed and verified");
         else if (result.status === "blocked")

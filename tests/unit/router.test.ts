@@ -126,6 +126,192 @@ describe("route selection", () => {
     );
   });
 
+  test("an ineligible selected model cannot suppress an eligible fallback", () => {
+    const weak = candidate({
+      id: "lm-studio/chat-only",
+      agentProbe: {
+        conversation: true,
+        readTool: false,
+        multiTurnTools: false,
+        agenticCodingEligible: false,
+        agentCapabilityClass: "chat_only",
+        notes: [],
+      },
+    });
+    const fallback = candidate({
+      id: "openrouter/free-coder",
+      providerId: "openrouter",
+      source: "free_cloud",
+      free: {
+        status: "verified_free",
+        verifiedAt: now,
+        expiresAt: "2026-08-24T18:00:00.000Z",
+      },
+      privacy: {
+        classification: "zdr_capable",
+        retentionKnown: true,
+        zdrAvailable: true,
+        trainsOnInputs: false,
+      },
+      quality: { coding: 0.7, toolUse: 0.8, confidence: "measured" },
+    });
+    const route = request([weak, fallback]);
+    route.preferredCandidateId = weak.id;
+
+    const decision = selectRoute(route);
+
+    expect(decision.selected?.candidate.id).toBe(fallback.id);
+    expect(decision.explanation).toContain("eligible fallback route");
+    expect(
+      decision.rejections.find((item) => item.candidateId === weak.id)?.reasons,
+    ).toContain("capability chat_only is below required workspace_reader");
+  });
+
+  test("an eligible selected model remains the preferred route", () => {
+    const preferred = candidate({
+      id: "local/selected",
+      quality: { coding: 0.1, toolUse: 0.1, confidence: "measured" },
+    });
+    const higherScore = candidate({
+      id: "local/higher-score",
+      quality: { coding: 1, toolUse: 1, confidence: "measured" },
+    });
+    const route = request([higherScore, preferred]);
+    route.preferredCandidateId = preferred.id;
+
+    expect(selectRoute(route).selected?.candidate.id).toBe(preferred.id);
+  });
+
+  test("progressive execution admits a measured coding agent for a bounded unit", () => {
+    const chatOnly = candidate({
+      id: "local/chat-only",
+      agentProbe: {
+        conversation: true,
+        readTool: false,
+        multiTurnTools: false,
+        agenticCodingEligible: false,
+        agentCapabilityClass: "chat_only",
+        notes: [],
+      },
+    });
+    const bounded = candidate({
+      id: "local/bounded-coder",
+      quality: { coding: 0.65, toolUse: 0.8, confidence: "measured" },
+      agentProbe: {
+        conversation: true,
+        readTool: true,
+        multiTurnTools: true,
+        agenticCodingEligible: true,
+        agentCapabilityClass: "coding_agent",
+        notes: ["Edit/test protocol passed; advanced recovery is not proven."],
+      },
+    });
+    const route = request([chatOnly, bounded]);
+    route.task.requiredCapability = "advanced_coding_agent";
+    route.execution = {
+      strategy: "progressive",
+      boundedScope: ["src/auth/session.ts"],
+    };
+
+    const decision = selectRoute(route);
+
+    expect(decision.selected?.candidate.id).toBe(bounded.id);
+    expect(decision.explanation).toContain("Progressive execution");
+    expect(
+      decision.rejections.find((item) => item.candidateId === chatOnly.id),
+    ).toBeUndefined();
+  });
+
+  test("progressive execution keeps a local chat-only model alive as a host-scaffolded fallback", () => {
+    const localChat = candidate({
+      id: "local/chat-only-scaffold",
+      capabilities: {
+        tools: false,
+        structuredOutput: false,
+        reasoning: false,
+        vision: false,
+        maxContext: 16_000,
+      },
+      agentProbe: {
+        conversation: true,
+        readTool: false,
+        multiTurnTools: false,
+        agenticCodingEligible: false,
+        agentCapabilityClass: "chat_only",
+        notes: ["The host must keep this work unit bounded and verified."],
+      },
+    });
+    const route = request([localChat]);
+    route.task.requiredCapability = "advanced_coding_agent";
+    route.execution = {
+      strategy: "progressive",
+      boundedScope: ["src/auth/session.ts"],
+    };
+
+    const decision = selectRoute(route);
+
+    expect(decision.selected?.candidate.id).toBe(localChat.id);
+    expect(decision.explanation).toContain("host-scaffolded");
+    expect(decision.explanation).toContain("chat_only");
+  });
+
+  test("discovery execution keeps a complex local task alive without write authority", () => {
+    const localChat = candidate({
+      id: "local/chat-only-discovery",
+      capabilities: {
+        tools: false,
+        structuredOutput: false,
+        reasoning: false,
+        vision: false,
+        maxContext: 16_000,
+      },
+      agentProbe: {
+        conversation: true,
+        readTool: false,
+        multiTurnTools: false,
+        agenticCodingEligible: false,
+        agentCapabilityClass: "chat_only",
+        notes: ["The host must keep this stage read-only."],
+      },
+    });
+    const route = request([localChat]);
+    route.task = {
+      ...route.task,
+      requiredCapability: "advanced_coding_agent",
+      toolNeed: false,
+    };
+    route.execution = { strategy: "discovery" };
+
+    const decision = selectRoute(route);
+
+    expect(decision.selected?.candidate.id).toBe(localChat.id);
+    expect(decision.explanation).toContain("Local discovery execution");
+  });
+
+  test("advanced coding remains a hard gate without a bounded execution scope", () => {
+    const bounded = candidate({
+      id: "local/bounded-coder",
+      agentProbe: {
+        conversation: true,
+        readTool: true,
+        multiTurnTools: true,
+        agenticCodingEligible: true,
+        agentCapabilityClass: "coding_agent",
+        notes: [],
+      },
+    });
+    const route = request([bounded]);
+    route.task.requiredCapability = "advanced_coding_agent";
+    route.execution = { strategy: "progressive", boundedScope: [] };
+
+    const decision = selectRoute(route);
+
+    expect(decision.selected).toBeUndefined();
+    expect(decision.explanation).toContain(
+      "capability coding_agent is below required advanced_coding_agent",
+    );
+  });
+
   test("applies privacy and cost gates before quality", () => {
     const publicPaid = candidate({
       id: "public/strong",
@@ -427,7 +613,7 @@ describe("route selection", () => {
     expect(selectRoute(route).selected).toBeUndefined();
   });
 
-  test("keeps a runnable candidate eligible when its capability probe is weaker", () => {
+  test("rejects a candidate whose capability probe is weaker than the task", () => {
     const failedProbe = candidate({
       id: "local/chat-only",
       providerId: "local",
@@ -450,18 +636,46 @@ describe("route selection", () => {
     };
     const decision = selectRoute(route);
 
-    expect(decision.selected?.candidate.id).toBe(failedProbe.id);
-    expect(decision.rejections).toEqual([]);
-    expect(decision.explanation).not.toContain("No eligible route");
-    expect(decision.explanation).not.toContain("below required");
+    expect(decision.selected).toBeUndefined();
+    expect(decision.rejections[0]?.reasons).toContain(
+      "capability chat_only is below required advanced_coding_agent",
+    );
   });
 
-  test("a candidate with no probe result remains eligible when its tools are executable", () => {
+  test("rejects a chat-only candidate before scoring an advanced coding task", () => {
+    const weak = candidate({
+      id: "local/chat-only-advanced-task",
+      agentProbe: {
+        conversation: true,
+        readTool: false,
+        multiTurnTools: false,
+        agenticCodingEligible: false,
+        agentCapabilityClass: "chat_only",
+        notes: ["The model failed the executable tool probe."],
+      },
+    });
+    const route = request([weak]);
+    route.task = {
+      ...route.task,
+      requiredCapability: "advanced_coding_agent",
+    };
+
+    const decision = selectRoute(route);
+
+    expect(decision.selected).toBeUndefined();
+    expect(decision.rejections[0]?.reasons).toContain(
+      "capability chat_only is below required advanced_coding_agent",
+    );
+  });
+
+  test("rejects a candidate with no capability evidence for a tool task", () => {
     const unprobed = candidate({ id: "local/unprobed", agentProbe: undefined });
 
     const decision = selectRoute(request([unprobed]));
-    expect(decision.selected?.candidate.id).toBe(unprobed.id);
-    expect(decision.rejections).toEqual([]);
+    expect(decision.selected).toBeUndefined();
+    expect(decision.rejections[0]?.reasons).toContain(
+      "capability evidence is unavailable for required workspace_reader",
+    );
   });
 
   test("respects an open circuit breaker before scoring", () => {
@@ -489,7 +703,7 @@ describe("route selection", () => {
     );
   });
 
-  test("uses capability as a preference without blocking the only runnable model", () => {
+  test("uses capability as a hard admission gate before quality scoring", () => {
     const weak = candidate({
       id: "local/chat-only",
       displayName: "Chat only",
@@ -513,7 +727,9 @@ describe("route selection", () => {
     expect(decision.selected?.candidate.id).toBe("local/strong");
     expect(
       decision.rejections.find((item) => item.candidateId === weak.id),
-    ).toBeUndefined();
+    ).toMatchObject({
+      reasons: ["capability chat_only is below required workspace_reader"],
+    });
   });
 
   test("local candidates do not lose eligibility because of a cloud quota snapshot", () => {

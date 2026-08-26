@@ -100,3 +100,39 @@ test("independent verifier blocks a command that only produced a failing test", 
     result.issues.some((issue) => issue.code === "VERIFICATION_FAILED"),
   ).toBe(true);
 });
+
+test("independent verifier reports unavailable coding verification explicitly", () => {
+  const ledger = createTaskLedger({
+    id: "verify-unavailable",
+    objective: "Change the implementation",
+    mode: "coding",
+  });
+  addTaskEvidence(ledger, {
+    id: "evidence-1",
+    kind: "file",
+    source: "src/value.ts",
+    summary: "The target file was inspected.",
+    relevance: 1,
+    freshness: 1,
+  });
+  recordTaskAction(ledger, {
+    id: "write-1",
+    kind: "write",
+    target: "src/value.ts",
+    status: "succeeded",
+  });
+  const result = independentlyVerifyTask({
+    objective: ledger.objective,
+    mode: "coding",
+    ledger,
+    verificationRequired: true,
+    verificationState: "unavailable",
+    finalReviewPerformed: true,
+    userWorkPreserved: true,
+  });
+
+  expect(result.pass).toBe(false);
+  expect(result.issues.map((issue) => issue.code)).toContain(
+    "VERIFICATION_UNAVAILABLE",
+  );
+});

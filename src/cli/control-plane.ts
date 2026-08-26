@@ -27,10 +27,15 @@ import { createLogger, type LocalCodeLogger } from "../shared/logging.js";
 import { LocalCodeDatabase } from "../storage/database.js";
 import {
   AGENT_CAPABILITY_PROBE_VERSION,
+  probeFreeCloudModelCapabilities,
   probeLocalModelCapabilities,
 } from "../agent/capability-probe.js";
-import { isCapabilityProbeCurrent } from "../agent/capability-cache.js";
+import {
+  isCapabilityProbeCurrent,
+  isCapabilityProbeFailure,
+} from "../agent/capability-cache.js";
 import type {
+  AgentCapabilityClass,
   QuotaSnapshot,
   RepositoryPrivacy,
   RoutingMode,
@@ -48,7 +53,20 @@ export interface ControlPlane {
   discoverRuntimes(signal?: AbortSignal): Promise<RuntimeDiscoveryResult>;
   discoverModels(
     signal?: AbortSignal,
-    options?: { probeLocalCapabilities?: boolean },
+    options?: {
+      probeLocalCapabilities?: boolean;
+      /**
+       * Run the slower disposable edit/test exercise. Normal route discovery
+       * only needs the protocol probe; the host still verifies every real
+       * mutation. Keep this opt-in so a local task does not spend its entire
+       * startup budget proving an advanced role it may not need.
+       */
+      probeLocalExecutableCapabilities?: boolean;
+      /** Probe a bounded set of verified-free remote candidates for tools. */
+      probeFreeCloudCapabilities?: boolean;
+      requiredCapability?: AgentCapabilityClass;
+      preferredModelId?: string;
+    },
   ): Promise<{
     recommendations: LocalModelRecommendation[];
     models: ModelCandidate[];
@@ -116,6 +134,68 @@ function recommendationCandidate(
       ...(recommendation.fit ? { fit: recommendation.fit } : {}),
     },
   };
+}
+
+const CAPABILITY_RANK: Record<AgentCapabilityClass, number> = {
+  chat_only: 0,
+  workspace_reader: 1,
+  coding_agent: 2,
+  advanced_coding_agent: 3,
+};
+
+function hasRequiredCapability(
+  candidate: ModelCandidate,
+  required: AgentCapabilityClass | undefined,
+): boolean {
+  if (!required || required === "chat_only") return true;
+  const actual = candidate.agentProbe?.agentCapabilityClass;
+  return (
+    actual !== undefined && CAPABILITY_RANK[actual] >= CAPABILITY_RANK[required]
+  );
+}
+
+function selectFreeCloudProbeTargets(
+  candidates: readonly ModelCandidate[],
+  required: AgentCapabilityClass | undefined,
+  preferredModelId: string | undefined,
+): ModelCandidate[] {
+  if (
+    candidates.some(
+      (candidate) =>
+        candidate.source === "local" &&
+        hasRequiredCapability(candidate, required),
+    )
+  )
+    return [];
+
+  const ordered = candidates
+    .filter(
+      (candidate) =>
+        candidate.source === "free_cloud" &&
+        (candidate.free.status === "verified_free" ||
+          candidate.free.status === "free_quota"),
+    )
+    .sort((left, right) => {
+      const leftPreferred =
+        left.id === preferredModelId || left.modelId === preferredModelId;
+      const rightPreferred =
+        right.id === preferredModelId || right.modelId === preferredModelId;
+      if (leftPreferred !== rightPreferred) return leftPreferred ? -1 : 1;
+      return (
+        (right.quality.coding ?? 0) - (left.quality.coding ?? 0) ||
+        left.id.localeCompare(right.id)
+      );
+    });
+  const selected: ModelCandidate[] = [];
+  const providers = new Set<string>();
+  for (const candidate of ordered) {
+    // One probe per provider keeps a model catalog refresh bounded and avoids
+    // burning a free quota on every catalog entry.
+    if (providers.has(candidate.providerId)) continue;
+    providers.add(candidate.providerId);
+    selected.push(candidate);
+  }
+  return selected;
 }
 
 export async function openControlPlane(
@@ -214,6 +294,10 @@ export async function openControlPlane(
     async discoverModels(signal, options = {}) {
       logger.info("models.discovery.started", {
         probeLocalCapabilities: options.probeLocalCapabilities === true,
+        probeLocalExecutableCapabilities:
+          options.probeLocalExecutableCapabilities === true,
+        probeFreeCloudCapabilities: options.probeFreeCloudCapabilities === true,
+        requiredCapability: options.requiredCapability,
       });
       const probeSignal = signal ?? AbortSignal.timeout(2_000);
       const [recommendations, runtime, hardwareInspection] = await Promise.all([
@@ -270,6 +354,7 @@ export async function openControlPlane(
           return provider ? [provider] : [];
         });
         const cached = new Map<string, ModelCandidate["agentProbe"]>();
+        const lastKnown = new Map<string, ModelCandidate["agentProbe"]>();
         const pending: ModelCandidate[] = [];
         const cacheMaxAgeMs = 24 * 60 * 60 * 1_000;
         for (const candidate of discoveredModels) {
@@ -281,6 +366,7 @@ export async function openControlPlane(
             candidate.providerId,
             candidate.modelId ?? candidate.displayName,
           );
+          if (stored) lastKnown.set(candidate.id, stored.probe);
           const observedAt = stored
             ? new Date(stored.observedAt).getTime()
             : Number.NaN;
@@ -298,23 +384,99 @@ export async function openControlPlane(
             cached.set(candidate.id, stored.probe);
           else pending.push(candidate);
         }
-        const probed = await probeLocalModelCapabilities(
-          pending,
-          localProviders,
-          probeSignal,
-          root,
-          { hardware: hardwareInspection?.profile, logger },
+        // Probe loaded models in parallel. A sequential probe let one
+        // unsuitable loaded model consume the entire shared budget before a
+        // second loaded model with real tool support was ever measured. Do
+        // not JIT-load the whole catalog just to score a route: when nothing
+        // is loaded, probe only a small preferred prefix and let the runtime
+        // decide whether it can serve those candidates.
+        const orderedPending = [...pending].sort((left, right) => {
+          const leftPreferred =
+            left.modelId === options.preferredModelId ? 0 : 1;
+          const rightPreferred =
+            right.modelId === options.preferredModelId ? 0 : 1;
+          if (leftPreferred !== rightPreferred)
+            return leftPreferred - rightPreferred;
+          const leftLoaded = left.local?.loaded === true ? 0 : 1;
+          const rightLoaded = right.local?.loaded === true ? 0 : 1;
+          return leftLoaded - rightLoaded;
+        });
+        const loadedPending = orderedPending.filter(
+          (candidate) => candidate.local?.loaded === true,
         );
+        const hasReusableCodingRoute = [...cached.values()].some(
+          (probe) => probe?.agenticCodingEligible === true,
+        );
+        const probeTargets = hasReusableCodingRoute
+          ? []
+          : loadedPending.length > 0
+            ? loadedPending
+            : orderedPending.slice(0, 3);
+        const probed = (
+          await Promise.all(
+            probeTargets.map((candidate) =>
+              probeLocalModelCapabilities(
+                [candidate],
+                localProviders,
+                probeSignal,
+                options.probeLocalExecutableCapabilities ? root : undefined,
+                { hardware: hardwareInspection?.profile, logger },
+              ),
+            ),
+          )
+        ).flat();
+        // A transport failure is not a capability result. Keep failed probes
+        // out of the fresh catalog as well as out of SQLite; otherwise the
+        // later merge would still turn a timeout into a synthetic
+        // `chat_only` candidate and the router would stop a local task before
+        // the safe discovery route can run.
         const fresh = new Map(
-          probed.map((candidate) => [candidate.id, candidate]),
+          probed
+            .filter(
+              (candidate) => !isCapabilityProbeFailure(candidate.agentProbe),
+            )
+            .map((candidate) => [candidate.id, candidate]),
         );
+        const recovered = new Map<string, ModelCandidate["agentProbe"]>();
         for (const candidate of probed)
-          if (candidate.source === "local" && candidate.agentProbe)
+          if (candidate.source === "local" && candidate.agentProbe) {
+            if (isCapabilityProbeFailure(candidate.agentProbe)) {
+              const previous = lastKnown.get(candidate.id);
+              if (
+                previous &&
+                isCapabilityProbeCurrent(
+                  candidate,
+                  previous,
+                  hardwareInspection?.profile,
+                )
+              ) {
+                recovered.set(candidate.id, {
+                  ...previous,
+                  notes: [
+                    ...previous.notes,
+                    "Current capability probe failed; using last-known measured evidence and retrying later.",
+                  ],
+                });
+                logger.warn("capability.probe.last_known_reused", {
+                  candidateId: candidate.id,
+                  providerId: candidate.providerId,
+                  reason: "transient_probe_failure",
+                });
+              } else {
+                logger.warn("capability.probe.not_persisted", {
+                  candidateId: candidate.id,
+                  providerId: candidate.providerId,
+                  reason: "transient_probe_failure_without_compatible_history",
+                });
+              }
+              continue;
+            }
             db.saveModelCapability(
               candidate.providerId,
               candidate.modelId ?? candidate.displayName,
               candidate.agentProbe,
             );
+          }
         models = discoveredModels.map((candidate) => {
           const cachedProbe = cached.get(candidate.id);
           if (cachedProbe)
@@ -327,8 +489,89 @@ export async function openControlPlane(
                 confidence: "measured" as const,
               },
             };
+          const recoveredProbe = recovered.get(candidate.id);
+          if (recoveredProbe)
+            return {
+              ...candidate,
+              agentProbe: recoveredProbe,
+              quality: {
+                ...candidate.quality,
+                toolUse: recoveredProbe.readTool ? 1 : 0,
+                confidence: "measured" as const,
+              },
+            };
           return fresh.get(candidate.id) ?? candidate;
         });
+      }
+      if (options.probeFreeCloudCapabilities) {
+        const targets = selectFreeCloudProbeTargets(
+          models,
+          options.requiredCapability,
+          options.preferredModelId,
+        );
+        if (targets.length > 0) {
+          const cached = new Map<string, ModelCandidate["agentProbe"]>();
+          const pending: ModelCandidate[] = [];
+          const cacheMaxAgeMs = 24 * 60 * 60 * 1_000;
+          for (const candidate of targets) {
+            const stored = db.getModelCapability(
+              candidate.providerId,
+              candidate.modelId ?? candidate.displayName,
+            );
+            const observedAt = stored
+              ? new Date(stored.observedAt).getTime()
+              : Number.NaN;
+            if (
+              stored &&
+              stored.version === AGENT_CAPABILITY_PROBE_VERSION &&
+              Number.isFinite(observedAt) &&
+              Date.now() - observedAt <= cacheMaxAgeMs &&
+              isCapabilityProbeCurrent(candidate, stored.probe)
+            )
+              cached.set(candidate.id, stored.probe);
+            else pending.push(candidate);
+          }
+          const probed = await probeFreeCloudModelCapabilities(
+            pending,
+            providers.adapters,
+            probeSignal,
+            { logger },
+          );
+          const fresh = new Map(
+            probed.map((candidate) => [candidate.id, candidate]),
+          );
+          for (const candidate of probed)
+            if (candidate.source === "free_cloud" && candidate.agentProbe)
+              db.saveModelCapability(
+                candidate.providerId,
+                candidate.modelId ?? candidate.displayName,
+                candidate.agentProbe,
+              );
+          models = models.map((candidate) => {
+            const cachedProbe = cached.get(candidate.id);
+            const probedCandidate = fresh.get(candidate.id);
+            if (cachedProbe)
+              return {
+                ...candidate,
+                agentProbe: cachedProbe,
+                quality: {
+                  ...candidate.quality,
+                  toolUse: cachedProbe.readTool ? 1 : 0,
+                  confidence: "measured" as const,
+                },
+              };
+            return probedCandidate ?? candidate;
+          });
+          logger.info("capability.free_cloud.finished", {
+            candidateCount: targets.length,
+            probedCount: pending.length,
+            cachedCount: cached.size,
+          });
+        } else {
+          logger.debug("capability.free_cloud.skipped", {
+            reason: "eligible_local_route_or_no_verified_free_candidate",
+          });
+        }
       }
       logger.info("models.discovery.finished", {
         recommendationCount: recommendations.length,

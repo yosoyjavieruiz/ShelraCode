@@ -2,6 +2,8 @@ import { readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   runCommand,
+  runShellCommand,
+  ProcessPolicyError,
   type ProcessOptions,
   type ProcessResult,
 } from "../shared/process.js";
@@ -10,6 +12,7 @@ import { isNeverRemotePath, scanSecrets } from "../privacy/policy.js";
 import {
   checkPermission,
   classifyShellCommand,
+  commandRequiresNetwork,
   shellCommandEscapesWorkspace,
 } from "./permissions.js";
 import { ToolError } from "./errors.js";
@@ -185,6 +188,52 @@ async function readExistingFile(
   }
 }
 
+async function verifyWrittenContent(
+  absolute: string,
+  relativePath: string,
+  expected: string,
+): Promise<void> {
+  try {
+    const actual = await readFile(absolute, "utf8");
+    if (actual === expected) return;
+  } catch {
+    // Normalize a disappearing or unreadable target into a recoverable tool
+    // result instead of reporting a successful write that cannot be observed.
+  }
+  throw new ToolError(
+    "CONFLICT",
+    `The write to ${relativePath} did not produce the requested file content. The workspace may have changed concurrently.`,
+    {
+      path: relativePath,
+      recoverable: true,
+      suggestedAction:
+        "Read the current path again, compare the observed content, and retry only if the target is still in scope.",
+    },
+  );
+}
+
+async function verifyDeleted(
+  absolute: string,
+  relativePath: string,
+): Promise<void> {
+  try {
+    await stat(absolute);
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") return;
+    throw error;
+  }
+  throw new ToolError(
+    "CONFLICT",
+    `DeleteFile could not confirm that ${relativePath} was removed.`,
+    {
+      path: relativePath,
+      recoverable: true,
+      suggestedAction:
+        "Read or list the path again before attempting another destructive action.",
+    },
+  );
+}
+
 function stringInput(input: unknown): string {
   if (typeof input !== "string" || !input.trim())
     throw new ToolError("INVALID_ARGUMENT", "Expected a non-empty string.", {
@@ -201,15 +250,45 @@ function recordInput(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
-const SECRET_ENV_NAME =
-  /(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|PRIVATE[_-]?KEY)/iu;
+const SAFE_CHILD_ENV_NAMES = new Set([
+  "PATH",
+  "PATHEXT",
+  "COMSPEC",
+  "SYSTEMROOT",
+  "WINDIR",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "HOME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOCALAPPDATA",
+  "APPDATA",
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)",
+  "PROGRAMW6432",
+  "BUN_INSTALL",
+  "NODE_PATH",
+  "CI",
+  "TERM",
+  "TERM_PROGRAM",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "LOCALCODE_STATE_DIR",
+  "SHELRACODE_STATE_DIR",
+]);
 
 export function safeExecutionEnvironment(
   env: Record<string, string | undefined> = process.env,
 ): Record<string, string> {
   const safe: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (value !== undefined && !SECRET_ENV_NAME.test(key)) safe[key] = value;
+    if (value !== undefined && SAFE_CHILD_ENV_NAMES.has(key.toUpperCase()))
+      safe[key] = value;
   }
   return safe;
 }
@@ -219,12 +298,42 @@ async function runToolCommand(
   args: string[],
   options: ProcessOptions,
 ): Promise<ProcessResult> {
-  try {
-    return await runCommand(command, args, {
+  return runToolProcess(() =>
+    runCommand(command, args, {
       ...options,
       env: safeExecutionEnvironment(options.env),
-    });
+    }),
+  );
+}
+
+async function runToolShellCommand(
+  command: string,
+  options: ProcessOptions,
+): Promise<ProcessResult> {
+  return runToolProcess(() =>
+    runShellCommand(command, {
+      ...options,
+      env: safeExecutionEnvironment(options.env),
+    }),
+  );
+}
+
+async function runToolProcess(
+  execute: () => Promise<ProcessResult>,
+): Promise<ProcessResult> {
+  try {
+    return await execute();
   } catch (error) {
+    if (error instanceof ProcessPolicyError)
+      throw new ToolError(
+        "PERMISSION_DENIED",
+        "Network-capable process execution is disabled for this turn.",
+        {
+          recoverable: false,
+          suggestedAction:
+            "Use a local command or a turn policy that explicitly permits network access.",
+        },
+      );
     if (error instanceof DOMException && error.name === "AbortError")
       throw new ToolError("CANCELLED", "The command was cancelled.", {
         recoverable: true,
@@ -331,7 +440,14 @@ export interface FileReadResult {
   content: string;
   sensitivePath: boolean;
   truncated: boolean;
+  lineStart: number;
+  lineEnd: number;
+  totalLines: number;
+  hasMore: boolean;
+  nextStartLine?: number;
 }
+
+const DEFAULT_READ_LINE_WINDOW = 160;
 
 export const readFileTool: ToolDefinition<
   {
@@ -359,7 +475,8 @@ export const readFileTool: ToolDefinition<
       },
       endLine: {
         type: "number",
-        description: "Optional last line to return, inclusive.",
+        description:
+          "Optional last line to return, inclusive. If omitted with startLine, only a bounded 160-line window is returned.",
       },
     },
     required: ["path"],
@@ -434,28 +551,33 @@ export const readFileTool: ToolDefinition<
         },
       );
     const maxChars = input.maxChars ?? 20_000;
+    const lines = content.split(/\r?\n/);
+    const lineStart = input.startLine ?? 1;
+    const lineEndRequest =
+      input.endLine ??
+      (input.startLine === undefined
+        ? undefined
+        : input.startLine + DEFAULT_READ_LINE_WINDOW - 1);
+    const selected =
+      input.startLine !== undefined || input.endLine !== undefined
+        ? lines.slice(lineStart - 1, lineEndRequest).join("\n")
+        : content;
+    const truncated = selected.length > maxChars;
+    const lineEnd = Math.min(lineEndRequest ?? lines.length, lines.length);
+    const hasMore = truncated || lineEnd < lines.length;
     return {
       path: input.path,
       kind: "file",
-      content: (() => {
-        const lines = content.split(/\r?\n/);
-        const selected =
-          typeof input.startLine === "number" ||
-          typeof input.endLine === "number"
-            ? lines.slice((input.startLine ?? 1) - 1, input.endLine).join("\n")
-            : content;
-        return selected.slice(0, maxChars);
-      })(),
+      content: selected.slice(0, maxChars),
       sensitivePath: isNeverRemotePath(input.path),
-      truncated:
-        (typeof input.startLine === "number" ||
-        typeof input.endLine === "number"
-          ? content
-              .split(/\r?\n/)
-              .slice((input.startLine ?? 1) - 1, input.endLine)
-              .join("\n")
-          : content
-        ).length > maxChars,
+      truncated,
+      lineStart,
+      lineEnd,
+      totalLines: lines.length,
+      hasMore,
+      ...(hasMore && !truncated && lineEnd < lines.length
+        ? { nextStartLine: lineEnd + 1 }
+        : {}),
     };
   },
 };
@@ -513,7 +635,19 @@ export const writeFileTool: ToolDefinition<
     await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
     await requireParentDirectory(ctx.root, input.path);
     const before = await readExistingFile(ctx.root, input.path);
+    if (before.exists && ctx.allowExistingFileOverwrite === false)
+      throw new ToolError(
+        "PATH_EXISTS",
+        `${input.path} already exists in this staged work unit. Use EditFile with an exact observed replacement instead of replacing the entire file.`,
+        {
+          path: input.path,
+          recoverable: true,
+          suggestedAction:
+            "Read the current file if needed, then use EditFile for a bounded change. Use WriteFile only for a new path.",
+        },
+      );
     await writeFile(absolute, input.content, "utf8");
+    await verifyWrittenContent(absolute, input.path, input.content);
     await ctx.checkpoint.recordMutation(
       ctx.checkpointId,
       input.path,
@@ -601,6 +735,7 @@ export const createFileTool: ToolDefinition<
         });
       throw error;
     }
+    await verifyWrittenContent(absolute, input.path, input.content);
     await ctx.checkpoint.recordMutation(
       ctx.checkpointId,
       input.path,
@@ -739,6 +874,7 @@ export const editFileTool: ToolDefinition<
       ? current.replaceAll(input.oldText, input.newText)
       : current.replace(input.oldText, input.newText);
     await writeFile(absolute, updated, "utf8");
+    await verifyWrittenContent(absolute, input.path, updated);
     await ctx.checkpoint.recordMutation(ctx.checkpointId, input.path, updated);
     return {
       path: input.path,
@@ -801,6 +937,7 @@ export const deleteFileTool: ToolDefinition<
       );
     await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
     await unlink(absolute);
+    await verifyDeleted(absolute, input.path);
     await ctx.checkpoint.recordMutation(ctx.checkpointId, input.path, "");
     return {
       path: input.path,
@@ -866,10 +1003,22 @@ export const listFilesTool: ToolDefinition<
         logger: ctx.logger,
       },
     );
-    const files =
-      result.exitCode === 0
-        ? result.stdout.split(/\r?\n/).filter(Boolean).slice(0, 1_000)
-        : await listFallback(ctx.root, directory);
+    let files: string[];
+    if (result.exitCode === 0 || result.exitCode === 1) {
+      files = result.stdout.split(/\r?\n/).filter(Boolean).slice(0, 1_000);
+    } else if (result.exitCode === 127) {
+      files = await listFallback(ctx.root, directory);
+    } else {
+      throw new ToolError(
+        "COMMAND_FAILED",
+        `ListFiles search backend failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`,
+        {
+          recoverable: true,
+          suggestedAction:
+            "Retry with a smaller directory or use GlobFiles/SearchText after confirming the local search backend is available.",
+        },
+      );
+    }
     return {
       path: directory,
       kind: "directory",
@@ -966,14 +1115,24 @@ export const globFilesTool: ToolDefinition<
         logger: ctx.logger,
       },
     );
-    const files =
-      result.exitCode === 0
-        ? result.stdout.split(/\r?\n/).filter(Boolean).slice(0, 500)
-        : result.exitCode === 127
-          ? (await listFallback(ctx.root, "."))
-              .filter((file) => globToRegExp(input.pattern).test(file))
-              .slice(0, 500)
-          : [];
+    let files: string[];
+    if (result.exitCode === 0 || result.exitCode === 1) {
+      files = result.stdout.split(/\r?\n/).filter(Boolean).slice(0, 500);
+    } else if (result.exitCode === 127) {
+      files = (await listFallback(ctx.root, "."))
+        .filter((file) => globToRegExp(input.pattern).test(file))
+        .slice(0, 500);
+    } else {
+      throw new ToolError(
+        "COMMAND_FAILED",
+        `GlobFiles search backend failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`,
+        {
+          recoverable: true,
+          suggestedAction:
+            "Retry with a simpler pattern or use SearchText after confirming the local search backend is available.",
+        },
+      );
+    }
     return {
       files: files.map((file) =>
         directory === "."
@@ -1149,6 +1308,16 @@ export const searchTextTool: ToolDefinition<
     if (result.exitCode === 127) {
       return { matches: await searchFallback(cwd, input.query, input.glob) };
     }
+    if (result.exitCode !== 0 && result.exitCode !== 1)
+      throw new ToolError(
+        "COMMAND_FAILED",
+        `SearchText backend failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`,
+        {
+          recoverable: true,
+          suggestedAction:
+            "Retry with a simpler query or use ListFiles/ReadFile while the search backend is unavailable.",
+        },
+      );
     return {
       matches: parseSearchMatches(result.stdout),
     };
@@ -1186,12 +1355,7 @@ export const shellTool: ToolDefinition<
     return { command: inputString(value, "command") };
   },
   async execute(input, ctx) {
-    if (
-      ctx.network === false &&
-      /\b(?:curl|wget|irm|invoke-webrequest|git\s+(?:clone|fetch|pull)|npm\s+install|pnpm\s+install|yarn\s+install|bun\s+install)\b/iu.test(
-        input.command,
-      )
-    )
+    if (ctx.network === false && commandRequiresNetwork(input.command))
       throw new ToolError(
         "PERMISSION_DENIED",
         "Network-capable shell commands are disabled for this turn.",
@@ -1217,15 +1381,13 @@ export const shellTool: ToolDefinition<
       classification,
       `Run command: ${input.command}`,
     );
-    const shell =
-      process.platform === "win32"
-        ? ["cmd.exe", "/d", "/s", "/c", input.command]
-        : ["/bin/sh", "-lc", input.command];
     const started = performance.now();
-    const result = await runToolCommand(shell[0]!, shell.slice(1), {
+    const result = await runToolShellCommand(input.command, {
       cwd: ctx.root,
       signal: ctx.signal,
       timeoutMs: 120_000,
+      network: ctx.network === false ? "deny" : "allow",
+      policyCommand: input.command,
       env: ctx.env,
       onOutput: ctx.onOutput,
       logger: ctx.logger,
@@ -1259,6 +1421,8 @@ export const gitStatusTool: ToolDefinition<
       cwd: ctx.root,
       signal: ctx.signal,
       timeoutMs: 10_000,
+      network: ctx.network === false ? "deny" : "allow",
+      policyCommand: "git status --short --branch",
       logger: ctx.logger,
     });
     if (result.exitCode !== 0)
@@ -1306,6 +1470,8 @@ export const gitDiffTool: ToolDefinition<
         cwd: ctx.root,
         signal: ctx.signal,
         timeoutMs: 10_000,
+        network: ctx.network === false ? "deny" : "allow",
+        policyCommand: input.staged ? "git diff --cached --" : "git diff --",
         logger: ctx.logger,
       },
     );
@@ -1381,8 +1547,18 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
       : { command: inputString(value, "command") };
   },
   async execute(input, ctx) {
+    const command = input.command ?? ctx.defaultTestCommand ?? "bun test";
+    if (ctx.network === false && commandRequiresNetwork(command))
+      throw new ToolError(
+        "PERMISSION_DENIED",
+        "Network-capable test commands are disabled for this turn.",
+        {
+          recoverable: false,
+          suggestedAction:
+            "Use a local test command or a turn policy that explicitly permits network access.",
+        },
+      );
     await requirePermission(ctx, "execute");
-    const command = input.command ?? "bun test";
     const classification = classifyShellCommand(command);
     if (classification === "destructive")
       throw new ToolError(
@@ -1394,15 +1570,13 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
             "Use a read-only test command or request explicit approval for the destructive action.",
         },
       );
-    const shell =
-      process.platform === "win32"
-        ? ["cmd.exe", "/d", "/s", "/c", command]
-        : ["/bin/sh", "-lc", command];
     const started = performance.now();
-    const result = await runToolCommand(shell[0]!, shell.slice(1), {
+    const result = await runToolShellCommand(command, {
       cwd: ctx.root,
       signal: ctx.signal,
       timeoutMs: 120_000,
+      network: ctx.network === false ? "deny" : "allow",
+      policyCommand: command,
       env: ctx.env,
       onOutput: ctx.onOutput,
       logger: ctx.logger,

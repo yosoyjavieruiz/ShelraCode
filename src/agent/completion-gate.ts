@@ -17,6 +17,7 @@ export interface CompletionGateInput {
   verificationRequired: boolean;
   verificationPerformed: boolean;
   verificationPassed: boolean;
+  verificationState?: "not_required" | "available" | "unavailable";
   finalReviewPerformed: boolean;
   unresolvedBlockers: number;
   userWorkPreserved: boolean;
@@ -54,7 +55,15 @@ export function evaluateCompletionGate(
     reasons.push("success criteria are not satisfied");
   if (EVIDENCE_MODES.has(input.mode) && evidenceState !== "SUFFICIENT")
     reasons.push("relevant repository evidence is missing");
-  if (
+  const verificationState =
+    input.verificationState ??
+    (input.verificationRequired ? "available" : "not_required");
+  if (verificationState === "unavailable")
+    reasons.push(
+      "required verification is unavailable; completion cannot be claimed as verified",
+    );
+  else if (
+    verificationState === "available" &&
     input.verificationRequired &&
     (!input.verificationPerformed || !input.verificationPassed)
   )

@@ -4,6 +4,7 @@ import {
   addTaskEvidence,
   createTaskLedger,
 } from "../../src/agent/task-state.js";
+import { compileTaskGraph } from "../../src/agent/task-graph.js";
 
 test("compaction preserves authoritative task state and recent observations", () => {
   const ledger = createTaskLedger({
@@ -12,6 +13,12 @@ test("compaction preserves authoritative task state and recent observations", ()
     mode: "coding",
   });
   ledger.filesChanged.push("src/session.ts");
+  ledger.taskGraph = compileTaskGraph({
+    objective: ledger.objective,
+    mode: ledger.mode,
+    candidateFiles: ["src/session.ts"],
+    verificationCommands: ["bun test"],
+  });
   addTaskEvidence(ledger, {
     id: "manifest",
     kind: "manifest",
@@ -38,6 +45,7 @@ test("compaction preserves authoritative task state and recent observations", ()
   expect(result.omittedMessages).toBeGreaterThan(0);
   expect(result.preservedState).toContain("Migrate session refresh safely");
   expect(result.preservedState).toContain("src/session.ts");
+  expect(result.preservedState).toContain("mutate-src-session-ts");
   expect(
     result.messages.some((message) =>
       message.content.includes("latest observation"),

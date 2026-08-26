@@ -107,6 +107,79 @@ describe("OpenAI-compatible provider contract", () => {
     );
   });
 
+  test("normalizes object-valued tool arguments instead of dropping the call", async () => {
+    const fakeFetch: FetchLike = async () =>
+      new Response(
+        [
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-object","type":"function","function":{"name":"ReadFile","arguments":{"path":"a.ts"}}}]},"finish_reason":"tool_calls"}]}',
+          "data: [DONE]",
+          "",
+        ].join("\n\n"),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    const events: ProviderEvent[] = [];
+    for await (const event of provider(fakeFetch).stream(
+      {
+        modelId: "fake-coder",
+        messages: [{ role: "user", content: "read a.ts" }],
+        stream: true,
+      },
+      new AbortController().signal,
+    ))
+      events.push(event);
+
+    expect(events).toEqual(
+      expect.arrayContaining([
+        {
+          type: "tool.call",
+          call: {
+            id: "call-object",
+            name: "ReadFile",
+            arguments: '{"path":"a.ts"}',
+          },
+        },
+      ]),
+    );
+  });
+
+  test("quarantines textual tool envelopes at the provider boundary", async () => {
+    const fakeFetch: FetchLike = async () =>
+      new Response(
+        [
+          'data: {"choices":[{"delta":{"content":"<tools>\\n"}}]}',
+          'data: {"choices":[{"delta":{"content":"{\\"name\\":\\"ReadFile\\",\\"arguments\\":{\\"path\\":\\"a.ts\\"}}"}}]}',
+          'data: {"choices":[{"delta":{"content":"\\n</tools>"}}]}',
+          "data: [DONE]",
+          "",
+        ].join("\n\n"),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    const events: ProviderEvent[] = [];
+    for await (const event of provider(fakeFetch).stream(
+      {
+        modelId: "fake-coder",
+        messages: [{ role: "user", content: "read a.ts" }],
+        stream: true,
+      },
+      new AbortController().signal,
+    ))
+      events.push(event);
+
+    expect(events.some((event) => event.type === "text.delta")).toBe(false);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        {
+          type: "tool.call",
+          call: {
+            id: "recovered-0-1",
+            name: "ReadFile",
+            arguments: '{"path":"a.ts"}',
+          },
+        },
+      ]),
+    );
+  });
+
   test("serializes assistant tool calls before matching tool results", async () => {
     let requestBody: unknown;
     const fakeFetch: FetchLike = async (_input, init) => {

@@ -2,13 +2,12 @@
 
 ## Current routing correction — 2026-08-25
 
-The hard empirical capability-class veto described by the historical audit
-below is no longer active. `chat_only`, `workspace_reader`, or an unmeasured
-probe can influence route score, but cannot alone produce `STOP · ASK USER`.
-An otherwise policy-valid candidate with executable tools is attempted and
-then judged by the host-owned agent loop, verification, permissions, quota,
-and fallback controls. The audit date and its earlier live observations are
-preserved as historical evidence.
+The active router applies empirical capability as a hard admission gate before
+quality scoring. `chat_only` cannot satisfy a coding task, and
+`workspace_reader` cannot satisfy an `advanced_coding_agent` task. Bounded
+single-file work may intentionally require `workspace_reader` when the host
+stages one target and verifies it. The audit date and earlier contradictory
+policy observations are preserved as historical evidence.
 
 Final audit date: 2026-08-24
 
@@ -753,3 +752,54 @@ two consecutive final runs of the bounded three-file fixture, with 10 turns,
 three passing host-controlled verification stages, verified completion and no
 user-worktree mutation per run. This validates the progressive low-resource
 MVP, not unrestricted frontier-level autonomy.
+
+## Final source closure after kernel continuation - 2026-08-25
+
+The previous `474` count is historical. The current checkout was revalidated
+after the bounded tool-batch, verification-state, memory, code-review, and
+free-cloud-probe changes:
+
+```text
+bun run test       -> 499 pass / 1 skip / 0 fail / 1583 expectations
+bun run typecheck  -> PASS
+bun run build      -> PASS
+bun run smoke      -> PASS
+changed-file lint  -> PASS (Prettier)
+git diff --check   -> PASS
+real TUI PTY       -> PASS at the current terminal size; submit/cancel/
+                         local command/clean alternate-screen teardown
+```
+
+The current logs contain 152,097 valid JSONL records and zero malformed
+records. Historical and fixture activity still produces route rejection,
+provider-crash, `PATH_IS_FILE`, and checkpoint-preservation records; logging
+now exposes those causes, but rotation/retention and runtime stability remain
+open P1 work.
+
+The independent code-review agent is now a read-only host verifier. It checks
+objective evidence, task status, verification availability/pass state, diff
+cleanliness, and preservation of user work. It is a behavioral comparator for
+the public Claude Code loop, not a claim of access to or parity with Claude's
+private implementation.
+
+Free Groq/OpenRouter routing now has an explicit protocol-probe option. It
+probes no more than one verified-free model per provider when no measured local
+candidate satisfies the requested role, sends no repository context, and
+persists exact evidence. No live remote inference was run in this closure, so
+remote quota, latency, privacy and end-to-end coding remain `NO VERIFICABLE`.
+
+### Release decision
+
+**PASS:** deterministic agent-kernel regressions, hard capability admission,
+read-only policy, context sufficiency, bounded native tool protocol, typed
+recovery, completion truthfulness, memory safety, host code review, build,
+bundle smoke, and current TUI lifecycle.
+
+**OPEN:** OS-level process sandboxing on Windows, a full task-graph scheduler,
+model-backed Explore/Build/Verify delegation, arbitrary-repository long-horizon
+proof, complete live model/runtime/template matrix, live free-cloud journeys,
+full PTY resize acceptance, and standalone executable packaging.
+
+This is a functional small-model harness MVP. It is not honest to label it
+Claude Code, Codex, Opus, Sonnet, or Kimi parity until those open live and
+product-depth gates have evidence.

@@ -273,6 +273,23 @@ test("ReadFile keeps host truncation private while allowing bounded line ranges"
   expect(result.content).toBe("two");
 });
 
+test("ReadFile bounds a startLine-only request and exposes continuation metadata", async () => {
+  const { ctx, root } = await fixtureContext();
+  const lines = Array.from({ length: 300 }, (_, index) => `line-${index + 1}`);
+  await writeFile(path.join(root, "large-lines.txt"), lines.join("\n"), "utf8");
+
+  const result = await readFileTool.execute(
+    readFileTool.validate({ path: "large-lines.txt", startLine: 81 }),
+    ctx,
+  );
+
+  expect(result.content.split("\n")[0]).toBe("line-81");
+  expect(result.content.split("\n").at(-1)).toBe("line-240");
+  expect(result.truncated).toBe(false);
+  expect(result.hasMore).toBe(true);
+  expect(result.nextStartLine).toBe(241);
+});
+
 test("ReadFile on a directory throws PATH_IS_DIRECTORY, not a raw EISDIR", async () => {
   const { ctx } = await fixtureContext();
   const input = readFileTool.validate({ path: "skills/harness" });

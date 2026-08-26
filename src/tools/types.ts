@@ -34,6 +34,14 @@ export interface ToolExecutionContext {
   network?: boolean;
   checkpoint?: CheckpointService;
   checkpointId?: string;
+  /**
+   * Staged coding work may create a new file with WriteFile, but an existing
+   * observed file must be changed through an exact EditFile operation.
+   * Undefined preserves the direct tool contract for trusted callers.
+   */
+  allowExistingFileOverwrite?: boolean;
+  /** Host-discovered command used when RunTests is called without arguments. */
+  defaultTestCommand?: string;
   env?: Record<string, string | undefined>;
   requestApproval?: (request: ToolApprovalRequest) => Promise<boolean>;
   /**

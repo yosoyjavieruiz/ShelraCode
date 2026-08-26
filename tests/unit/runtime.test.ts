@@ -95,6 +95,7 @@ describe("local runtime adapters", () => {
                 quantization: { name: "Q8_0", bits_per_weight: 8 },
                 size_bytes: 1_646_573_056,
                 max_context_length: 32_768,
+                loaded_instances: [{ id: "qwen2.5-coder-1.5b-instruct" }],
                 capabilities: { trained_for_tool_use: false },
               },
               {
@@ -121,6 +122,7 @@ describe("local runtime adapters", () => {
     expect(model?.displayName).toBe("Qwen2.5 Coder 1.5B Instruct");
     expect(model?.local?.quant).toBe("Q8_0");
     expect(model?.local?.sizeBytes).toBe(1_646_573_056);
+    expect(model?.local?.loaded).toBe(true);
     expect(model?.local?.trainedForToolUse).toBe(false);
     expect(model?.capabilities.maxContext).toBe(32_768);
   });

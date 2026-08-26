@@ -1,4 +1,8 @@
-import type { TaskAnalysis, TaskClass } from "../shared/types.js";
+import type {
+  AgentCapabilityClass,
+  TaskAnalysis,
+  TaskClass,
+} from "../shared/types.js";
 import { isDirectRepositoryFactQuestion } from "../shared/repository-facts.js";
 
 /**
@@ -147,6 +151,12 @@ function requestsReview(objective: string, analysis: TaskAnalysis): boolean {
   );
 }
 
+function hasMutationIntent(objective: string): boolean {
+  return /\b(?:add|change|create|delete|edit|fix|implement|modify|refactor|remove|rename|update|write|agrega|arregla|cambia|crea|elimina|implementa|modifica|renombra|actualiza)\b/iu.test(
+    normalizeObjective(objective),
+  );
+}
+
 function policy(
   mode: TurnMode,
   values: Omit<TurnPolicy, "mode" | "allowedTools" | "toolNames"> & {
@@ -172,10 +182,16 @@ export function resolveTurnMode(
   if (requestsReview(objective, analysis) && explicitlyReadOnly(objective))
     return "review";
   if (requestsPlan(objective)) return "plan";
-  if (requestsReview(objective, analysis)) return "review";
 
   if (analysis.class === "COMMAND") return "command";
-  if (CODING_TASK_CLASSES.has(analysis.class)) return "coding";
+  // "Review ... for possible bugs" is an inspection request even when the
+  // task analyzer labels the subject as DEBUGGING. Only an explicit mutation
+  // verb (for example "review and fix") may widen it to coding.
+  if (requestsReview(objective, analysis) && !hasMutationIntent(objective))
+    return "review";
+  if (CODING_TASK_CLASSES.has(analysis.class) || hasMutationIntent(objective))
+    return "coding";
+  if (requestsReview(objective, analysis)) return "review";
   if (analysis.class === "EXPLAIN")
     return referencesRepository(objective) ? "workspace_question" : "knowledge";
   if (analysis.class === "SEARCH" || analysis.class === "ARCHITECTURE")
@@ -274,4 +290,29 @@ export function resolveTurnPolicyForObjective(
     toolNames: [],
     toolChoice: "none",
   };
+}
+
+/**
+ * A turn that can mutate the workspace must never be admitted with the
+ * read-only capability floor. Task analysis intentionally keeps small edits
+ * cheap for read-only callers, but the controller owns the final capability
+ * requirement once it has resolved the actual turn mode.
+ */
+export function requiredCapabilityForTurn(
+  mode: TurnMode,
+  repositoryRead: boolean,
+  analysis: TaskAnalysis,
+): AgentCapabilityClass {
+  if (!repositoryRead) return "chat_only";
+
+  if (mode === "coding") {
+    return analysis.requiredCapability === "advanced_coding_agent"
+      ? "advanced_coding_agent"
+      : "coding_agent";
+  }
+
+  return analysis.requiredCapability === "advanced_coding_agent" ||
+    analysis.requiredCapability === "coding_agent"
+    ? analysis.requiredCapability
+    : "workspace_reader";
 }

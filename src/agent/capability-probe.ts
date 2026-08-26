@@ -34,8 +34,12 @@ export interface AgentCapabilityProbeResult {
    * repeating the same tool call. Only meaningful (and only set true) when
    * `readTool` also passed — there is nothing to continue otherwise. */
   multiTurnTools: boolean;
-  /** All of the above. This — not raw parameter count or a `tools: true`
-   * flag — is what should gate autonomous coding eligibility. */
+  /**
+   * The protocol-level coding gate. This is sufficient for a bounded
+   * `coding_agent` work unit; the controller still owns permissions,
+   * checkpoints and verification. The stronger executable edit/test probe is
+   * required before promoting a candidate to `advanced_coding_agent`.
+   */
   agenticCodingEligible: boolean;
   agentCapabilityClass: AgentCapabilityClass;
   profile?: AgentCapabilityProfile;
@@ -44,7 +48,7 @@ export interface AgentCapabilityProbeResult {
   notes: string[];
 }
 
-export const AGENT_CAPABILITY_PROBE_VERSION = 11;
+export const AGENT_CAPABILITY_PROBE_VERSION = 14;
 
 const PROBE_TEMPERATURE = 0;
 const PROBE_MAX_OUTPUT_TOKENS = 512;
@@ -609,6 +613,8 @@ export async function probeAgentCapability(
     [{ role: "user", content: "Hi" }],
     modelId,
     signal,
+    [],
+    "none",
   );
   const conversation = chat.toolCalls.length === 0;
   if (!conversation)
@@ -833,9 +839,22 @@ export async function probeAgentCapability(
   const executableTestReady =
     !executableProbeRequired || execution?.testIteration === true;
   const recoveryReady = !executableProbeRequired || errorRecovery === true;
-  const codingReady = protocolCodingReady && executableEditReady;
+  // Protocol capability and executable capability are deliberately separate.
+  // A local model that can select/continue a valid edit is useful for a
+  // bounded host-controlled work unit even when the optional disposable
+  // edit/test exercise is inconclusive (for example because the runtime is
+  // contended or the model did not follow that particular fixture wording).
+  // Requiring the executable probe here turned valid local routes into
+  // workspace_reader and caused complex tasks to stop before their first
+  // real, verified action. The stronger advanced role keeps the executable
+  // evidence requirement below.
+  const codingReady = protocolCodingReady;
   const advancedReady =
-    protocolAdvancedReady && executableTestReady && recoveryReady;
+    protocolAdvancedReady &&
+    executableProbeRequired &&
+    executableEditReady &&
+    executableTestReady &&
+    recoveryReady;
   const readerReady = readTool && multiTurnTools;
   const agentCapabilityClass: AgentCapabilityClass = !readerReady
     ? "chat_only"
@@ -888,26 +907,32 @@ export async function probeAgentCapability(
 }
 
 /**
- * Probe only executable local candidates and attach the result to the exact
- * model/runtime pair. A failed probe is evidence of ineligibility, not a
- * reason to pretend that a catalog entry is a coding agent.
+ * Probe candidates from one explicitly selected source and attach the result
+ * to the exact model/runtime pair. A failed probe is evidence of
+ * ineligibility, not a reason to pretend that a catalog entry is an agent.
+ *
+ * Remote probes intentionally omit `root`: they measure protocol/tool-loop
+ * behavior only and never send repository content or run commands remotely.
+ * Local probes may opt into the disposable executable edit/test pass.
  */
-export async function probeLocalModelCapabilities(
+async function probeModelCapabilitiesForSource(
   candidates: readonly ModelCandidate[],
   providers: readonly ProviderAdapter[],
   signal: AbortSignal,
-  root?: string,
+  root: string | undefined,
   options: {
     hardware?: AgentProbeHardwareSnapshot;
     logger?: LocalCodeLogger;
-  } = {},
+    source: "local" | "free_cloud";
+  },
 ): Promise<ModelCandidate[]> {
+  const source = options.source;
   const providerById = new Map(
     providers.map((provider) => [provider.id, provider]),
   );
   const result: ModelCandidate[] = [];
   for (const candidate of candidates) {
-    if (candidate.source !== "local") {
+    if (candidate.source !== source) {
       result.push(candidate);
       continue;
     }
@@ -991,4 +1016,41 @@ export async function probeLocalModelCapabilities(
     }
   }
   return result;
+}
+
+/** Probe executable local candidates, including disposable edit/test checks. */
+export async function probeLocalModelCapabilities(
+  candidates: readonly ModelCandidate[],
+  providers: readonly ProviderAdapter[],
+  signal: AbortSignal,
+  root?: string,
+  options: {
+    hardware?: AgentProbeHardwareSnapshot;
+    logger?: LocalCodeLogger;
+  } = {},
+): Promise<ModelCandidate[]> {
+  return probeModelCapabilitiesForSource(candidates, providers, signal, root, {
+    ...options,
+    source: "local",
+  });
+}
+
+/**
+ * Probe only explicitly free-cloud candidates. This is protocol evidence, not
+ * repository execution evidence, so the result may admit a route for the
+ * measured tool protocol but never claims local sandbox or test execution.
+ */
+export async function probeFreeCloudModelCapabilities(
+  candidates: readonly ModelCandidate[],
+  providers: readonly ProviderAdapter[],
+  signal: AbortSignal,
+  options: { logger?: LocalCodeLogger } = {},
+): Promise<ModelCandidate[]> {
+  return probeModelCapabilitiesForSource(
+    candidates,
+    providers,
+    signal,
+    undefined,
+    { ...options, source: "free_cloud" },
+  );
 }

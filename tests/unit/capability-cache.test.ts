@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { isCapabilityProbeCurrent } from "../../src/agent/capability-cache.js";
+import {
+  isCapabilityProbeCurrent,
+  isCapabilityProbeFailure,
+} from "../../src/agent/capability-cache.js";
 import type { ModelCandidate } from "../../src/shared/types.js";
 
 const hardware = {
@@ -85,4 +88,14 @@ test("capability cache rejects legacy probes without reproducibility metadata", 
       environment: undefined,
     }),
   ).toBe(false);
+});
+
+test("capability cache never treats a transport failure as model behavior", () => {
+  const failed = {
+    ...probe,
+    notes: ["Capability probe failed: The operation timed out."],
+  };
+
+  expect(isCapabilityProbeFailure(failed)).toBe(true);
+  expect(isCapabilityProbeCurrent(candidate, failed, hardware)).toBe(false);
 });

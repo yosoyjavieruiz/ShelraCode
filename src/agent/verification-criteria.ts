@@ -12,9 +12,14 @@ export interface StructuralCodingCriteriaChecks {
    */
   reviewObjective?: () =>
     ObjectiveReviewResult | boolean | Promise<ObjectiveReviewResult | boolean>;
+  verificationState?: "not_required" | "available" | "unavailable";
 }
 
-function verificationPassed(ledger: AgentTaskLedger): boolean {
+function verificationPassed(
+  ledger: AgentTaskLedger,
+  state: StructuralCodingCriteriaChecks["verificationState"],
+): boolean {
+  if (state === "unavailable") return false;
   if (ledger.verificationPlan.length === 0) return true;
   return ledger.verificationPlan.every((required) => {
     const latest = [...ledger.verificationRuns]
@@ -65,7 +70,10 @@ export async function verifyStructuralCodingCriteria(
     typeof objectiveReview === "boolean"
       ? objectiveReview
       : (objectiveReview?.pass ?? ledger.filesChanged.length > 0);
-  const verificationReady = verificationPassed(ledger);
+  const verificationReady = verificationPassed(
+    ledger,
+    checks.verificationState,
+  );
   const reviewPassed = await checks.reviewFinalDiff();
   const userWorkPreserved = await checks.userWorkPreserved();
 
@@ -88,7 +96,11 @@ export async function verifyStructuralCodingCriteria(
 
   if (verificationReady) satisfiedCriterionIds.push("criterion-2");
   else {
-    issues.push("Configured project verification has not passed.");
+    issues.push(
+      checks.verificationState === "unavailable"
+        ? "No host-owned project verification command is available; completion cannot be claimed as verified."
+        : "Configured project verification has not passed.",
+    );
     nextActions.push(
       "Inspect the latest verification failure, repair the affected code, and rerun the configured verification.",
     );

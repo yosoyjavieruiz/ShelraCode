@@ -46,6 +46,19 @@ function stateSummary(ledger: AgentTaskLedger): string {
     evidence: ledger.evidence.slice(-12),
     hypotheses: ledger.hypotheses,
     plan: ledger.plan,
+    taskGraph: ledger.taskGraph
+      ? {
+          rootObjective: ledger.taskGraph.rootObjective,
+          currentNodeId: ledger.taskGraph.currentNodeId,
+          nodes: ledger.taskGraph.nodes.map((node) => ({
+            id: node.id,
+            status: node.status,
+            dependencies: node.dependencies,
+            objective: node.objective,
+            lastFailure: node.lastFailure,
+          })),
+        }
+      : undefined,
     verificationPlan: ledger.verificationPlan,
     filesRead: ledger.filesRead,
     filesChanged: ledger.filesChanged,

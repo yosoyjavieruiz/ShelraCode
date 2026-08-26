@@ -14,6 +14,7 @@ import { inspectRepositorySnapshot } from "./repository-snapshot.js";
 import { loadScopedInstructions } from "./instructions.js";
 import { isDirectRepositoryFactQuestion } from "../shared/repository-facts.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
+import { selectRelevantMemory } from "../shared/memory.js";
 
 const priorityNames = new Set([
   "README",
@@ -183,14 +184,47 @@ function objectiveTerms(objective: string): string[] {
     .slice(0, 10);
 }
 
+interface ObjectiveSearchResult {
+  matches: string[];
+  backend: "rg" | "fallback" | "no_matches" | "unavailable";
+}
+
+async function fallbackObjectiveSearch(
+  root: string,
+  files: readonly string[],
+  terms: readonly string[],
+  signal?: AbortSignal,
+): Promise<ObjectiveSearchResult> {
+  const normalizedTerms = terms.map((term) => term.toLowerCase());
+  const matches: string[] = [];
+  for (const relative of files) {
+    if (matches.length >= 32 || signal?.aborted) break;
+    if (isNeverRemotePath(relative) || isIgnoredContextFile(relative)) continue;
+    try {
+      const content = (await readFile(path.join(root, relative), "utf8"))
+        .slice(0, 512_000)
+        .toLowerCase();
+      if (normalizedTerms.some((term) => content.includes(term)))
+        matches.push(normalizePath(relative));
+    } catch {
+      // A disappearing or binary file is not evidence of a match.
+    }
+  }
+  return {
+    matches,
+    backend: matches.length > 0 ? "fallback" : "no_matches",
+  };
+}
+
 async function objectiveSearchMatches(
   root: string,
   objective: string,
+  files: readonly string[],
   signal?: AbortSignal,
   logger?: LocalCodeLogger,
-): Promise<string[]> {
+): Promise<ObjectiveSearchResult> {
   const terms = objectiveTerms(objective);
-  if (terms.length === 0) return [];
+  if (terms.length === 0) return { matches: [], backend: "no_matches" };
   const args = [
     "--files-with-matches",
     "--hidden",
@@ -209,23 +243,49 @@ async function objectiveSearchMatches(
     "--",
     ".",
   ];
-  const result = await runCommand("rg", args, {
-    cwd: root,
-    timeoutMs: 5_000,
-    signal,
-    logger,
-  });
-  if (result.exitCode !== 0 && result.exitCode !== 1) return [];
-  return result.stdout
-    .split(/\r?\n/u)
-    .map((value) => normalizePath(value.trim()))
-    .filter(
-      (value) =>
-        value.length > 0 &&
-        !isNeverRemotePath(value) &&
-        !isIgnoredContextFile(value),
-    )
-    .slice(0, 32);
+  let result: Awaited<ReturnType<typeof runCommand>>;
+  try {
+    // Objective search scans the repository contents, not just its file
+    // index. Five seconds was below the observed time for this repository,
+    // so a normal host variation became a fatal task TimeoutError. Keep the
+    // process bounded, but recover to the deterministic file-list fallback
+    // when the optional accelerator is slow.
+    result = await runCommand("rg", args, {
+      cwd: root,
+      timeoutMs: 20_000,
+      signal,
+      logger,
+    });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (error instanceof DOMException && error.name === "AbortError")
+      throw error;
+    logger?.warn("context.search.fallback", {
+      reason: error instanceof Error ? error.name : "unknown",
+    });
+    return fallbackObjectiveSearch(root, files, terms, signal);
+  }
+  if (result.exitCode === 0)
+    return {
+      matches: result.stdout
+        .split(/\r?\n/u)
+        .map((value) => normalizePath(value.trim()))
+        .filter(
+          (value) =>
+            value.length > 0 &&
+            !isNeverRemotePath(value) &&
+            !isIgnoredContextFile(value),
+        )
+        .slice(0, 32),
+      backend: "rg",
+    };
+  if (result.exitCode === 1) return { matches: [], backend: "no_matches" };
+  if (result.exitCode !== 127) return { matches: [], backend: "unavailable" };
+
+  // `rg` is optional. Do not turn its missing-executable status into a false
+  // zero-match result: scan the already discovered, bounded file list with a
+  // conservative text fallback and expose the backend in the context proof.
+  return fallbackObjectiveSearch(root, files, terms, signal);
 }
 
 function isRootPath(relative: string): boolean {
@@ -323,14 +383,16 @@ async function buildRepositoryContextInternal(
   const files = await discoverFiles(options.root, options.signal, logger);
   const explicit = options.explicitPaths ?? [];
   const factQuestion = isDirectRepositoryFactQuestion(options.objective);
-  const relevantMatches = factQuestion
-    ? []
+  const objectiveSearch = factQuestion
+    ? { matches: [], backend: "not_needed" as const }
     : await objectiveSearchMatches(
         options.root,
         options.objective,
+        files,
         options.signal,
         logger,
       );
+  const relevantMatches = objectiveSearch.matches;
   const ordered = orderFiles(
     factQuestion ? rootFactFiles(files, snapshot) : files,
     [...explicit, ...relevantMatches],
@@ -345,6 +407,11 @@ async function buildRepositoryContextInternal(
         options.signal,
       );
   const maxChars = options.maxChars ?? 40_000;
+  const memoryFacts = selectRelevantMemory(
+    options.memoryFacts ?? [],
+    options.objective,
+    snapshot.revision,
+  );
   let usedChars = 0;
   let containsHighConfidenceSecret = false;
   const secretPaths: string[] = [];
@@ -399,6 +466,19 @@ async function buildRepositoryContextInternal(
     }
   }
 
+  const hasDirectFactEvidence =
+    factQuestion &&
+    (snapshot.manifests.length > 0 || snapshot.languages.length > 0) &&
+    includedFiles.length > 0;
+  const hasExplicitEvidence =
+    explicit.length > 0 &&
+    explicit.some((candidate) =>
+      includedFiles.includes(normalizePath(candidate)),
+    );
+  const evidenceState: RepositoryContext["evidenceState"] =
+    relevantMatches.length > 0 || hasDirectFactEvidence || hasExplicitEvidence
+      ? "SUFFICIENT"
+      : "INSUFFICIENT";
   const result = {
     files: includedFiles,
     relevantMatches,
@@ -409,6 +489,15 @@ async function buildRepositoryContextInternal(
       `- Source roots: ${snapshot.sourceRoots.join(", ") || "unknown"}`,
       `- Test roots: ${snapshot.testRoots.join(", ") || "unknown"}`,
       `- Repository files: ${files.length}`,
+      ...(memoryFacts.length > 0
+        ? [
+            "Historical project memory (untrusted hints; verify against current files before relying on it):",
+            ...memoryFacts.map(
+              (fact) =>
+                `- [${fact.provenance}; confidence ${fact.confidence.toFixed(2)}] ${fact.fact} (${fact.evidence.map((evidence) => evidence.source).join(", ") || "no source"})`,
+            ),
+          ]
+        : []),
       ...(relevantMatches.length > 0
         ? [
             "Objective search matches (host-discovered evidence; inspect before editing):",
@@ -426,6 +515,9 @@ async function buildRepositoryContextInternal(
     instructions: loadedInstructions.map((instruction) => instruction.path),
     containsHighConfidenceSecret,
     secretPaths,
+    evidenceState,
+    searchBackend: objectiveSearch.backend,
+    memoryFacts,
   };
   logger?.info("context.discovery.finished", {
     discoveredFileCount: files.length,
@@ -442,6 +534,8 @@ async function buildRepositoryContextInternal(
     sensitiveContentDetected: containsHighConfidenceSecret,
     sensitivePathCount: secretPaths.length,
     directFactQuestion: factQuestion,
+    evidenceState,
+    searchBackend: objectiveSearch.backend,
   });
   return result;
 }

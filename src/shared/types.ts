@@ -136,6 +136,8 @@ export interface ModelCandidate {
   };
   local?: {
     runtime: string;
+    /** Whether the runtime currently reports a loaded inference instance. */
+    loaded?: boolean;
     quant?: string;
     modelRevision?: string;
     runtimeVersion?: string;
@@ -152,11 +154,12 @@ export interface ModelCandidate {
   /**
    * Result of running `probeAgentCapability` against this exact
    * model+runtime combination, if it has been probed. Optional and
-   * opt-in for discovery. The result is routing evidence and a quality
-   * signal, not an authorization boundary: an otherwise policy-valid local
-   * route remains executable when the probe is weaker or unavailable. Actual
-   * tool support, permissions, workspace boundaries, and verification remain
-   * enforced independently by the host.
+   * opt-in for discovery. The result is routing evidence and a capability
+   * admission boundary for any task that needs more than conversation. A
+   * weaker or unmeasured route may still be used for a smaller role when its
+   * required capability is lower; it must not be promoted by score alone.
+   * Actual tool support, permissions, workspace boundaries, and verification
+   * remain enforced independently by the host.
    */
   agentProbe?: {
     /** Algorithm revision for persisted capability evidence. */
@@ -236,6 +239,23 @@ export interface RouteRequest {
   routingMode: RoutingMode;
   contextTokens: number;
   candidates: ModelCandidate[];
+  /** User-selected model is a preference, never a hard candidate filter. */
+  preferredCandidateId?: string;
+  /**
+   * A complex parent objective may be executed as a sequence of host-owned,
+   * verified work units. This does not promote a weak model: it changes the
+   * admission floor only for a non-empty bounded scope and still requires a
+   * measured coding-agent capability for mutation.
+   */
+  execution?: {
+    /**
+     * `discovery` is a read-only preparation stage for complex objectives
+     * whose mutation scope has not been proven yet. It must never be treated
+     * as a capability downgrade for workspace writes.
+     */
+    strategy: "direct" | "progressive" | "discovery";
+    boundedScope?: string[];
+  };
   quotas?: Record<string, QuotaSnapshot | undefined>;
   quotaMaxAgeMs?: number;
   containsHighConfidenceSecret?: boolean;

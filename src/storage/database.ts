@@ -3,8 +3,9 @@ import type { QuotaSnapshot } from "../shared/types.js";
 import type { ModelCandidate } from "../shared/types.js";
 import type { AgentTaskLedger } from "../agent/task-state.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
+import type { MemoryFact, MemoryKind } from "../shared/memory.js";
 
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 type StoredAgentProbe = NonNullable<ModelCandidate["agentProbe"]>;
 
 interface StoredModelCapability {
@@ -121,6 +122,20 @@ export class LocalCodeDatabase {
         probe_json TEXT NOT NULL,
         observed_at TEXT NOT NULL,
         PRIMARY KEY (provider_id, model_id)
+      );
+      CREATE TABLE IF NOT EXISTS memory_facts (
+        id TEXT PRIMARY KEY,
+        repository TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        fact TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        provenance TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        scope_json TEXT NOT NULL,
+        tags_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_validated_at TEXT NOT NULL,
+        expires_at TEXT
       );`,
     );
 
@@ -404,6 +419,78 @@ export class LocalCodeDatabase {
     return parsed ? { ...parsed, observedAt: row.observed_at } : undefined;
   }
 
+  saveMemoryFact(fact: MemoryFact): void {
+    this.db
+      .query(
+        `INSERT INTO memory_facts
+          (id, repository, kind, fact, evidence_json, provenance, confidence,
+           scope_json, tags_json, created_at, last_validated_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           repository = excluded.repository,
+           kind = excluded.kind,
+           fact = excluded.fact,
+           evidence_json = excluded.evidence_json,
+           provenance = excluded.provenance,
+           confidence = excluded.confidence,
+           scope_json = excluded.scope_json,
+           tags_json = excluded.tags_json,
+           last_validated_at = excluded.last_validated_at,
+           expires_at = excluded.expires_at`,
+      )
+      .run(
+        fact.id,
+        fact.repository,
+        fact.kind,
+        fact.fact,
+        JSON.stringify(fact.evidence),
+        fact.provenance,
+        Math.max(0, Math.min(1, fact.confidence)),
+        JSON.stringify(fact.scope),
+        JSON.stringify(fact.tags),
+        fact.createdAt,
+        fact.lastValidatedAt,
+        fact.expiresAt ?? null,
+      );
+    this.logger?.debug("storage.memory.saved", {
+      memoryId: fact.id,
+      kind: fact.kind,
+      repository: fact.repository,
+    });
+  }
+
+  listMemoryFacts(
+    repository: string,
+    kind?: MemoryKind,
+    limit = 100,
+  ): MemoryFact[] {
+    const rows = kind
+      ? this.db
+          .query<StoredMemoryRow, [string, string, number]>(
+            `SELECT id, repository, kind, fact, evidence_json, provenance,
+                    confidence, scope_json, tags_json, created_at,
+                    last_validated_at, expires_at
+             FROM memory_facts WHERE repository = ? AND kind = ?
+             ORDER BY last_validated_at DESC LIMIT ?`,
+          )
+          .all(repository, kind, limit)
+      : this.db
+          .query<StoredMemoryRow, [string, number]>(
+            `SELECT id, repository, kind, fact, evidence_json, provenance,
+                    confidence, scope_json, tags_json, created_at,
+                    last_validated_at, expires_at
+             FROM memory_facts WHERE repository = ?
+             ORDER BY last_validated_at DESC LIMIT ?`,
+          )
+          .all(repository, limit);
+    return rows.flatMap(parseMemoryFact);
+  }
+
+  invalidateMemoryFact(id: string): void {
+    this.db.query("DELETE FROM memory_facts WHERE id = ?").run(id);
+    this.logger?.debug("storage.memory.invalidated", { memoryId: id });
+  }
+
   createCheckpoint(
     id: string,
     taskId: string,
@@ -505,6 +592,62 @@ export class LocalCodeDatabase {
   close(): void {
     this.logger?.info("storage.closed", {});
     this.db.close();
+  }
+}
+
+interface StoredMemoryRow {
+  id: string;
+  repository: string;
+  kind: string;
+  fact: string;
+  evidence_json: string;
+  provenance: string;
+  confidence: number;
+  scope_json: string;
+  tags_json: string;
+  created_at: string;
+  last_validated_at: string;
+  expires_at: string | null;
+}
+
+function parseMemoryFact(row: StoredMemoryRow): MemoryFact[] {
+  if (
+    !["semantic", "episodic", "procedural"].includes(row.kind) ||
+    !["observed", "user_confirmed", "inferred"].includes(row.provenance)
+  )
+    return [];
+  try {
+    const evidence = JSON.parse(row.evidence_json) as unknown;
+    const scope = JSON.parse(row.scope_json) as unknown;
+    const tags = JSON.parse(row.tags_json) as unknown;
+    if (
+      !Array.isArray(evidence) ||
+      !Array.isArray(scope) ||
+      !Array.isArray(tags)
+    )
+      return [];
+    return [
+      {
+        id: row.id,
+        repository: row.repository,
+        kind: row.kind as MemoryKind,
+        fact: row.fact,
+        evidence: evidence as MemoryFact["evidence"],
+        provenance: row.provenance as MemoryFact["provenance"],
+        confidence: row.confidence,
+        scope: scope.filter(
+          (value): value is string => typeof value === "string",
+        ),
+        tags: tags.filter(
+          (value): value is string => typeof value === "string",
+        ),
+        createdAt: row.created_at,
+        lastValidatedAt: row.last_validated_at,
+        ...(row.expires_at ? { expiresAt: row.expires_at } : {}),
+      },
+    ];
+  } catch {
+    return [];
   }
 }
 

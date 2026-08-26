@@ -160,13 +160,13 @@ under the same evidence contract.
 The newly available Qwen 7B was run through the actual LM Studio adapter and
 the same disposable fixture boundary:
 
-| Configuration                                                       | Result                                                                          |
-| ------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Qwen2.5 Coder 7B Q6_K + LM Studio + Agent Kernel, simple edit/test  | PASS: completed and verified; 1 file changed; tests passed                      |
-| Qwen2.5 Coder 7B Q6_K + LM Studio + Agent Kernel, multi-file coding | FAIL safely: blocked; 0 writes; no false completion                             |
-| Qwen2.5 Coder 7B capability doctor                                  | `workspace_reader`, not coding-eligible                                         |
-| Strong remote benchmark                                             | NOT RUN; no remote inference authorized                                         |
-| Hybrid route                                                        | Historical run was not selected because the old capability-class veto rejected the local model; current routing no longer applies that veto |
+| Configuration                                                       | Result                                                                                                          |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Qwen2.5 Coder 7B Q6_K + LM Studio + Agent Kernel, simple edit/test  | PASS: completed and verified; 1 file changed; tests passed                                                      |
+| Qwen2.5 Coder 7B Q6_K + LM Studio + Agent Kernel, multi-file coding | FAIL safely: blocked; 0 writes; no false completion                                                             |
+| Qwen2.5 Coder 7B capability doctor                                  | `workspace_reader`, not coding-eligible                                                                         |
+| Strong remote benchmark                                             | NOT RUN; no remote inference authorized                                                                         |
+| Hybrid route                                                        | Not evaluated in the current run; capability admission remains required before any free/local route is selected |
 
 The complex run's failure mode was model/tool behavior, not a harness false
 success: the model emitted planning prose and fenced tool-shaped snippets,
@@ -320,3 +320,36 @@ bun run smoke           -> PASS
 The direct source `doctor` smoke with an isolated state/log directory produced
 29 valid JSONL records and was summarized by `logs:inspect`. No remote model
 call or live coding claim is inferred from this observability smoke.
+
+## Current evaluation closure - 2026-08-25
+
+The latest deterministic run after the capability and review changes is:
+
+```text
+bun run test       -> 499 pass / 1 skip / 0 fail / 1583 expectations
+bun run typecheck  -> PASS
+bun run build      -> PASS
+bun run smoke      -> PASS
+scoped Prettier    -> PASS for all changed files
+real TUI PTY       -> PASS; submit, cancellation, local command, clean exit
+```
+
+The global formatter still reports 14 pre-existing files outside the changed
+set. That is recorded as a repository hygiene failure, not hidden by running a
+blanket formatter over unrelated work.
+
+New deterministic coverage includes:
+
+- oversized native tool batches are rejected before any tool executes;
+- free-cloud capability probing is explicit, source-filtered, and never probes
+  local candidates through the remote path;
+- memory facts are bounded, provenance-aware, revision-aware and secret-safe;
+- the read-only code-review agent blocks unavailable verification and passes
+  only evidence-backed verified ledgers;
+- unavailable verification is distinct from `not_required` and cannot produce
+  a verified completion.
+
+Live remote inference was not run in this closure. The free-cloud probe is
+implemented and bounded, but Groq/OpenRouter success, quota, latency and
+privacy are still account-specific live evidence rather than a claim derived
+from a provider key or catalog entry.

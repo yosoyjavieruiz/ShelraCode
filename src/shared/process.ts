@@ -1,4 +1,11 @@
 import type { LocalCodeLogger } from "./logging.js";
+import {
+  commandRequiresNetwork,
+  ProcessPolicyError,
+  type ProcessNetworkPolicy,
+} from "./process-policy.js";
+
+export { ProcessPolicyError } from "./process-policy.js";
 
 export interface ProcessResult {
   exitCode: number;
@@ -20,6 +27,10 @@ export interface ProcessOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   env?: Record<string, string | undefined>;
+  /** Lower-level egress policy for process wrappers. */
+  network?: ProcessNetworkPolicy;
+  /** Original user/model command when `command` is a shell executable. */
+  policyCommand?: string;
   /**
    * Fired with output as the process produces it, batched to roughly one
    * flush every ~150ms per stream rather than once per OS pipe read — a
@@ -34,6 +45,16 @@ export interface ProcessOptions {
   /** Structured lifecycle logging; command output is never logged verbatim. */
   logger?: LocalCodeLogger;
 }
+
+const PORTABLE_SHELL_RUNNER = [
+  'import { $ } from "bun";',
+  'const encoded = process.argv[1];',
+  'if (!encoded) throw new Error("Missing encoded shell command");',
+  'const command = Buffer.from(encoded, "base64").toString("utf8");',
+  'const rawCommand = { raw: command };',
+  'const result = await $`${rawCommand}`.nothrow();',
+  'process.exit(result.exitCode);',
+].join("\n");
 
 function abortError(): DOMException {
   return new DOMException("Process aborted", "AbortError");
@@ -126,6 +147,9 @@ export async function runCommand(
   options: ProcessOptions = {},
 ): Promise<ProcessResult> {
   if (options.signal?.aborted) throw abortError();
+  const policyCommand = options.policyCommand ?? [command, ...args].join(" ");
+  if (options.network === "deny" && commandRequiresNetwork(policyCommand))
+    throw new ProcessPolicyError(policyCommand);
 
   const started = performance.now();
   options.logger?.debug("process.started", {
@@ -232,4 +256,22 @@ export async function runCommand(
     if (timer) clearTimeout(timer);
     options.signal?.removeEventListener("abort", stop);
   }
+}
+
+/**
+ * Execute shell text through Bun's cross-platform parser. Transporting the
+ * command as base64 avoids the nested-quote corruption caused by cmd.exe /c
+ * on Windows while retaining the existing process policy, output, timeout,
+ * and cancellation boundary.
+ */
+export async function runShellCommand(
+  command: string,
+  options: ProcessOptions = {},
+): Promise<ProcessResult> {
+  const encoded = Buffer.from(command, "utf8").toString("base64");
+  return runCommand(
+    process.execPath,
+    ["-e", PORTABLE_SHELL_RUNNER, encoded],
+    { ...options, policyCommand: options.policyCommand ?? command },
+  );
 }

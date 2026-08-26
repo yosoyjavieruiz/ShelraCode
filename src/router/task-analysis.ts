@@ -26,11 +26,9 @@ function requiredCapability(
     ) {
       return "advanced_coding_agent";
     }
-    // Bounded, single-file work gets a lower starting target than a complex
-    // multi-file objective. This is a routing preference and context hint,
-    // not an eligibility floor: the router may still attempt the only
-    // policy-valid local model, including a 1.5B model, and host verification
-    // decides whether the real result satisfies the objective.
+    // Bounded, single-file work gets a lower capability requirement than a
+    // complex multi-file objective. This lets an accessible local model serve
+    // a small bounded work unit without authorizing it for an advanced task.
     return "workspace_reader";
   }
   return "workspace_reader";

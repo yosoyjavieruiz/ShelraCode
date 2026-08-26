@@ -36,18 +36,22 @@ export interface AgentTask {
   /** Host-framed constraints retained in the authoritative task ledger. */
   constraints?: string[];
   context?: string;
+  /** Host discovery result used by the write gate; it is not model authority. */
+  contextEvidenceState?: "SUFFICIENT" | "INSUFFICIENT" | "CONFLICTING";
   containsHighConfidenceSecret?: boolean;
   /** @deprecated Use verificationCommands for new callers. */
   verificationCommand?: string;
   /** Host-owned commands required before a coding task can complete. */
   verificationCommands?: VerificationCommand[];
+  /** Explicitly distinguishes unavailable checks from a task that needs none. */
+  verificationPolicy?: "required" | "unavailable" | "not_required";
   maxTurns?: number;
   /** Host-controlled generation cap; prevents an unbounded provider turn. */
   maxOutputTokens?: number;
   /** Host-controlled sampling temperature; coding defaults to 0.2. */
   temperature?: number;
   contextBudgetChars?: number;
-  /** Host-selected staged targets for guarded low-capability coding. */
+  /** Host-selected bounded work-unit targets; never a capability downgrade. */
   stagedPaths?: string[];
   /**
    * Which system-prompt profile to assemble for this turn. Defaults to

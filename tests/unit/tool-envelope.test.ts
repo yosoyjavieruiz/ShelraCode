@@ -117,3 +117,16 @@ test("recovers adjacent JSON tool objects without leaking them as assistant text
     },
   ]);
 });
+
+test("rejects an oversized textual tool batch before execution", () => {
+  const batch = JSON.stringify(
+    Array.from({ length: 100 }, (_, index) => ({
+      name: "ReadFile",
+      arguments: { path: `file-${index}.txt` },
+    })),
+  );
+
+  expect(() => recoverTextToolCalls(batch, 9)).toThrow(
+    "maximum tool calls per response",
+  );
+});

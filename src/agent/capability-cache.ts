@@ -3,6 +3,21 @@ import type {
   ModelCandidate,
 } from "../shared/types.js";
 
+/**
+ * A provider/runtime failure is not behavioral evidence that a model is
+ * chat-only. Keep this distinction explicit so a timeout cannot poison the
+ * capability cache and make a previously usable local model disappear from
+ * routing.
+ */
+export function isCapabilityProbeFailure(
+  probe: ModelCandidate["agentProbe"] | undefined,
+): boolean {
+  return (
+    probe?.notes.some((note) => note.startsWith("Capability probe failed:")) ??
+    false
+  );
+}
+
 const HARDWARE_FIELDS: Array<keyof AgentProbeHardwareSnapshot> = [
   "os",
   "platform",
@@ -40,6 +55,7 @@ export function isCapabilityProbeCurrent(
   probe: ModelCandidate["agentProbe"] | undefined,
   hardware?: AgentProbeHardwareSnapshot,
 ): boolean {
+  if (isCapabilityProbeFailure(probe)) return false;
   const environment = probe?.environment;
   if (!environment) return false;
 

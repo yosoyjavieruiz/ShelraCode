@@ -48,30 +48,34 @@ This repository contains a working Bun/TypeScript vertical slice with:
 - deterministic fake-provider tests and fixture repositories that do not need
   a live model or paid credentials.
 
-The current 1.5B route is intentionally accessible: if the local model
-exposes executable tools and passes the privacy/runtime checks, the router can
-attempt it even when its empirical capability probe is only `chat_only` or
-`workspace_reader`. That is a route-selection decision, not a claim that a
-1.5B model has frontier-level reasoning. Verification still decides whether
-the task is complete.
+The current 1.5B route is intentionally accessible for bounded work, not
+unconditionally autonomous. The router first requires measured capability for
+the requested role: a bounded single-file task may use a verified
+`workspace_reader`, while a complex or multi-file task requires
+`advanced_coding_agent`. An unmeasured or `chat_only` model cannot be forced
+through a coding task merely because it exposes a tools flag. Verification,
+the final diff review, and user-work preservation still decide whether the
+task is complete.
 
 ## Current evidence — 2026-08-25
 
 The following was run from the current checkout:
 
 ```text
-bun run test       -> 474 pass, 1 skip, 0 fail
+bun run test       -> 499 pass, 1 skip, 0 fail
 bun run typecheck  -> PASS
 bun run build      -> PASS; current source bundled to dist/index.js
 bun run smoke      -> PASS for source and bundle help/version/doctor
+scoped Prettier    -> PASS for every changed file
+real TUI smoke     -> PASS; type, submit, Esc cancel, /models, Ctrl+C exit
 ```
 
-The real local catalog currently discovers Qwen3 8B, Qwen2.5 Coder 7B, and
-Qwen2.5 Coder 1.5B through LM Studio. A direct route check selected
-`lm-studio/qwen2.5-coder-1.5b-instruct` for a `DEBUGGING` task with complexity
-`0.9` when it was the only candidate; it exposed tools and had zero routing
-rejections. That proves the former capability-class stop is removed. It does
-not prove that the model will finish every complex repository task.
+The exact live model matrix is configuration-specific. Local model discovery,
+runtime, quantization, chat template and capability-probe evidence are stored
+separately; a catalog entry or a model name is not proof of coding eligibility.
+The deterministic suite proves the admission boundary and bounded fixture
+workflow, but it does not prove that every installed 1.5B model will finish
+complex repository work.
 
 The verified artifact is the Bun bundle plus OpenTUI's platform runtime
 assets. No standalone `.exe` is produced yet.
@@ -87,9 +91,9 @@ requiring a powerful workstation or an unexpected bill.
    privacy, or quota.
 4. Remote repository content is subject to privacy and secret gates before
    quality or model preference is considered.
-5. A capability label is evidence and a score signal, not authorization. A
-   model may be attempted when its tools are executable; host verification can
-   still block completion.
+5. A capability label is empirical admission evidence. It must meet the
+   required task role before quality scoring; host verification can still block
+   completion.
 6. The model requests actions; the host decides whether those actions are
    allowed.
 7. “The model stopped generating” is not the same as “the task is complete.”
@@ -189,7 +193,7 @@ flowchart TD
     P --> X[Context and evidence compiler]
     X --> R[Explainable router]
     R --> A[Normalized provider adapter]
-    A --> K[Agent kernel]
+    A --> K[Agent kernel + task graph]
     K --> G[Schema and permission boundary]
     G --> T[Workspace tools]
     T --> K
@@ -201,21 +205,21 @@ flowchart TD
 
 The source ownership is intentionally visible:
 
-| Layer          | Active source                                                         | Responsibility                                                                     |
-| -------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Entry point    | `src/index.ts`                                                        | CLI command parsing and launch                                                     |
-| Control plane  | `src/cli/control-plane.ts`                                            | Settings, SQLite, hardware, runtime and provider discovery                         |
-| Turn policy    | `src/agent/turn-policy.ts`                                            | Classifies intent and derives tool/read/write/network policy                       |
-| Context        | `src/context/*`                                                       | Repository snapshot, manifests, instructions, commands and evidence sufficiency    |
-| Router         | `src/router/*`                                                        | Task analysis, privacy/cost/tool/context/health/quota gates, score and explanation |
-| Agent kernel   | `src/agent/loop.ts`                                                   | Model turns, normalized tool calls, observation, recovery and task lifecycle       |
-| Tools          | `src/tools/*`                                                         | Validated filesystem, Git, shell and test operations                               |
-| Providers      | `src/providers/*`                                                     | Cloud discovery, streaming, quota and failure normalization                        |
-| Local runtimes | `src/runtimes/*`                                                      | LM Studio, Ollama and OpenAI-compatible local runtime discovery                    |
-| Safety         | `src/privacy/*`, `src/shared/paths.ts`, `src/checkpoint/*`            | Secret filtering, workspace boundaries, checkpoints and preservation               |
-| Verification   | `src/agent/verification-plan.ts`, `verifier.ts`, `completion-gate.ts` | Host-owned verification and truthful completion                                    |
-| Persistence    | `src/storage/database.ts`                                             | Settings, sessions, routes, quotas, checkpoints and task ledgers                   |
-| Presentation   | `src/tui/presentation/*`, `src/tui/components/*`                      | Maps domain events to OpenTUI/Solid views                                          |
+| Layer          | Active source                                                         | Responsibility                                                                                           |
+| -------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Entry point    | `src/index.ts`                                                        | CLI command parsing and launch                                                                           |
+| Control plane  | `src/cli/control-plane.ts`                                            | Settings, SQLite, hardware, runtime and provider discovery                                               |
+| Turn policy    | `src/agent/turn-policy.ts`                                            | Classifies intent and derives tool/read/write/network policy                                             |
+| Context        | `src/context/*`                                                       | Repository snapshot, manifests, instructions, commands and evidence sufficiency                          |
+| Router         | `src/router/*`                                                        | Task analysis, capability admission, privacy/cost/tool/context/health/quota gates, score and explanation |
+| Agent kernel   | `src/agent/loop.ts`                                                   | Model turns, normalized tool calls, observation, recovery and task lifecycle                             |
+| Tools          | `src/tools/*`                                                         | Validated filesystem, Git, shell and test operations                                                     |
+| Providers      | `src/providers/*`                                                     | Cloud discovery, streaming, quota and failure normalization                                              |
+| Local runtimes | `src/runtimes/*`                                                      | LM Studio, Ollama and OpenAI-compatible local runtime discovery                                          |
+| Safety         | `src/privacy/*`, `src/shared/paths.ts`, `src/checkpoint/*`            | Secret filtering, workspace boundaries, checkpoints and preservation                                     |
+| Verification   | `src/agent/verification-plan.ts`, `verifier.ts`, `completion-gate.ts` | Host-owned verification and truthful completion                                                          |
+| Persistence    | `src/storage/database.ts`                                             | Settings, sessions, routes, quotas, checkpoints and task ledgers                                         |
+| Presentation   | `src/tui/presentation/*`, `src/tui/components/*`                      | Maps domain events to OpenTUI/Solid views                                                                |
 
 Core business logic does not import TUI code. Provider-specific wire objects
 stop at adapters. Local runtime differences stop at the runtime adapter. The
@@ -231,8 +235,8 @@ input
   → derive permissions and available tools
   → build bounded repository context when needed
   → discover executable candidates
-  → apply hard privacy/cost/tool/context/health/quota gates
-  → score capability evidence and route quality
+  → apply privacy, cost, and required-capability admission gates
+  → apply executable-tool/context/health/quota gates and score eligible routes
   → select and explain a candidate
   → stream normalized assistant text/tool events
   → validate, authorize, and execute tools
@@ -277,14 +281,15 @@ as general repository context. Large files, command output and old transcript
 turns are bounded or compacted; raw artifacts remain outside the active model
 context.
 
-### 3. Routing has hard gates and soft signals
+### 3. Routing has hard gates before soft signals
 
-The active router does not treat every model capability label as a hard gate.
+The active router treats required model capability as a hard gate before score.
 Its policy boundary is:
 
 ```text
 privacy and secret policy
   → strict-zero / paid boundary
+  → required capability admission
   → required executable tools
   → usable context
   → health and circuit breaker
@@ -293,17 +298,24 @@ privacy and secret policy
 ```
 
 Capability probes (`chat_only`, `workspace_reader`, `coding_agent`,
-`advanced_coding_agent`) are now a bounded quality signal. They influence task
-fit and candidate preference, but a weaker or missing probe does not by itself
-produce `STOP · ASK USER` when an otherwise policy-valid candidate exposes the
-tools needed for the task. This is what keeps a 1.5B local route usable for
-general users. The host may still block the task later if tools fail,
-verification is red, progress stops, or the model cannot satisfy the objective.
+`advanced_coding_agent`) are empirical admission evidence. A candidate must
+meet the required role before score is considered; a weaker or missing probe
+cannot be promoted by a tools flag. This is what keeps a 1.5B local route
+usable for bounded work without falsely presenting it as an advanced agent.
+The host may still block the task later if tools fail, verification is red,
+progress stops, or the model cannot satisfy the objective.
 
 The routing view exposes the selected provider/model, policy, score, signals,
 and rejection reasons. A stop is reserved for an actual hard blocker such as
 privacy, paid policy, no executable adapter, missing tools, insufficient
 context, unhealthy runtime, stale free metadata, or exhausted quota.
+
+When coding has no eligible measured local candidate and the policy permits
+remote free capacity, discovery may probe at most one verified-free candidate
+per provider. That probe uses generic tool-loop prompts only: it sends no
+repository files, runs no remote shell, and is cached by the exact provider /
+model / protocol identity. A free key enables authentication; it never enables
+paid fallback.
 
 ### 4. Adapters normalize providers
 
@@ -346,6 +358,12 @@ Errors are observations, not automatically terminal failures. Examples:
 
 The non-progress watchdog detects repeated calls, repeated errors, no new
 evidence, and oscillating edits. It is a safety mechanism, not a user quota.
+
+All process tools currently pass through the same controller-owned
+`ExecutionPolicy` and deny network-capable commands before spawning when the
+turn is local-only. This is a common policy boundary, not a claim of full
+operating-system sandboxing on Windows; stronger child-process isolation is a
+tracked release gap.
 
 ### 6. Completion is host-owned
 
@@ -480,20 +498,23 @@ OpenCode, or any other frontier-backed product. The main remaining gaps are:
 
 ### High priority
 
-1. **Long-horizon local-model evidence.** A 1.5B model can now be selected and
-   can be useful for bounded work, but arbitrary multi-file refactors,
-   architecture migrations, and deep debugging still need a reproducible
-   matrix across model, quantization, runtime, chat template, hardware, and
-   harness version.
+1. **Long-horizon local-model evidence.** A verified 1.5B configuration can be
+   admitted only to bounded progressive work and can be useful there, but
+   arbitrary multi-file refactors, architecture migrations, and deep
+   debugging still need a reproducible matrix across model, quantization,
+   runtime, chat template, hardware, and harness version.
 2. **Semantic completion coverage.** The kernel has structural verification and
    supports task-specific criteria, but the product still needs stronger
    objective-aware verifiers for broad natural-language requirements.
 3. **Low-resource context quality.** More retrieval, staged planning and
    compaction evaluations are needed on large/noisy repositories so small
    models receive the next useful decision instead of a giant prompt.
-4. **Live free-provider evidence.** Catalog discovery and no-paid filtering are
-   covered; account-specific free quota, provider privacy, rate limits, and
-   remote inference journeys remain volatile and must be rechecked per account.
+4. **Live free-provider evidence.** Catalog discovery, no-paid filtering, and
+   bounded protocol probes for selected free-cloud candidates are implemented;
+   account-specific quota, provider privacy, rate limits, and full remote
+   coding journeys remain volatile and must be rechecked per account. Remote
+   probes never receive repository context and are limited to one candidate per
+   provider per refresh.
 
 ### Product/release work
 
@@ -502,8 +523,10 @@ OpenCode, or any other frontier-backed product. The main remaining gaps are:
    installer is published.
 6. **Hardware recommendation depth.** `llmfit` integration has a fallback, but
    this machine did not have `llmfit` installed during the latest evidence run.
-7. **Delegation.** Explore/Build/Verify subagents, isolated worktrees, and
-   stronger lower-level shell sandboxing are not yet part of the v0.1 runtime.
+7. **Delegation and isolation.** The deterministic read-only code-review agent
+   exists and is used as a host verifier, but model-backed Explore/Build/Verify
+   subagents, isolated worktrees, OS-level process sandboxing, and background
+   execution are not yet part of the v0.1 runtime.
 8. **Provider surface.** Cloudflare Workers AI, Gemini, and OpenCode Zen are
    intentionally not automatic free routes. They need current contract,
    privacy, quota, and billing evidence before being advertised.

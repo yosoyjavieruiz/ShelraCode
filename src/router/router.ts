@@ -20,29 +20,80 @@ function candidateCapability(candidate: ModelCandidate): AgentCapabilityClass {
   return candidate.agentProbe?.agentCapabilityClass ?? "chat_only";
 }
 
+function taskCapabilityRequirement(
+  request: RouteRequest,
+): AgentCapabilityClass {
+  return (
+    request.task.requiredCapability ??
+    (request.task.toolNeed ? "workspace_reader" : "chat_only")
+  );
+}
+
+function isHostScaffoldedProgressive(request: RouteRequest): boolean {
+  return (
+    taskCapabilityRequirement(request) === "advanced_coding_agent" &&
+    request.execution?.strategy === "progressive" &&
+    (request.execution.boundedScope?.length ?? 0) > 0
+  );
+}
+
 /**
- * Capability probes describe an observed starting point; they are not a
- * permission boundary. A model with a weaker or missing probe may still be
- * the only executable local route, so keep it eligible and let the agent
- * loop, host tools, and verification provide the real outcome. The signal is
- * deliberately bounded so it influences quality without creating a second
- * hard stop before execution.
+ * A complex objective is not required to fit inside one model invocation.
+ * When the host has already localized a non-empty bounded scope, a measured
+ * coding agent may own that work unit while the controller retains the
+ * advanced parent objective, dependencies and completion gate.
+ *
+ * This is deliberately narrow: no scope means no progressive downgrade, and
+ * chat-only/workspace-reader candidates can never receive mutation authority
+ * through this path.
  */
+function admissionCapabilityRequirement(
+  request: RouteRequest,
+): AgentCapabilityClass {
+  const parent = taskCapabilityRequirement(request);
+  if (request.execution?.strategy === "discovery") return "chat_only";
+  if (isHostScaffoldedProgressive(request)) return "coding_agent";
+  return parent;
+}
+
+/**
+ * Capability probes are admission evidence, not a quality hint. The route
+ * scorer must never turn an unmeasured or weaker model into an autonomous
+ * coding route: the task's required role is a hard gate before scoring.
+ */
+function capabilityAdmissionFailure(
+  candidate: ModelCandidate,
+  request: RouteRequest,
+): string | undefined {
+  const required = admissionCapabilityRequirement(request);
+  if (required === "chat_only") return undefined;
+
+  if (!candidate.agentProbe)
+    return `capability evidence is unavailable for required ${required}`;
+
+  const actual = candidateCapability(candidate);
+  if (isHostScaffoldedProgressive(request) && actual === "chat_only") {
+    return undefined;
+  }
+  if (CAPABILITY_RANK[actual] < CAPABILITY_RANK[required])
+    return `capability ${actual} is below required ${required}`;
+
+  return undefined;
+}
+
 function capabilityFit(
   candidate: ModelCandidate,
   request: RouteRequest,
 ): number {
-  const required =
-    request.task.requiredCapability ??
-    (request.task.toolNeed ? "workspace_reader" : "chat_only");
+  const required = admissionCapabilityRequirement(request);
   const actual = candidateCapability(candidate);
   const gap = CAPABILITY_RANK[required] - CAPABILITY_RANK[actual];
   if (gap <= 0) return 1;
 
-  // No probe means unknown, not incapable. Give measured shortfalls a little
-  // more weight than unknowns while retaining a usable floor for a sole local
-  // model (including a broadly useful 1.5B configuration).
-  if (!candidate.agentProbe) return 0.5;
+  // This function is called only after capabilityAdmissionFailure has passed.
+  // Keep the fallback defensive for callers/tests that construct a malformed
+  // candidate directly.
+  if (!candidate.agentProbe) return 0;
   return Math.max(0.25, 1 - gap * 0.25);
 }
 
@@ -192,8 +243,12 @@ export function selectRoute(
     taskClass: request.task.class,
     complexity: request.task.complexity,
     requiredCapability: request.task.requiredCapability,
+    admissionCapability: admissionCapabilityRequirement(request),
+    executionStrategy: request.execution?.strategy,
+    boundedScopeCount: request.execution?.boundedScope?.length ?? 0,
     repositoryPolicy: request.repositoryPolicy,
     routingMode: request.routingMode,
+    preferredCandidateId: request.preferredCandidateId,
   });
   const rejections: RouteRejection[] = [];
   const eligible: Array<{
@@ -224,7 +279,8 @@ export function selectRoute(
       continue;
     }
 
-    if (request.routingMode === "strict-zero") {
+    const isStrictZero = request.routingMode === "strict-zero";
+    if (isStrictZero) {
       if (
         candidate.source === "paid_cloud" ||
         candidate.free.status === "paid" ||
@@ -269,7 +325,20 @@ export function selectRoute(
       continue;
     }
 
-    if (request.task.toolNeed && !candidate.capabilities.tools) {
+    const capabilityFailure = capabilityAdmissionFailure(candidate, request);
+    if (capabilityFailure) {
+      reject(rejections, candidate, capabilityFailure);
+      continue;
+    }
+
+    const hostScaffoldedFallback =
+      isHostScaffoldedProgressive(request) &&
+      candidateCapability(candidate) === "chat_only";
+    if (
+      request.task.toolNeed &&
+      !candidate.capabilities.tools &&
+      !hostScaffoldedFallback
+    ) {
       reject(rejections, candidate, "required tool capability is unavailable");
       continue;
     }
@@ -329,7 +398,12 @@ export function selectRoute(
       reasons: rejection.reasons,
     });
 
-  eligible.sort((left, right) => right.breakdown.total - left.breakdown.total);
+  eligible.sort((left, right) => {
+    const leftPreferred = request.preferredCandidateId === left.candidate.id;
+    const rightPreferred = request.preferredCandidateId === right.candidate.id;
+    if (leftPreferred !== rightPreferred) return leftPreferred ? -1 : 1;
+    return right.breakdown.total - left.breakdown.total;
+  });
   const selected = eligible[0];
   const generatedAt = request.now.toISOString();
   if (!selected) {
@@ -365,13 +439,24 @@ export function selectRoute(
     routingMode: request.routingMode,
     explanation: [
       `Selected ${selected.candidate.providerId} / ${selected.candidate.displayName}.`,
+      request.preferredCandidateId === selected.candidate.id
+        ? "The requested model was eligible and kept as the preferred route."
+        : request.preferredCandidateId
+          ? "The requested model was not eligible; an eligible fallback route was selected."
+          : "No model preference was supplied.",
       "Privacy gate passed.",
       request.routingMode === "strict-zero"
         ? "Cost gate passed: no paid route was evaluated."
         : "Cost policy allows an explicit paid confirmation.",
-      selected.candidate.agentProbe
-        ? `Capability evidence ${candidateCapability(selected.candidate)} influences task fit but does not independently block execution.`
-        : "Capability evidence is unmeasured; tools and verification will determine execution success.",
+      request.execution?.strategy === "discovery"
+        ? "Local discovery execution: no mutation authority is granted; this route only prepares and validates a bounded scope before coding selection."
+        : request.execution?.strategy === "progressive" &&
+            (request.execution.boundedScope?.length ?? 0) > 0 &&
+            request.task.requiredCapability === "advanced_coding_agent"
+          ? candidateCapability(selected.candidate) === "chat_only"
+            ? "Progressive host-scaffolded fallback: the selected chat_only local model has no measured native coding capability, so it owns only the bounded localized work unit; the controller owns tools, checkpoints, verification and the next unit."
+            : `Progressive execution: the parent objective requires advanced_coding_agent, so this measured ${candidateCapability(selected.candidate)} route owns only the bounded localized work unit; host verification controls the next unit.`
+          : `Capability gate passed: ${candidateCapability(selected.candidate)} meets the required ${admissionCapabilityRequirement(request)} role.`,
       `Score ${selected.breakdown.total.toFixed(2)} from task fit ${selected.breakdown.taskFit.toFixed(2)}, reliability ${selected.breakdown.reliability.toFixed(2)}, quota headroom ${selected.breakdown.quotaHeadroom.toFixed(2)}, latency ${selected.breakdown.latency.toFixed(2)}, context ${selected.breakdown.contextHeadroom.toFixed(2)} and tool use ${selected.breakdown.toolReliability.toFixed(2)}.`,
     ].join(" "),
   };

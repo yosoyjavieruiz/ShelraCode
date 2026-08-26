@@ -1,3 +1,4 @@
+import path from "node:path";
 import type {
   NormalizedMessage,
   ProviderFailure,
@@ -11,10 +12,17 @@ import type { ToolDefinition, ToolResult } from "../tools/types.js";
 import { evaluateCompletionGate } from "./completion-gate.js";
 import { independentlyVerifyTask } from "./verifier.js";
 import { compactTaskContext } from "./compaction.js";
-import { recoverTextToolCalls } from "./tool-envelope.js";
+import {
+  MAX_TOOL_CALLS_PER_RESPONSE,
+  recoverTextToolCalls,
+} from "./tool-envelope.js";
+import { normalizeProviderEvents } from "../providers/stream-normalizer.js";
 import { extractObjectivePaths } from "./objective-review.js";
+import { evaluateMutationEvidenceGate } from "./context-gate.js";
+import { compileTaskGraph, setTaskNodeStatus } from "./task-graph.js";
 export { recoverTextToolCalls } from "./tool-envelope.js";
 import { normalizeVerificationPlan } from "./verification-plan.js";
+import { isNeverRemotePath, scanSecrets } from "../privacy/policy.js";
 import type { TurnMode } from "./turn-policy.js";
 import {
   addTaskEvidence,
@@ -92,7 +100,13 @@ export function sanitizeAssistantTextForCompletion(
 ): string {
   const trimmed = text.trim();
   if (!trimmed) return fallback;
-  if (recoverTextToolCalls(trimmed, 0)?.length) return fallback;
+  try {
+    if (recoverTextToolCalls(trimmed, 0)?.length) return fallback;
+  } catch (error) {
+    if (error instanceof ToolError && error.code === "TOOL_BATCH_TOO_LARGE")
+      return fallback;
+    throw error;
+  }
   return TOOL_TEXT_SHAPE.test(trimmed) ? fallback : trimmed;
 }
 
@@ -233,6 +247,26 @@ function parseToolInput(call: ToolCall): unknown {
   }
 }
 
+/**
+ * A provider can emit a tool call whose argument stream is malformed. The
+ * original call remains available to the ledger/error renderer, but it must
+ * never be serialized back into the next provider request as invalid JSON.
+ * Some OpenAI-compatible local servers reject that assistant message with a
+ * generic 500, hiding the real recoverable tool-protocol error.
+ */
+function normalizeToolCallsForContinuation(
+  calls: readonly ToolCall[],
+): ToolCall[] {
+  return calls.map((call) => {
+    try {
+      JSON.parse(call.arguments || "{}");
+      return { ...call };
+    } catch {
+      return { ...call, arguments: "{}" };
+    }
+  });
+}
+
 function objectOutput(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -241,6 +275,76 @@ function objectOutput(value: unknown): Record<string, unknown> | undefined {
 
 const MODEL_TOOL_TEXT_LIMIT = 8_000;
 const MODEL_EXECUTION_TEXT_LIMIT = 4_000;
+
+// After a staged target has been observed, keep the small model on one
+// bounded mutation/verification decision instead of reopening discovery on
+// every turn. A failed mutation explicitly reopens discovery for recovery.
+const STAGED_MUTATION_TOOL_NAMES = new Set([
+  "EditFile",
+  "WriteFile",
+  "DeleteFile",
+]);
+
+// Once the host has observed an existing target, a full-file WriteFile is not
+// a valid next decision. Keeping it out of the schema is stronger than
+// exposing it and hoping a small model remembers the PATH_EXISTS recovery
+// message. DeleteFile is added only when the objective explicitly authorizes
+// deletion; the permission boundary still applies as a second defense.
+const STAGED_EXISTING_MUTATION_TOOL_NAMES = new Set(["EditFile"]);
+const STAGED_EXISTING_DESTRUCTIVE_TOOL_NAMES = new Set([
+  "EditFile",
+  "DeleteFile",
+]);
+
+const STAGED_EDIT_RECOVERY_TOOL_NAMES = new Set(["ReadFile", "EditFile"]);
+
+const STAGED_DISCOVERY_TOOL_NAMES = new Set([
+  "ReadFile",
+  "SearchText",
+  "ListFiles",
+  "GlobFiles",
+]);
+
+// A local model that sends an entire large file as oldText/newText is usually
+// attempting a speculative rewrite, not a bounded edit. Reject it before the
+// tool reaches the checkpoint so malformed wholesale rewrites cannot corrupt
+// a source file. Smaller exact replacements remain unaffected.
+const MAX_STAGED_FULL_REWRITE_CHARS = 12_000;
+
+// A generic coding budget is too large for the first decision of a small
+// reasoning model: it can spend the whole turn planning instead of taking the
+// host-approved next action. Staged work gets an action-sized budget by phase;
+// explicit task.maxOutputTokens remains authoritative for callers that need a
+// different limit.
+const STAGED_DISCOVERY_OUTPUT_TOKENS = 768;
+const STAGED_MUTATION_OUTPUT_TOKENS = 1_536;
+
+function objectiveAuthorizesDeletion(objective: string): boolean {
+  const normalized = objective.toLowerCase();
+  if (
+    /\b(?:do not|don't|never|avoid|without)\s+(?:delete|deleting|remove|removing|erase|erasing|borrar|eliminar)/u.test(
+      normalized,
+    )
+  )
+    return false;
+  return /\b(?:delete|deleting|remove|removing|erase|erasing|borrar|eliminar)\b/u.test(
+    normalized,
+  );
+}
+
+function requiresSupportingStagedEvidence(
+  objective: string,
+  targetCount: number,
+): boolean {
+  if (targetCount < 2) return false;
+  const normalized = objective.toLowerCase();
+  return (
+    objective.length > 120 ||
+    /\b(?:refactor|restructure|migrate|debug|regression|architecture|review|refactoriza|migra|depura|arquitectura|revisa)\b/u.test(
+      normalized,
+    )
+  );
+}
 
 function compactToolOutput(
   tool: string,
@@ -255,22 +359,79 @@ function compactToolOutput(
   const compacted: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(fields)) {
     if (typeof value === "string") {
-      compacted[key] =
-        value.length > limit
-          ? `${value.slice(0, limit)}\n[host output truncated for model context]`
-          : value;
+      if (value.length > limit) {
+        compacted[key] =
+          `${value.slice(0, limit)}\n[host output truncated for model context]`;
+        compacted[`${key}Truncated`] = true;
+      } else compacted[key] = value;
     } else if (Array.isArray(value)) {
       compacted[key] = value.slice(0, 40);
       if (value.length > 40) compacted[`${key}Truncated`] = true;
     } else compacted[key] = value;
   }
+  if (
+    tool === "ReadFile" &&
+    typeof fields.content === "string" &&
+    fields.content.length > limit
+  ) {
+    // The tool result may be complete on disk while the model-facing message
+    // is not. Treat the visible observation as truncated so the controller
+    // does not expose EditFile against source text the model never received.
+    compacted.truncated = true;
+    compacted.continuationHint =
+      "Use ReadFile with startLine/endLine for the missing range before editing.";
+  }
   return compacted;
 }
 
-function toolMessageContent(result: ToolResult): string {
-  const compactedOutput = compactToolOutput(result.tool, result.output);
+function modelVisibleReadWasTruncated(output: unknown): boolean {
+  const fields = objectOutput(output);
+  return (
+    fields?.truncated === true ||
+    (typeof fields?.content === "string" &&
+      fields.content.length > MODEL_TOOL_TEXT_LIMIT)
+  );
+}
+
+function redactSensitiveValue(value: unknown): unknown {
+  if (typeof value === "string")
+    return scanSecrets(value).length > 0
+      ? "[REDACTED SENSITIVE TOOL OUTPUT]"
+      : value;
+  if (Array.isArray(value)) return value.map(redactSensitiveValue);
+  if (typeof value === "object" && value !== null)
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        redactSensitiveValue(entry),
+      ]),
+    );
+  return value;
+}
+
+function toolMessageContent(result: ToolResult, task?: AgentTask): string {
+  const remote = task !== undefined && task.candidate.source !== "local";
+  const outputFields = objectOutput(result.output);
+  const outputPath =
+    result.path ??
+    (typeof outputFields?.path === "string" ? outputFields.path : undefined);
+  const protectedPath =
+    remote && outputPath !== undefined && isNeverRemotePath(outputPath);
+  const safeResult = protectedPath
+    ? {
+        ...result,
+        output: {
+          path: outputPath,
+          redacted: true,
+          reason: "path is excluded from remote context by privacy policy",
+        },
+      }
+    : remote && result.output !== undefined
+      ? { ...result, output: redactSensitiveValue(result.output) }
+      : result;
+  const compactedOutput = compactToolOutput(safeResult.tool, safeResult.output);
   return JSON.stringify({
-    ...result,
+    ...safeResult,
     ...(compactedOutput === undefined ? {} : { output: compactedOutput }),
   });
 }
@@ -368,28 +529,6 @@ function toolErrorFields(
     : {};
 }
 
-const TEXT_TOOL_PREFIX_TAIL = 18;
-
-function isTextToolBoundary(text: string, index: number): boolean {
-  if (index === 0) return true;
-  return new Set([" ", "\t", "\r", "\n"]).has(text[index - 1] ?? "");
-}
-
-function findTextToolCandidate(text: string): number {
-  for (let index = 0; index < text.length; index += 1) {
-    if (!isTextToolBoundary(text, index)) continue;
-    const character = text[index];
-    if (character === "{" || character === "[") return index;
-    if (text.startsWith("<response>", index)) return index;
-    if (text.startsWith("<xml>", index)) return index;
-    if (text.startsWith("<tools>", index)) return index;
-    if (text.startsWith("<tool_call>", index)) return index;
-    if (text.startsWith("<tool_response>", index)) return index;
-    if (text.startsWith("```", index)) return index;
-  }
-  return -1;
-}
-
 function normalizeWorkspacePath(value: string): string {
   const parts: string[] = [];
   const raw = value.trim().replaceAll("\\", "/").replace(/^\/+/, "");
@@ -404,6 +543,22 @@ function normalizeWorkspacePath(value: string): string {
     parts.push(part);
   }
   return parts.join("/");
+}
+
+function mutationFailureKey(
+  call: ToolCall,
+  tool: ToolDefinition<unknown, unknown>,
+  result: ToolResult,
+  input: unknown,
+): string {
+  const pathValue =
+    typeof input === "object" &&
+    input !== null &&
+    "path" in input &&
+    typeof input.path === "string"
+      ? normalizeWorkspacePath(input.path)
+      : "";
+  return `${tool.name}:${call.name}:${result.code ?? "UNKNOWN"}:${pathValue}`;
 }
 
 function extractWorkspacePathHints(values: readonly string[]): string[] {
@@ -519,6 +674,33 @@ const SYSTEM_PROMPT_BY_PROFILE: Record<
     TOOL_ERROR_RECOVERY_INSTRUCTION,
 };
 
+function stagedWorkUnitInstruction(
+  target: string | undefined,
+  totalTargets: number,
+  targetExists = false,
+  needsSupportingEvidence = false,
+): string {
+  if (!target || totalTargets < 2) return "";
+  return (
+    "\n\nHOST-CONTROLLED WORK UNIT (authoritative): " +
+    `this complex task is staged across ${totalTargets} targets. ` +
+    `The current work unit is ${target}. ` +
+    "Work only on this target until the host verifies it; do not edit another " +
+    "path in the parent objective during this unit. After a successful " +
+    "ReadFile of the current target, use that observation to make the smallest " +
+    "necessary EditFile or WriteFile. Do not repeat ReadFile on the same path " +
+    "unless a specific missing range or symbol requires it. " +
+    (needsSupportingEvidence
+      ? "Because this is a cross-file or high-complexity objective, inspect at least one supporting file, test, or relevant SearchText match before editing; the host will keep mutation tools unavailable until that evidence exists. "
+      : "") +
+    (targetExists
+      ? "This target already exists and CreateFile is not an available operation for it. "
+      : "") +
+    "The host, not the " +
+    "model, advances the next target."
+  );
+}
+
 export async function runAgent(
   task: AgentTask,
   options: AgentLoopOptions,
@@ -537,6 +719,13 @@ export async function runAgent(
     task.verificationCommands,
     task.verificationCommand,
   );
+  const verificationPolicy =
+    task.verificationPolicy ??
+    (mode === "coding"
+      ? verificationPlan.length > 0
+        ? "required"
+        : "not_required"
+      : "not_required");
   const constraints = frameConstraints(task, mode, verificationPlan);
   const successCriteria =
     task.successCriteria && task.successCriteria.length > 0
@@ -566,6 +755,16 @@ export async function runAgent(
     modelId: providerModelId(task),
   });
   const loopOptions = logger ? { ...options, logger } : options;
+  const defaultTestCommand = verificationPlan.find(
+    (item) => item.stage === "test",
+  )?.command;
+  const createExecutionContext = async () => {
+    const context = await options.createExecutionContext(task);
+    if (logger) context.logger = logger;
+    if (!context.defaultTestCommand && defaultTestCommand)
+      context.defaultTestCommand = defaultTestCommand;
+    return context;
+  };
   logger?.info("agent.task.started", {
     mode,
     toolCount: options.tools.length,
@@ -606,6 +805,34 @@ export async function runAgent(
         .filter((value) => value.length > 0),
     ),
   ];
+  ledger.taskGraph = compileTaskGraph({
+    objective: task.objective,
+    mode,
+    candidateFiles: objectivePaths,
+    verificationCommands: verificationPlan.map((item) => item.command),
+    constraints,
+  });
+  persistLedger();
+  const updateTaskNode = (
+    nodeId: string | undefined,
+    status: Parameters<typeof setTaskNodeStatus>[2],
+  ): void => {
+    if (!ledger.taskGraph || !nodeId) return;
+    if (setTaskNodeStatus(ledger.taskGraph, nodeId, status)) persistLedger();
+  };
+  const mutationNodeForPath = (
+    target: string | undefined,
+  ): string | undefined => {
+    if (!target || !ledger.taskGraph) return undefined;
+    const normalized = normalizeWorkspacePath(target);
+    return ledger.taskGraph.nodes.find(
+      (node) =>
+        node.id.startsWith("mutate-") &&
+        node.scope.candidateFiles.some(
+          (candidate) => normalizeWorkspacePath(candidate) === normalized,
+        ),
+    )?.id;
+  };
   const syncTargetPlan = (activePaths: readonly string[] = []): void => {
     if (!ledger.plan || objectivePaths.length === 0) return;
     const changed = new Set(ledger.filesChanged.map(normalizeWorkspacePath));
@@ -627,26 +854,83 @@ export async function runAgent(
     objectivePaths.length > 0
       ? [objectivePaths[0]!]
       : extractWorkspacePathHints([task.objective]).map(normalizeWorkspacePath);
+  // Keep mutation scope separate from diagnostic context. After a failed
+  // verification the model must be able to re-read the file it just changed
+  // even when the failing test path is the next acceptance target.
+  let criteriaReadPaths = [...criteriaWritePaths];
+  const observedExistingPaths = new Set<string>();
+  const observedMissingPaths = new Set<string>();
   const contextFallback =
     profile === "minimal"
       ? ""
       : "\n\nNo repository context was provided. Inspect the workspace before editing.";
-  const stagedExecutionInstruction =
-    mode === "coding" && objectivePaths.length > 1
-      ? `\n\nHost execution plan: this is a staged multi-file task. Work on one target at a time. The current mutation target is ${criteriaWritePaths[0] ?? objectivePaths[0]}. Read the target, make only the requested change for that stage, and wait for host verification before editing another target.`
-      : "";
+  const declaredEvidenceState =
+    task.contextEvidenceState ??
+    (task.context?.trim() ? "SUFFICIENT" : "INSUFFICIENT");
+  const stagedTask = mode === "coding" && objectivePaths.length > 1;
+  const stagedNeedsSupportingEvidence = requiresSupportingStagedEvidence(
+    task.objective,
+    objectivePaths.length,
+  );
+  let stagedMutationRequired = false;
+  // The repository context builder may already have selected more than the
+  // active target. Preserve that host observation as supporting evidence;
+  // otherwise a local model can be trapped reading the same target forever
+  // even though the controller has already supplied the related file in the
+  // bounded context. Synthetic/unit tasks without explicit context headings
+  // still require the normal supporting ReadFile/SearchText step.
+  const hostContextPaths = new Set(
+    (task.context ?? "").split(/\r?\n/u).flatMap((line) => {
+      const match = line.match(/^###\s+(.+)$/u);
+      if (!match?.[1] || match[1].startsWith("Instruction ")) return [];
+      return [normalizeWorkspacePath(match[1].trim())];
+    }),
+  );
+  const activeStagedTarget = normalizeWorkspacePath(
+    criteriaWritePaths[0] ?? objectivePaths[0] ?? "",
+  );
+  let stagedSupportingEvidenceObserved =
+    stagedNeedsSupportingEvidence &&
+    declaredEvidenceState === "SUFFICIENT" &&
+    [...hostContextPaths].some(
+      (candidate) =>
+        candidate !== activeStagedTarget &&
+        objectivePaths.some(
+          (objectivePath) =>
+            normalizeWorkspacePath(objectivePath) === candidate,
+        ),
+    );
+  const stagedDeletionAllowed = objectiveAuthorizesDeletion(task.objective);
+  const stagedExecutionInstruction = (): string =>
+    stagedWorkUnitInstruction(
+      criteriaWritePaths[0] ?? objectivePaths[0],
+      objectivePaths.length,
+      observedExistingPaths.has(
+        normalizeWorkspacePath(
+          criteriaWritePaths[0] ?? objectivePaths[0] ?? "",
+        ),
+      ),
+      stagedNeedsSupportingEvidence && !stagedMutationRequired,
+    );
+  const baseSystemPrompt = SYSTEM_PROMPT_BY_PROFILE[profile];
   const messages: NormalizedMessage[] = [
     {
       role: "system",
-      content: SYSTEM_PROMPT_BY_PROFILE[profile],
+      content: baseSystemPrompt + stagedExecutionInstruction(),
     },
     {
       role: "user",
       content: task.context
-        ? `${task.objective}\n\n${task.context}${stagedExecutionInstruction}`
-        : `${task.objective}${contextFallback}${stagedExecutionInstruction}`,
+        ? `${task.objective}\n\n${task.context}${stagedExecutionInstruction()}`
+        : `${task.objective}${contextFallback}${stagedExecutionInstruction()}`,
     },
   ];
+  const refreshStagedWorkUnitPrompt = (): void => {
+    if (!stagedTask) return;
+    const systemMessage = messages[0];
+    if (systemMessage?.role === "system")
+      systemMessage.content = baseSystemPrompt + stagedExecutionInstruction();
+  };
   const toolRuns: ToolResult[] = [];
   let finalText = "";
   let verificationRan = false;
@@ -661,6 +945,9 @@ export async function runAgent(
   // next target. Before host feedback reads remain open for discovery; after
   // feedback, reads are focused on the current staged target.
   let criteriaFeedbackActive = false;
+  // Controller-owned phase marker: once the active staged target has been
+  // read successfully, the next model decision must be mutation/verification.
+  // A failed mutation resets this marker so fresh discovery can recover it.
   const pendingMutations: Array<{
     before: FileMutationSnapshot;
     after: FileMutationSnapshot;
@@ -668,6 +955,14 @@ export async function runAgent(
   }> = [];
   const protectedCriterionIds = new Set<string>();
   const readRevisions = new Map<string, number>();
+  const readObservations = new Map<
+    string,
+    {
+      revision: number;
+      successfulReads: number;
+      truncated: boolean;
+    }
+  >();
   const rejectedEditPaths = new Set<string>();
   let unresolvedBlockers = 0;
   let finalReviewState: boolean | undefined;
@@ -686,10 +981,19 @@ export async function runAgent(
       kind: "tool-result",
       source: "host-context",
       summary: "The host supplied repository context before model execution.",
-      relevance: 0.8,
+      relevance: declaredEvidenceState === "SUFFICIENT" ? 0.8 : 0.2,
       freshness: 1,
     });
+  updateTaskNode(
+    "discover",
+    declaredEvidenceState === "CONFLICTING"
+      ? "failed"
+      : declaredEvidenceState === "SUFFICIENT"
+        ? "passed"
+        : "running",
+  );
   transitionPhase(ledger, "analyze", loopOptions);
+  updateTaskNode("analyze", "running");
   persistLedger();
   if (mode === "plan" || (task.successCriteria?.length ?? 0) > 1) {
     transitionPhase(ledger, "plan", loopOptions);
@@ -751,13 +1055,19 @@ export async function runAgent(
   // the same tool call. Three identical calls in a row stop the run early
   // with an actionable error instead of quietly burning the full budget.
   const NON_PROGRESS_LIMIT = 3;
+  const MUTATION_FAILURE_LIMIT = 2;
   let lastCallSignature: string | undefined;
   let repeatedCallCount = 0;
-  let lastTextualCallSignature: string | undefined;
   let forceNoToolsOnNextTurn = false;
+  let readLoopRecoveryCount = 0;
   let lastErrorCode: string | undefined;
   let repeatedErrorCount = 0;
+  let lastMutationFailureKey: string | undefined;
+  let repeatedMutationFailureCount = 0;
   let noActionCount = 0;
+  let oversizedBatchCount = 0;
+  let forcedRecoveryTool: { name: "ReadFile"; path: string } | undefined;
+  let pendingRecoveryInstruction: string | undefined;
 
   const observeTool = (
     call: ToolCall,
@@ -792,16 +1102,147 @@ export async function runAgent(
       completedAt: new Date().toISOString(),
       summary: result.ok ? "Tool result succeeded." : result.error,
     });
+    const observedPath =
+      typeof input === "object" &&
+      input !== null &&
+      "path" in input &&
+      typeof input.path === "string"
+        ? input.path
+        : undefined;
+    if (tool?.risk === "write" || tool?.risk === "destructive") {
+      updateTaskNode(
+        mutationNodeForPath(observedPath),
+        result.ok ? "passed" : "failed",
+      );
+    } else if (result.ok && tool?.risk === "read") {
+      updateTaskNode("discover", "passed");
+    }
+    if (call.name === "RunTests")
+      updateTaskNode(
+        "verify",
+        result.ok && !executionFailed ? "passed" : "failed",
+      );
+    if (
+      call.name === "ListFiles" &&
+      result.code === "PATH_IS_FILE" &&
+      typeof input === "object" &&
+      input !== null &&
+      "path" in input &&
+      typeof input.path === "string"
+    ) {
+      const recoveryPath = normalizeWorkspacePath(input.path);
+      forcedRecoveryTool = { name: "ReadFile", path: recoveryPath };
+      pendingRecoveryInstruction =
+        `Host recovery: ${recoveryPath} is a file, not a directory. ` +
+        "Use ReadFile on that exact path now; do not call ListFiles again.";
+    } else if (
+      call.name === "EditFile" &&
+      !result.ok &&
+      stagedTask &&
+      typeof input === "object" &&
+      input !== null &&
+      "path" in input &&
+      typeof input.path === "string" &&
+      [
+        "INVALID_ARGUMENT",
+        "NOT_FOUND",
+        "PATH_NOT_FOUND",
+        "CONFLICT",
+        "STALE_EDIT",
+      ].includes(result.code ?? "")
+    ) {
+      // A rejected exact edit is not recoverable by repeating the same
+      // proposal. Force one fresh host observation before exposing EditFile
+      // again. This is the control-plane recovery boundary that prevents a
+      // small model from burning the remaining turns on an empty/stale or
+      // ambiguous oldText payload.
+      const recoveryPath = normalizeWorkspacePath(input.path);
+      forcedRecoveryTool = { name: "ReadFile", path: recoveryPath };
+      pendingRecoveryInstruction =
+        `Host recovery: the EditFile proposal for ${recoveryPath} was rejected. ` +
+        "Read that exact file now and construct a new exact oldText/newText edit; do not repeat the previous EditFile call.";
+    } else if (forcedRecoveryTool && call.name === forcedRecoveryTool.name) {
+      const observedRecoveryPath =
+        typeof input === "object" &&
+        input !== null &&
+        "path" in input &&
+        typeof input.path === "string"
+          ? normalizeWorkspacePath(input.path)
+          : undefined;
+      if (result.ok && observedRecoveryPath === forcedRecoveryTool.path) {
+        forcedRecoveryTool = undefined;
+        pendingRecoveryInstruction = undefined;
+      } else {
+        pendingRecoveryInstruction = `Host recovery: use ReadFile on ${forcedRecoveryTool.path} with a valid path before continuing.`;
+      }
+    } else if (forcedRecoveryTool) {
+      pendingRecoveryInstruction = `Host recovery: use ReadFile on ${forcedRecoveryTool.path} before any other repository action.`;
+    }
     transitionPhase(ledger, "observe", loopOptions);
+    const normalizedObservedPath = observedPath
+      ? normalizeWorkspacePath(observedPath)
+      : undefined;
+    const explicitTargetMatch = normalizedObservedPath
+      ? objectivePaths.some(
+          (candidate) =>
+            normalizeWorkspacePath(candidate) === normalizedObservedPath,
+        )
+      : false;
+    const objectiveMentionsPath = normalizedObservedPath
+      ? task.objective
+          .toLowerCase()
+          .includes(path.basename(normalizedObservedPath).toLowerCase())
+      : false;
+    const searchReturnedMatches =
+      Array.isArray(output?.matches) && output.matches.length > 0;
+    const evidenceRelevance =
+      call.name === "ReadFile"
+        ? explicitTargetMatch || objectiveMentionsPath
+          ? 0.95
+          : objectivePaths.length === 0
+            ? 0.55
+            : 0.35
+        : call.name === "SearchText" && searchReturnedMatches
+          ? 0.9
+          : call.name === "ListFiles" || call.name === "GlobFiles"
+            ? mode === "coding"
+              ? 0.35
+              : 0.75
+            : call.name === "GitStatus" || call.name === "GitDiff"
+              ? 0.75
+              : call.name === "RunTests"
+                ? 0.9
+                : 0.3;
     if (result.ok && tool?.risk === "read")
       addTaskEvidence(ledger, {
         id: `${task.id}:evidence:${call.id}`,
         kind: "tool-result",
         source: call.name,
         summary: `Successful ${call.name} result used as repository evidence.`,
-        relevance: 0.9,
+        relevance: evidenceRelevance,
         freshness: 1,
       });
+    if (tool?.risk === "write" || tool?.risk === "destructive") {
+      if (result.ok) {
+        readLoopRecoveryCount = 0;
+        stagedMutationRequired = false;
+        stagedSupportingEvidenceObserved = false;
+        lastMutationFailureKey = undefined;
+        repeatedMutationFailureCount = 0;
+      } else if (stagedTask) {
+        // A failed mutation invalidates the current edit proposal. Reopen
+        // discovery so the model can acquire a fresh observation and recover.
+        stagedMutationRequired = false;
+        stagedSupportingEvidenceObserved = false;
+        const failureKey = mutationFailureKey(call, tool, result, input);
+        if (failureKey === lastMutationFailureKey)
+          repeatedMutationFailureCount += 1;
+        else {
+          lastMutationFailureKey = failureKey;
+          repeatedMutationFailureCount = 1;
+        }
+      }
+    }
     if (
       result.ok &&
       tool?.name === "ReadFile" &&
@@ -811,8 +1252,87 @@ export async function runAgent(
       typeof input.path === "string"
     ) {
       const normalizedPath = normalizeWorkspacePath(input.path);
+      const previousObservation = readObservations.get(normalizedPath);
+      const observationIsCurrent =
+        previousObservation?.revision === mutationRevision;
+      const outputWasTruncated = modelVisibleReadWasTruncated(result.output);
+      readObservations.set(normalizedPath, {
+        revision: mutationRevision,
+        successfulReads: observationIsCurrent
+          ? previousObservation.successfulReads + 1
+          : 1,
+        // A later bounded range read can replace a model-visible truncated
+        // observation. Keeping the old `true` forever made it impossible for
+        // the controller to recognize that the requested edit range was now
+        // actually present in context.
+        truncated: outputWasTruncated,
+      });
       readRevisions.set(normalizedPath, mutationRevision);
+      observedExistingPaths.add(normalizedPath);
+      observedMissingPaths.delete(normalizedPath);
       rejectedEditPaths.delete(normalizedPath);
+      const activeTarget = criteriaWritePaths[0] ?? objectivePaths[0];
+      if (
+        stagedTask &&
+        activeTarget !== undefined &&
+        normalizedPath === normalizeWorkspacePath(activeTarget)
+      )
+        stagedMutationRequired =
+          !outputWasTruncated &&
+          (!stagedNeedsSupportingEvidence || stagedSupportingEvidenceObserved);
+    }
+    if (
+      stagedTask &&
+      stagedNeedsSupportingEvidence &&
+      result.ok &&
+      (call.name === "SearchText" || call.name === "ReadFile")
+    ) {
+      const activeTarget = criteriaWritePaths[0] ?? objectivePaths[0];
+      const normalizedTarget = activeTarget
+        ? normalizeWorkspacePath(activeTarget)
+        : undefined;
+      const isSupportingRead =
+        call.name === "SearchText"
+          ? searchReturnedMatches
+          : normalizedObservedPath !== undefined &&
+            normalizedObservedPath !== normalizedTarget;
+      if (isSupportingRead) {
+        stagedSupportingEvidenceObserved = true;
+        const targetObservation = normalizedTarget
+          ? readObservations.get(normalizedTarget)
+          : undefined;
+        const targetReadIsUsable =
+          normalizedTarget === undefined ||
+          observedMissingPaths.has(normalizedTarget) ||
+          targetObservation?.truncated !== true;
+        if (
+          normalizedTarget &&
+          targetReadIsUsable &&
+          (observedExistingPaths.has(normalizedTarget) ||
+            observedMissingPaths.has(normalizedTarget))
+        )
+          stagedMutationRequired = true;
+      }
+    }
+    if (
+      stagedTask &&
+      call.name === "ReadFile" &&
+      !result.ok &&
+      ["NOT_FOUND", "PATH_NOT_FOUND"].includes(result.code ?? "") &&
+      typeof input === "object" &&
+      input !== null &&
+      "path" in input &&
+      typeof input.path === "string"
+    ) {
+      const normalizedPath = normalizeWorkspacePath(input.path);
+      observedMissingPaths.add(normalizedPath);
+      const activeTarget = criteriaWritePaths[0] ?? objectivePaths[0];
+      if (
+        activeTarget &&
+        normalizeWorkspacePath(activeTarget) === normalizedPath &&
+        (!stagedNeedsSupportingEvidence || stagedSupportingEvidenceObserved)
+      )
+        stagedMutationRequired = true;
     }
     if (
       call.name === "EditFile" &&
@@ -995,7 +1515,13 @@ export async function runAgent(
       ...missing,
       task.objective,
     ]);
-    const nextPaths = (verification.nextPaths ?? inferredPaths)
+    // A verifier may provide only failure-specific paths. Keep the host's
+    // inferred objective paths as a second source of repair context; an
+    // empty/partial verifier response must never erase the files that were
+    // just changed or the files named by the objective.
+    const nextPaths = [
+      ...new Set([...(verification.nextPaths ?? []), ...inferredPaths]),
+    ]
       .map(normalizeWorkspacePath)
       .filter((value) => value.length > 0);
     const nextActions = (verification.nextActions ?? []).filter(
@@ -1037,7 +1563,7 @@ export async function runAgent(
           "A previously satisfied criterion regressed, but the active mutation checkpoint is unavailable.",
       };
 
-    const context = await options.createExecutionContext(task);
+    const context = await createExecutionContext();
     if (!context.checkpoint)
       return {
         regressed: true,
@@ -1045,7 +1571,6 @@ export async function runAgent(
         notice:
           "A previously satisfied criterion regressed, but the active checkpoint service is unavailable.",
       };
-    if (logger) context.logger = logger;
     const mutationsToRestore = [...pendingMutations]
       .reverse()
       .filter((mutation) =>
@@ -1111,7 +1636,7 @@ export async function runAgent(
       toolRuns.filter((run) => run.ok && toolMap.get(run.tool)?.risk === "read")
         .length;
     const verificationRequired =
-      verificationPlan.length > 0 && mode === "coding";
+      verificationPolicy === "required" && mode === "coding";
     const verificationPerformed =
       verificationRequired &&
       verificationRan &&
@@ -1135,6 +1660,8 @@ export async function runAgent(
       verificationRequired,
       verificationPerformed,
       verificationPassed: verificationPerformed,
+      verificationState:
+        verificationPolicy === "required" ? "available" : verificationPolicy,
       finalReviewPerformed,
       unresolvedBlockers,
       userWorkPreserved: preserved,
@@ -1226,6 +1753,7 @@ export async function runAgent(
   const finish = async (turns: number): Promise<AgentRunResult> => {
     if (ledger.phase !== "review") {
       transitionPhase(ledger, "review", loopOptions);
+      updateTaskNode("review", "running");
       persistLedger();
     }
     const preserved = await userWorkPreserved();
@@ -1247,9 +1775,15 @@ export async function runAgent(
           mode,
           ledger,
           verificationRequired: Boolean(
-            verificationPlan.length > 0 && mode === "coding",
+            (verificationPolicy === "required" ||
+              verificationPolicy === "unavailable") &&
+            mode === "coding",
           ),
           verificationCommands: verificationPlan,
+          verificationState:
+            verificationPolicy === "required"
+              ? "available"
+              : verificationPolicy,
           finalReviewPerformed,
           userWorkPreserved: preserved,
         });
@@ -1265,6 +1799,9 @@ export async function runAgent(
     }
     const result = await completionFor(turns);
     if (result.status === "completed") {
+      updateTaskNode("verify", "passed");
+      updateTaskNode("review", "passed");
+      updateTaskNode("answer", "passed");
       syncTargetPlan([]);
       if (updateTaskPlanStep(ledger, "step-verify", "done")) emitPlan();
       transitionPhase(ledger, "complete", loopOptions);
@@ -1281,6 +1818,9 @@ export async function runAgent(
         },
       });
     } else {
+      updateTaskNode("verify", "failed");
+      updateTaskNode("review", "failed");
+      updateTaskNode("answer", "failed");
       if (updateTaskPlanStep(ledger, "step-verify", "failed")) emitPlan();
       transitionPhase(ledger, "blocked", loopOptions);
       persistLedger();
@@ -1318,6 +1858,78 @@ export async function runAgent(
       );
       messages.splice(0, messages.length, ...compacted.messages);
     }
+    if (pendingRecoveryInstruction) {
+      messages.push({ role: "user", content: pendingRecoveryInstruction });
+      pendingRecoveryInstruction = undefined;
+    }
+    refreshStagedWorkUnitPrompt();
+    const activeWorkUnitTarget = criteriaWritePaths[0] ?? objectivePaths[0];
+    const activeTargetExists =
+      stagedTask &&
+      activeWorkUnitTarget !== undefined &&
+      observedExistingPaths.has(normalizeWorkspacePath(activeWorkUnitTarget));
+    const activeTargetKnown =
+      stagedTask &&
+      activeWorkUnitTarget !== undefined &&
+      (observedExistingPaths.has(
+        normalizeWorkspacePath(activeWorkUnitTarget),
+      ) ||
+        observedMissingPaths.has(normalizeWorkspacePath(activeWorkUnitTarget)));
+    const activeTargetReadIsUsable =
+      !activeWorkUnitTarget ||
+      readObservations.get(normalizeWorkspacePath(activeWorkUnitTarget))
+        ?.truncated !== true;
+    const activeTargetReadWasTruncated =
+      activeWorkUnitTarget !== undefined &&
+      readObservations.get(normalizeWorkspacePath(activeWorkUnitTarget))
+        ?.truncated === true;
+    const activeTargetEvidenceReady =
+      stagedTask &&
+      activeTargetKnown &&
+      activeTargetReadIsUsable &&
+      stagedMutationRequired;
+    const activeTargetRejected =
+      stagedTask &&
+      activeWorkUnitTarget !== undefined &&
+      rejectedEditPaths.has(normalizeWorkspacePath(activeWorkUnitTarget));
+    // Once ReadFile has proven that the active staged target exists, exposing
+    // the full discovery catalog lets a small local model postpone the
+    // required mutation indefinitely. Narrow the next schema to mutation
+    // tools. A failed edit on an existing target reopens only the exact read /
+    // edit recovery pair; it must not fall through to arbitrary Shell calls.
+    const turnTools = options.tools.filter((tool) => {
+      if (forcedRecoveryTool) return tool.name === forcedRecoveryTool.name;
+      if (activeTargetExists && tool.name === "CreateFile") return false;
+      if (activeTargetRejected)
+        return STAGED_EDIT_RECOVERY_TOOL_NAMES.has(tool.name);
+      if (
+        stagedTask &&
+        activeTargetReadWasTruncated &&
+        !activeTargetEvidenceReady
+      )
+        return STAGED_DISCOVERY_TOOL_NAMES.has(tool.name);
+      if (
+        stagedTask &&
+        stagedNeedsSupportingEvidence &&
+        !activeTargetEvidenceReady
+      )
+        return STAGED_DISCOVERY_TOOL_NAMES.has(tool.name);
+      if (!activeTargetEvidenceReady) return true;
+      if (activeTargetExists)
+        return (
+          stagedDeletionAllowed
+            ? STAGED_EXISTING_DESTRUCTIVE_TOOL_NAMES
+            : STAGED_EXISTING_MUTATION_TOOL_NAMES
+        ).has(tool.name);
+      return STAGED_MUTATION_TOOL_NAMES.has(tool.name);
+    });
+    const executableTurnTools = new Set(turnTools.map((tool) => tool.name));
+    const turnMaxOutputTokens =
+      task.maxOutputTokens === undefined && stagedTask
+        ? activeTargetEvidenceReady
+          ? STAGED_MUTATION_OUTPUT_TOKENS
+          : STAGED_DISCOVERY_OUTPUT_TOKENS
+        : maxOutputTokens;
     const assistantTextParts: string[] = [];
     options.trace?.record({
       taskId: task.id,
@@ -1327,19 +1939,20 @@ export async function runAgent(
         turn,
         messageCount: messages.length,
         toolChoice: turnToolChoice,
+        maxOutputTokens: turnMaxOutputTokens,
       },
     });
     logger?.info("agent.turn.started", {
       turn,
       messageCount: messages.length,
       toolChoice: turnToolChoice,
+      maxOutputTokens: turnMaxOutputTokens,
       contextChars: messages.reduce(
         (total, message) => total + message.content.length,
         0,
       ),
     });
     const toolCalls: ToolCall[] = [];
-    let streamBuffer = "";
     let sawText = false;
     let reasoningChars = 0;
     let lastReasoningNotice = 0;
@@ -1350,39 +1963,30 @@ export async function runAgent(
       emit(loopOptions, { type: "assistant.delta", text });
     };
     try {
-      for await (const event of options.provider.stream(
-        {
-          modelId: providerModelId(task),
-          messages,
-          temperature,
-          maxOutputTokens,
-          ...(options.tools.length > 0
-            ? {
-                tools: options.tools.map(toolSchema),
-                toolChoice: turnToolChoice,
-              }
-            : {}),
-          stream: true,
-        },
-        signal,
+      for await (const event of normalizeProviderEvents(
+        options.provider.stream(
+          {
+            modelId: providerModelId(task),
+            messages,
+            temperature,
+            maxOutputTokens: turnMaxOutputTokens,
+            ...(turnTools.length > 0
+              ? {
+                  tools: turnTools.map(toolSchema),
+                  toolChoice: turnToolChoice,
+                }
+              : {}),
+            stream: true,
+          },
+          signal,
+        ),
+        turn,
       )) {
         if (event.type === "text.delta") {
           sawText = true;
-          streamBuffer += event.text;
-          const candidateStart = findTextToolCandidate(streamBuffer);
-          if (candidateStart >= 0) {
-            presentAssistantText(streamBuffer.slice(0, candidateStart));
-            streamBuffer = streamBuffer.slice(candidateStart);
-          } else {
-            const safeLength = Math.max(
-              0,
-              streamBuffer.length - TEXT_TOOL_PREFIX_TAIL,
-            );
-            if (safeLength > 0) {
-              presentAssistantText(streamBuffer.slice(0, safeLength));
-              streamBuffer = streamBuffer.slice(safeLength);
-            }
-          }
+          // Provider normalization has already quarantined tool-shaped text;
+          // every text delta reaching the kernel is ordinary assistant text.
+          presentAssistantText(event.text);
         } else if (event.type === "reasoning.delta") {
           // Some local runtimes expose a reasoning channel. Keep its content
           // private, but expose bounded progress metadata so the UI can say
@@ -1431,26 +2035,55 @@ export async function runAgent(
     }
     if (!done && !sawText && toolCalls.length === 0)
       return await failureResult(turn, "Provider ended without a response.");
-    const recoveredCalls = recoverTextToolCalls(streamBuffer, turn);
-    const recoveredTextCall = Boolean(recoveredCalls?.length);
-    if (recoveredCalls) {
-      logger?.info("agent.tool.envelope_recovered", {
+    if (toolCalls.length > MAX_TOOL_CALLS_PER_RESPONSE) {
+      oversizedBatchCount += 1;
+      const error = new ToolError(
+        "TOOL_BATCH_TOO_LARGE",
+        `The model requested ${toolCalls.length} tool calls in one response; the maximum tool calls per response is ${MAX_TOOL_CALLS_PER_RESPONSE}.`,
+        {
+          recoverable: true,
+          suggestedAction:
+            "Use the result of the current observation and request a smaller next tool batch.",
+          details: {
+            requested: toolCalls.length,
+            maximum: MAX_TOOL_CALLS_PER_RESPONSE,
+          },
+        },
+      );
+      logger?.warn("agent.tool_batch.rejected", {
         turn,
-        callCount: recoveredCalls.length,
+        code: error.code,
+        ...(error.details ?? {}),
       });
-      for (const call of recoveredCalls) {
-        if (!toolCalls.some((existing) => existing.id === call.id)) {
-          toolCalls.push(call);
-        }
-      }
-    } else {
-      if (TOOL_TEXT_SHAPE.test(streamBuffer)) {
-        logger?.warn("agent.tool_text.suppressed", {
-          turn,
-          reason: "unrecognized_or_unsafe_tool_shaped_text",
-        });
-      } else presentAssistantText(streamBuffer);
+      if (oversizedBatchCount >= 2)
+        return await failureResult(turn, error.message);
+
+      // Do not execute or acknowledge the speculative calls individually.
+      // Give the model one bounded recovery turn with a structured correction
+      // instead, preserving provider message validity while preventing a
+      // single response from becoming an unobserved tool storm.
+      const presentedAssistantText = assistantTextParts.join("");
+      messages.push({
+        role: "assistant",
+        content: presentedAssistantText,
+      });
+      messages.push({
+        role: "user",
+        content: JSON.stringify({
+          type: "tool_batch_rejected",
+          code: error.code,
+          message: error.message,
+          recoverable: true,
+          suggestedAction: error.suggestedAction,
+          maximum: MAX_TOOL_CALLS_PER_RESPONSE,
+        }),
+      });
+      finalText = error.message;
+      transitionPhase(ledger, "reflect", loopOptions);
+      persistLedger();
+      continue;
     }
+
     const presentedAssistantText = assistantTextParts.join("");
     finalText = presentedAssistantText || finalText;
     logger?.debug("agent.model.response", {
@@ -1458,7 +2091,6 @@ export async function runAgent(
       done,
       textLength: presentedAssistantText.length,
       toolCallCount: toolCalls.length,
-      recoveredTextCall,
     });
 
     if (toolCalls.length > 0) {
@@ -1471,6 +2103,149 @@ export async function runAgent(
       } else {
         lastCallSignature = signature;
         repeatedCallCount = 1;
+      }
+      const repeatedReadObservation = (() => {
+        if (
+          mode !== "coding" ||
+          toolCalls.length !== 1 ||
+          toolCalls[0]?.name !== "ReadFile" ||
+          readLoopRecoveryCount >= 2
+        )
+          return undefined;
+        let input: unknown = {};
+        try {
+          input = parseToolInput(toolCalls[0]);
+        } catch {
+          return undefined;
+        }
+        if (
+          typeof input !== "object" ||
+          input === null ||
+          !("path" in input) ||
+          typeof input.path !== "string"
+        )
+          return undefined;
+        const path = normalizeWorkspacePath(input.path);
+        // A forced recovery read is deliberately allowed even when the same
+        // file was observed earlier. Its exact path is the controller's way
+        // to refresh the post-failure state; the execution boundary below
+        // rejects every other path.
+        if (forcedRecoveryTool || rejectedEditPaths.has(path)) return undefined;
+        const observation = readObservations.get(path);
+        if (!observation || observation.revision !== mutationRevision)
+          return undefined;
+        // One extra read is legitimate when the first bounded response was
+        // truncated. Once the same file has been observed twice at the same
+        // workspace revision, changing line ranges is not new progress.
+        const minimumReadsBeforeRecovery = observation.truncated ? 2 : 1;
+        return observation.successfulReads >= minimumReadsBeforeRecovery
+          ? { path }
+          : undefined;
+      })();
+      const repeatedReadCall =
+        mode === "coding" &&
+        toolCalls.length === 1 &&
+        toolCalls[0]?.name === "ReadFile" &&
+        readLoopRecoveryCount < 2;
+      if (
+        (repeatedCallCount >= NON_PROGRESS_LIMIT || repeatedReadObservation) &&
+        repeatedReadCall
+      ) {
+        const repeatedCall = toolCalls[0]!;
+        let repeatedInput: unknown = {};
+        try {
+          repeatedInput = parseToolInput(repeatedCall);
+        } catch {
+          repeatedInput = {};
+        }
+        const repeatedPath =
+          typeof repeatedInput === "object" &&
+          repeatedInput !== null &&
+          "path" in repeatedInput &&
+          typeof repeatedInput.path === "string"
+            ? normalizeWorkspacePath(repeatedInput.path)
+            : undefined;
+        const currentTarget = criteriaWritePaths[0] ?? objectivePaths[0];
+        const target = currentTarget ?? repeatedPath ?? "the current target";
+        if (
+          stagedTask &&
+          stagedNeedsSupportingEvidence &&
+          !stagedSupportingEvidenceObserved
+        ) {
+          const normalizedTarget = currentTarget
+            ? normalizeWorkspacePath(currentTarget)
+            : undefined;
+          const supportingPath =
+            [...hostContextPaths].find(
+              (candidate) =>
+                candidate !== normalizedTarget &&
+                objectivePaths.some(
+                  (objectivePath) =>
+                    normalizeWorkspacePath(objectivePath) === candidate,
+                ),
+            ) ??
+            objectivePaths.find(
+              (candidate) =>
+                normalizeWorkspacePath(candidate) !== normalizedTarget,
+            );
+          if (supportingPath) {
+            forcedRecoveryTool = { name: "ReadFile", path: supportingPath };
+            pendingRecoveryInstruction =
+              `Host recovery: ${target} has already been observed. ` +
+              `Read the supporting target ${supportingPath} once before editing ${target}.`;
+          }
+        }
+        const correction: ToolResult = {
+          tool: repeatedCall.name,
+          ok: false,
+          error:
+            "The host already has a successful observation for this file; the repeated read was not executed.",
+          code: "CONFLICT",
+          recoverable: true,
+          ...(repeatedPath ? { path: repeatedPath } : {}),
+          suggestedAction: `Use the existing observation and make the smallest implementation change in ${target}.`,
+          durationMs: 0,
+        };
+        messages.push({
+          role: "assistant",
+          content: presentedAssistantText,
+          toolCalls: normalizeToolCallsForContinuation(toolCalls),
+        });
+        messages.push({
+          role: "tool",
+          toolCallId: repeatedCall.id,
+          content: toolMessageContent(correction, task),
+        });
+        messages.push({
+          role: "user",
+          content:
+            stagedNeedsSupportingEvidence && !stagedSupportingEvidenceObserved
+              ? (pendingRecoveryInstruction ??
+                `Host recovery: read one supporting target before editing ${target}.`)
+              : `Host recovery: ReadFile has already returned evidence for ${repeatedPath ?? target}. ` +
+                `This is bounded work unit ${target}. Do not call ReadFile on the same path again. ` +
+                "Use exactly one EditFile or WriteFile now for the smallest requested change, " +
+                "or use SearchText only if a specific symbol is still missing. Do not narrate.",
+        });
+        toolRuns.push(correction);
+        observeTool(
+          repeatedCall,
+          toolMap.get(repeatedCall.name),
+          correction,
+          repeatedInput,
+        );
+        readLoopRecoveryCount += 1;
+        lastCallSignature = undefined;
+        repeatedCallCount = 0;
+        noActionCount = 0;
+        logger?.warn("agent.non_progress.recovered", {
+          reason: "repeated_read",
+          recoveryAttempt: readLoopRecoveryCount,
+          target,
+        });
+        transitionPhase(ledger, "reflect", loopOptions);
+        persistLedger();
+        continue;
       }
       if (repeatedCallCount >= NON_PROGRESS_LIMIT) {
         logger?.warn("agent.non_progress.detected", {
@@ -1487,19 +2262,6 @@ export async function runAgent(
       }
     }
 
-    const signature =
-      toolCalls.length > 0
-        ? [...toolCalls]
-            .map((call) => `${call.name}:${call.arguments}`)
-            .sort()
-            .join("|")
-        : undefined;
-    const repeatedTextualCall =
-      recoveredTextCall &&
-      signature !== undefined &&
-      signature === lastTextualCallSignature;
-    lastTextualCallSignature = recoveredTextCall ? signature : undefined;
-
     // Defense in depth: this turn does not permit tool use (TurnPolicy
     // resolved toolChoice "none"). Refuse any attempted tool call outright
     // rather than executing it, even if the model ignored tool_choice.
@@ -1513,11 +2275,21 @@ export async function runAgent(
       return await finish(turn);
     }
 
-    if (repeatedTextualCall && toolCalls.length > 0) {
+    // A repeated call is an observation failure, not permission to execute
+    // the same action again. Feed a typed conflict back once and force the
+    // following turn to answer from the existing observation.
+    const repeatedTextualBatch = toolCalls.some((call) =>
+      call.id.startsWith("recovered-"),
+    );
+    if (
+      repeatedTextualBatch &&
+      repeatedCallCount >= 2 &&
+      toolCalls.length > 0
+    ) {
       messages.push({
         role: "assistant",
         content: presentedAssistantText,
-        toolCalls: [...toolCalls],
+        toolCalls: normalizeToolCallsForContinuation(toolCalls),
       });
       for (const call of toolCalls) {
         const tool = toolMap.get(call.name);
@@ -1531,11 +2303,11 @@ export async function runAgent(
           tool: call.name,
           ok: false,
           error:
-            "The model repeated a textual tool call that already produced an observation; the duplicate was not executed.",
+            "The model repeated a tool call that already produced an observation; the duplicate was not executed.",
           code: "CONFLICT",
           recoverable: true,
           suggestedAction:
-            "Use the previous tool result and answer without another tool call.",
+            "Use the previous tool result and choose a different action or answer.",
           durationMs: 0,
         };
         emit(loopOptions, {
@@ -1550,7 +2322,7 @@ export async function runAgent(
         messages.push({
           role: "tool",
           toolCallId: call.id,
-          content: toolMessageContent(result),
+          content: toolMessageContent(result, task),
         });
         emit(loopOptions, {
           type: "tool.finished",
@@ -1568,12 +2340,19 @@ export async function runAgent(
     messages.push({
       role: "assistant",
       content: presentedAssistantText,
-      ...(toolCalls.length > 0 ? { toolCalls: [...toolCalls] } : {}),
+      ...(toolCalls.length > 0
+        ? { toolCalls: normalizeToolCallsForContinuation(toolCalls) }
+        : {}),
     });
 
     if (toolCalls.length > 0) {
       noActionCount = 0;
-      for (const call of toolCalls) {
+      const firstMutationCallIndex = toolCalls.findIndex((call) => {
+        const tool = toolMap.get(call.name);
+        return tool?.risk === "write" || tool?.risk === "destructive";
+      });
+      let responseMutationSeen = false;
+      for (const [callIndex, call] of toolCalls.entries()) {
         transitionPhase(ledger, "act", loopOptions);
         const tool = toolMap.get(call.name);
         if (!tool) {
@@ -1604,7 +2383,126 @@ export async function runAgent(
           messages.push({
             role: "tool",
             toolCallId: call.id,
-            content: toolMessageContent(result),
+            content: toolMessageContent(result, task),
+          });
+          emit(loopOptions, {
+            type: "tool.finished",
+            callId: call.id,
+            tool: call.name,
+            result,
+          });
+          continue;
+        }
+        const isMutationCall =
+          tool.risk === "write" || tool.risk === "destructive";
+        if (
+          stagedTask &&
+          isMutationCall &&
+          firstMutationCallIndex > 0 &&
+          callIndex === firstMutationCallIndex
+        ) {
+          const result: ToolResult = {
+            tool: call.name,
+            ok: false,
+            error:
+              "The host did not execute this mutation because the model bundled it after another tool call in the same response.",
+            code: "CONFLICT",
+            recoverable: true,
+            suggestedAction:
+              "Use the preceding tool result in a new model turn, then emit exactly one EditFile, WriteFile or DeleteFile call.",
+            durationMs: 0,
+          };
+          emit(loopOptions, {
+            type: "tool.started",
+            callId: call.id,
+            tool: call.name,
+            input: {},
+            risk: tool.risk,
+          });
+          toolRuns.push(result);
+          observeTool(call, tool, result, {});
+          messages.push({
+            role: "tool",
+            toolCallId: call.id,
+            content: toolMessageContent(result, task),
+          });
+          emit(loopOptions, {
+            type: "tool.finished",
+            callId: call.id,
+            tool: call.name,
+            result,
+          });
+          continue;
+        }
+        // Tool calls in one provider response share the same pre-action
+        // context. Once a mutation is requested, executing another call from
+        // that response would let a small model batch dependent edits before
+        // observing the first result. In staged work units, also quarantine
+        // later reads/commands so the next model turn gets a clean observation
+        // boundary. The skipped call still receives a structured tool result
+        // so the provider message remains valid, but it never reaches the
+        // executor.
+        if (responseMutationSeen && (stagedTask || isMutationCall)) {
+          const result: ToolResult = {
+            tool: call.name,
+            ok: false,
+            error:
+              "The host did not execute this call because a prior mutation was already requested in the same model response.",
+            code: "CONFLICT",
+            recoverable: true,
+            suggestedAction:
+              "Wait for the previous tool result, then choose exactly one next action in a new model turn.",
+            durationMs: 0,
+          };
+          emit(loopOptions, {
+            type: "tool.started",
+            callId: call.id,
+            tool: call.name,
+            input: {},
+            risk: tool.risk,
+          });
+          toolRuns.push(result);
+          observeTool(call, tool, result, {});
+          messages.push({
+            role: "tool",
+            toolCallId: call.id,
+            content: toolMessageContent(result, task),
+          });
+          emit(loopOptions, {
+            type: "tool.finished",
+            callId: call.id,
+            tool: call.name,
+            result,
+          });
+          continue;
+        }
+        if (isMutationCall) responseMutationSeen = true;
+        if (!executableTurnTools.has(call.name)) {
+          const result: ToolResult = {
+            tool: call.name,
+            ok: false,
+            error: `Tool ${call.name} is not allowed in the current staged work unit.`,
+            code: "PERMISSION_DENIED",
+            recoverable: true,
+            suggestedAction:
+              activeTargetEvidenceReady || activeTargetRejected
+                ? "Use the currently exposed bounded mutation or ReadFile recovery tool instead of Shell or another unexposed tool."
+                : "Use only tools exposed for the current turn policy.",
+            durationMs: 0,
+          };
+          emit(loopOptions, {
+            type: "tool.started",
+            callId: call.id,
+            tool: call.name,
+            input: {},
+            risk: tool.risk,
+          });
+          toolRuns.push(result);
+          observeTool(call, tool, result, {});
+          messages.push({
+            role: "tool",
+            toolCallId: call.id,
+            content: toolMessageContent(result, task),
           });
           emit(loopOptions, {
             type: "tool.finished",
@@ -1635,7 +2533,7 @@ export async function runAgent(
           messages.push({
             role: "tool",
             toolCallId: call.id,
-            content: toolMessageContent(result),
+            content: toolMessageContent(result, task),
           });
           emit(loopOptions, {
             type: "tool.started",
@@ -1674,7 +2572,7 @@ export async function runAgent(
           messages.push({
             role: "tool",
             toolCallId: call.id,
-            content: toolMessageContent(result),
+            content: toolMessageContent(result, task),
           });
           emit(loopOptions, {
             type: "tool.finished",
@@ -1696,26 +2594,139 @@ export async function runAgent(
               ? normalizeWorkspacePath(input.path)
               : undefined;
           if (
-            (tool.risk === "write" ||
-              tool.risk === "destructive" ||
-              (tool.name === "ReadFile" && criteriaFeedbackActive)) &&
+            forcedRecoveryTool &&
+            tool.name === forcedRecoveryTool.name &&
+            requestedPath !== forcedRecoveryTool.path
+          )
+            throw new ToolError(
+              "CONFLICT",
+              `Recovery requires ReadFile on ${forcedRecoveryTool.path}; ${requestedPath ?? "the requested path"} is outside the authorized recovery target.`,
+              {
+                ...(requestedPath ? { path: requestedPath } : {}),
+                recoverable: true,
+                suggestedAction: `Use ReadFile on the exact recovery path ${forcedRecoveryTool.path}; do not select another file until that observation succeeds.`,
+              },
+            );
+          if (
+            activeTargetExists &&
+            tool.name === "CreateFile" &&
+            requestedPath === normalizeWorkspacePath(activeWorkUnitTarget ?? "")
+          )
+            throw new ToolError(
+              "PATH_EXISTS",
+              `${requestedPath} already exists and is the active staged target. Use EditFile for a precise change or WriteFile only when a complete replacement is intentional.`,
+              {
+                path: requestedPath,
+                recoverable: true,
+                suggestedAction:
+                  "Use EditFile with exact observed text; do not recreate an existing file.",
+              },
+            );
+          if (
+            activeTargetEvidenceReady &&
+            STAGED_DISCOVERY_TOOL_NAMES.has(tool.name)
+          )
+            throw new ToolError(
+              "CONFLICT",
+              "The host already has sufficient evidence for the active staged target; choose a bounded mutation or verification tool.",
+              {
+                ...(requestedPath ? { path: requestedPath } : {}),
+                recoverable: true,
+                suggestedAction:
+                  "Use EditFile, WriteFile, DeleteFile, RunTests, GitStatus or GitDiff for the current work unit. A failed mutation will reopen fresh discovery.",
+              },
+            );
+          const editInput =
+            tool.name === "EditFile" ? objectOutput(input) : undefined;
+          const oldText = editInput?.oldText;
+          const newText = editInput?.newText;
+          if (
+            stagedTask &&
+            activeTargetEvidenceReady &&
+            typeof oldText === "string" &&
+            typeof newText === "string" &&
+            oldText.length >= MAX_STAGED_FULL_REWRITE_CHARS &&
+            newText.length >= MAX_STAGED_FULL_REWRITE_CHARS
+          )
+            throw new ToolError(
+              "CONFLICT",
+              "The host rejected a wholesale rewrite inside a bounded work unit.",
+              {
+                recoverable: true,
+                ...(requestedPath ? { path: requestedPath } : {}),
+                suggestedAction:
+                  "Use the observed file and send one small exact oldText/newText replacement; do not resend the entire file.",
+                details: {
+                  reason: "STAGED_FULL_REWRITE_TOO_LARGE",
+                  oldTextChars: oldText.length,
+                  newTextChars: newText.length,
+                  maximum: MAX_STAGED_FULL_REWRITE_CHARS,
+                },
+              },
+            );
+          if (tool.risk === "write" || tool.risk === "destructive")
+            updateTaskNode(mutationNodeForPath(requestedPath), "running");
+          if (tool.risk === "write" || tool.risk === "destructive") {
+            const evidenceGate = evaluateMutationEvidenceGate({
+              mode,
+              declaredState: declaredEvidenceState,
+              evidence: ledger.evidence,
+            });
+            if (!evidenceGate.allowed)
+              throw new ToolError(
+                "INSUFFICIENT_CONTEXT",
+                `Mutation blocked: ${evidenceGate.reason ?? "relevant repository evidence is insufficient"}.`,
+                {
+                  recoverable: true,
+                  ...(requestedPath ? { path: requestedPath } : {}),
+                  suggestedAction:
+                    "Use SearchText, ListFiles or ReadFile to acquire relevant repository evidence, then retry the mutation.",
+                  details: { evidenceState: evidenceGate.state },
+                },
+              );
+          }
+          if (
+            (tool.risk === "write" || tool.risk === "destructive") &&
             criteriaWritePaths.length > 0 &&
             requestedPath &&
             !criteriaWritePaths.includes(requestedPath)
           )
             throw new ToolError(
               "CONFLICT",
-              "The write targets " +
+              "The mutation targets " +
                 requestedPath +
-                ", but the current host criteria target " +
+                ", but the current host mutation scope is " +
                 criteriaWritePaths.join(", ") +
                 ".",
               {
                 path: requestedPath,
                 recoverable: true,
                 suggestedAction:
-                  "Read or edit one of the current host criteria target files: " +
+                  "Edit only one of the current host mutation targets: " +
                   criteriaWritePaths.join(", ") +
+                  ".",
+              },
+            );
+          if (
+            tool.name === "ReadFile" &&
+            criteriaFeedbackActive &&
+            criteriaReadPaths.length > 0 &&
+            requestedPath &&
+            !criteriaReadPaths.includes(requestedPath)
+          )
+            throw new ToolError(
+              "CONFLICT",
+              "The diagnostic read targets " +
+                requestedPath +
+                ", but the current repair context is " +
+                criteriaReadPaths.join(", ") +
+                ".",
+              {
+                path: requestedPath,
+                recoverable: true,
+                suggestedAction:
+                  "Read the changed file, the reported failure path, or one of the current repair-context files: " +
+                  criteriaReadPaths.join(", ") +
                   ".",
               },
             );
@@ -1750,14 +2761,14 @@ export async function runAgent(
                   "Read the current file again, then construct a new exact edit from that observation.",
               },
             );
-          const context = await options.createExecutionContext(task);
-          if (logger) context.logger = logger;
+          const context = await createExecutionContext();
           if (context.checkpoint)
             checkpointPreservationCheck = async (activeCheckpoint) =>
               activeCheckpoint
                 ? context.checkpoint!.isPreserved(activeCheckpoint)
                 : true;
           if (checkpointId) context.checkpointId = checkpointId;
+          if (stagedTask) context.allowExistingFileOverwrite = false;
           if (
             (tool.risk === "write" || tool.risk === "destructive") &&
             !checkpointId
@@ -1857,7 +2868,7 @@ export async function runAgent(
           messages.push({
             role: "tool",
             toolCallId: call.id,
-            content: toolMessageContent(result),
+            content: toolMessageContent(result, task),
           });
           emit(loopOptions, {
             type: "tool.finished",
@@ -1878,7 +2889,7 @@ export async function runAgent(
           messages.push({
             role: "tool",
             toolCallId: call.id,
-            content: toolMessageContent(result),
+            content: toolMessageContent(result, task),
           });
           emit(loopOptions, {
             type: "tool.finished",
@@ -1900,6 +2911,17 @@ export async function runAgent(
         finalText = `Agent made no progress after ${repeatedErrorCount} ${lastErrorCode ?? "recoverable"} errors.`;
         return await finish(turn);
       }
+      if (repeatedMutationFailureCount >= MUTATION_FAILURE_LIMIT) {
+        logger?.warn("agent.non_progress.detected", {
+          reason: "repeated_mutation_failure",
+          repeatedCount: repeatedMutationFailureCount,
+          mutationFailureKey: lastMutationFailureKey,
+        });
+        unresolvedBlockers = 1;
+        finalText =
+          "Agent could not produce a valid mutation after repeated attempts; the workspace was left unchanged for this work unit.";
+        return await finish(turn);
+      }
       if (
         !mutated ||
         verificationPlan.length === 0 ||
@@ -1919,8 +2941,7 @@ export async function runAgent(
       verificationRan = true;
       verified = true;
       verifiedMutationRevision = mutationRevision;
-      const context = await options.createExecutionContext(task);
-      if (logger) context.logger = logger;
+      const context = await createExecutionContext();
       for (const planned of verificationPlan) {
         const verificationId = `${task.id}:verification:${ledger.verificationRuns.length + 1}`;
         const verificationStartedAt = new Date().toISOString();
@@ -2004,6 +3025,7 @@ export async function runAgent(
         });
         if (!passed) break;
       }
+      updateTaskNode("verify", verified ? "passed" : "failed");
       transitionPhase(ledger, "reflect", loopOptions);
       persistLedger();
       if (explicitSuccessCriteria) {
@@ -2027,7 +3049,9 @@ export async function runAgent(
           syncTargetPlan([]);
           if (updateTaskPlanStep(ledger, "step-verify", "done")) emitPlan();
           criteriaWritePaths = [];
+          criteriaReadPaths = [];
           criteriaFeedbackActive = false;
+          stagedMutationRequired = false;
           finalText =
             finalText.trim() ||
             "Changes were applied and verified by host verification.";
@@ -2038,8 +3062,41 @@ export async function runAgent(
           return await finish(turn);
         }
         criteriaFeedbackActive = true;
-        criteriaWritePaths = criteria.nextPaths;
-        syncTargetPlan(criteria.nextPaths);
+        const changedPaths = [
+          ...new Set(ledger.filesChanged.map(normalizeWorkspacePath)),
+        ];
+        const failedVerificationPaths = [
+          ...new Set(
+            ledger.verificationRuns
+              .filter((run) => run.status === "failed")
+              .slice(-3)
+              .flatMap((run) => run.failurePaths ?? [])
+              .map(normalizeWorkspacePath),
+          ),
+        ];
+        // A failed verification is a repair phase, not a new write-scope
+        // declaration. The current mutation and the failure evidence must be
+        // readable together; otherwise the host rejects the exact read needed
+        // to repair the code it just proved invalid.
+        const nextWritePaths = [
+          ...(verified ? [] : [...failedVerificationPaths, ...changedPaths]),
+          ...criteria.nextPaths,
+          ...(criteria.nextPaths.length === 0 ? objectivePaths : []),
+        ]
+          .map(normalizeWorkspacePath)
+          .filter((value) => value.length > 0);
+        const nextReadPaths = [
+          ...nextWritePaths,
+          ...failedVerificationPaths,
+          ...(verified ? [] : changedPaths),
+          ...objectivePaths,
+        ]
+          .map(normalizeWorkspacePath)
+          .filter((value) => value.length > 0);
+        criteriaWritePaths = [...new Set(nextWritePaths)].slice(0, 8);
+        criteriaReadPaths = [...new Set(nextReadPaths)].slice(0, 12);
+        stagedMutationRequired = false;
+        syncTargetPlan(criteriaWritePaths);
         const pendingCriteria = ledger.successCriteria
           .filter((criterion) => criterion.required && !criterion.satisfied)
           .map((criterion) => criterion.description);
@@ -2051,7 +3108,7 @@ export async function runAgent(
           ...pendingCriteria,
         ]);
         const nextActions = criteria.nextActions;
-        const freshReadPath = requiredFreshReadPath(criteria.nextPaths);
+        const freshReadPath = requiredFreshReadPath(criteriaWritePaths);
         messages.push({
           role: "user",
           content:

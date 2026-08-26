@@ -167,3 +167,19 @@ bun run typecheck -> PASS
 bun run build     -> PASS
 bun run smoke     -> PASS
 ```
+
+## Authoritative kernel update after the 2026-08-25 hard-gate repair
+
+The earlier live-fixture paragraphs describe a historical guarded execution
+path and must not be read as proof that an unqualified 1.5B model is an
+advanced coding agent. Current routing applies measured capability before
+selection: bounded work can require `workspace_reader`, while complex
+multi-file work requires `advanced_coding_agent`; no silent downgrade is
+allowed. Current deterministic evidence is maintained by the repository's
+latest canonical run, and live model claims remain configuration-specific.
+
+The current source also rejects an unlocalized coding graph instead of using
+`.` as an implicit mutation scope, rejects oversized native tool batches
+before execution, and keeps provider/tool JSON outside the assistant
+transcript. These are controller guarantees; they do not create reasoning
+capacity that the model has not demonstrated.

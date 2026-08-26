@@ -1,5 +1,6 @@
 import type { RepositorySnapshot } from "./repository-snapshot.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
+import type { MemoryFact } from "../shared/memory.js";
 
 export interface ContextBudgetInput {
   advertisedContext: number;
@@ -39,6 +40,8 @@ export interface RepositoryContextOptions {
   maxChars?: number;
   signal?: AbortSignal;
   snapshot?: RepositorySnapshot;
+  /** Historical facts used only as bounded retrieval hints. */
+  memoryFacts?: readonly MemoryFact[];
   logger?: LocalCodeLogger;
 }
 
@@ -51,4 +54,10 @@ export interface RepositoryContext {
   prompt: string;
   containsHighConfidenceSecret: boolean;
   secretPaths: string[];
+  /** Controller-visible evidence gate for the current objective. */
+  evidenceState: "SUFFICIENT" | "INSUFFICIENT" | "CONFLICTING";
+  /** Bounded memory hints included in the compiled context, never authority. */
+  memoryFacts?: MemoryFact[];
+  searchBackend:
+    "rg" | "fallback" | "no_matches" | "unavailable" | "not_needed";
 }

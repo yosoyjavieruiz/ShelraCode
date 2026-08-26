@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { analyzeTask } from "../../src/router/task-analysis.js";
 import {
+  requiredCapabilityForTurn,
   resolveTurnMode,
   resolveTurnPolicy,
   resolveTurnPolicyForObjective,
@@ -101,6 +102,44 @@ test("a coding task resolves to coding mode with the mutation toolset", () => {
   expect(policy.repositoryWrite).toBe(true);
   expect(policy.shell).toBe(true);
   expect(policy.toolChoice).toBe("required");
+});
+
+test("a coding turn never uses the read-only capability floor", () => {
+  const objective = "Fix this bug and run the tests.";
+  const analysis = analyzeTask(objective);
+  const mode = resolveTurnMode(objective, analysis);
+
+  expect(mode).toBe("coding");
+  expect(requiredCapabilityForTurn(mode, true, analysis)).toBe("coding_agent");
+});
+
+test("a complex coding turn retains its advanced parent for progressive admission", () => {
+  const objective =
+    "Debug the authentication regression across the repository, update all affected callers, and run the complete regression suite.";
+  const analysis = analyzeTask(objective);
+  const mode = resolveTurnMode(objective, analysis);
+
+  expect(mode).toBe("coding");
+  expect(analysis.requiredCapability).toBe("advanced_coding_agent");
+  expect(requiredCapabilityForTurn(mode, true, analysis)).toBe(
+    "advanced_coding_agent",
+  );
+});
+
+test("a coding objective remains coding when its completion includes diff review", () => {
+  const objective =
+    "Refactor the routing subsystem, add regression tests, run validation, and review the final diff.";
+  const analysis = analyzeTask(objective);
+
+  expect(resolveTurnMode(objective, analysis)).toBe("coding");
+});
+
+test("review wording cannot widen a read-only request", () => {
+  const objective =
+    "Review src/router/router.ts for possible bugs. Do not modify it.";
+  const analysis = analyzeTask(objective);
+
+  expect(resolveTurnMode(objective, analysis)).toBe("review");
 });
 
 test("a feature-plus-tests request resolves to coding mode", () => {
