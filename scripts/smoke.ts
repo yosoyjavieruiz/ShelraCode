@@ -44,6 +44,18 @@ const cases: SmokeCase[] = entrypoints.flatMap(({ label, command }) => [
   { label: `${label} doctor`, command: command(["doctor"]) },
 ]);
 
+cases.push({
+  label: "deterministic agent evaluation",
+  command: [
+    process.execPath,
+    "--conditions=browser",
+    "run",
+    path.join(projectRoot, "scripts", "evaluate-agent.ts"),
+    "--deterministic",
+    "--summary",
+  ],
+});
+
 for (const smoke of cases) {
   const proc = Bun.spawn(smoke.command, {
     cwd: projectRoot,

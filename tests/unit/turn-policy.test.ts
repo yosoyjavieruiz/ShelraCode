@@ -84,6 +84,14 @@ test("a runtime implementation location question keeps repository read tools", (
   expect(policy.toolChoice).toBe("auto");
 });
 
+test("a symbol named add does not turn a location question into a mutation", () => {
+  const objective = "Where is add implemented in this repository?";
+  const mode = resolveTurnMode(objective, analyzeTask(objective));
+
+  expect(mode).toBe("workspace_question");
+  expect(resolveTurnPolicy(mode).repositoryWrite).toBe(false);
+});
+
 test("a read-a-file request resolves to workspace_question mode", () => {
   const { mode } = policyFor("Read package.json and tell me the project name.");
   expect(mode).toBe("workspace_question");

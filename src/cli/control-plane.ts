@@ -252,6 +252,8 @@ export async function openControlPlane(
         : environmentSettings.routingMode),
     permissionMode:
       repositorySettings.permissionMode ?? environmentSettings.permissionMode,
+    permissionRules:
+      repositorySettings.permissionRules ?? environmentSettings.permissionRules,
   };
   logger.info("control-plane.opened", {
     root,

@@ -2,6 +2,79 @@
 
 <!-- Latest root-cause evidence is maintained below the historical sections. -->
 
+## Phase 7 evaluation evidence — 2026-08-26
+
+The current source includes a deterministic agent-evaluation matrix at
+`tests/evals/agent-journeys.ts` and its integration gate at
+`tests/integration/agent-evaluations.test.ts`. It exercises 18 disposable
+journeys across conversation, repository questions, symbol lookup,
+architecture analysis, planning, one- and multi-file changes, test repair,
+greenfield work, configuration, refactoring, typed recovery, compaction,
+resume, dirty-worktree safety, false completion, false blocking, and
+strict-zero rejection.
+
+Fresh evidence from the current checkout:
+
+```text
+bun run typecheck
+  PASS
+bun test tests/integration/agent-evaluations.test.ts
+  2 pass / 0 fail / 82 expectations
+bun run scripts/evaluate-agent.ts --deterministic --summary
+  Deterministic matrix: PASS (18/18 passed; failed=0; unproven=0; skipped=0)
+```
+
+`scripts/evaluate-agent.ts --local` is deliberately conservative: it accepts
+only loopback local runtimes, does not download models, and does not use a
+paid fallback. The current available snapshot discovered 9 local candidates;
+the selected LM Studio model was unloaded, so all local journeys remain
+`UNPROVEN`. The command records the exact model/runtime/quant/context when a
+loaded candidate is available and runs only disposable capability and coding
+fixtures.
+
+The deterministic matrix proves host contracts and recovery behavior with a
+scripted provider. It does not establish real-model success, long-horizon
+heterogeneous coding, or Claude/Codex parity. Those claims remain
+`UNPROVEN` until a loaded local model passes the live probe and the remaining
+release journeys are exercised.
+
+## Scoped permission approvals — 2026-08-26
+
+The interactive ASK boundary now exposes five explicit decisions through
+`src/tui/components/ApprovalDialog.tsx`: approve once, allow for the current
+session, always allow in the current project, deny, and cancel the turn.
+`src/tools/permission-grants.ts` gives those decisions bounded identities;
+Shell and RunTests rules match an exact normalized command, while file rules
+are scoped to the approved tool/risk. Session rules are memory-only and
+project rules are validated and persisted by `src/config/settings.ts` in
+`.localcode/config.json`. `/permissions` is the only canonical slash command
+and opens the backed permissions center, where rules can be revoked or all
+project rules cleared.
+
+The approval callback remains below the model in `src/tui/app.tsx` and
+`src/tools/workspace.ts`. An accepted destructive Shell invocation is passed
+as a one-shot authorization to the shared process policy; it still cannot
+leave the workspace or use a denied network path. Secret-shaped command rules
+are not persisted.
+
+Fresh evidence:
+
+```text
+bun --conditions=browser test [permission and TUI approval focus]
+  34 pass / 0 fail / 97 expectations
+bun run typecheck
+  PASS
+bun run test
+  643 pass / 1 skip / 0 fail / 2196 expectations
+Windows source TUI PTY
+  Approval choices rendered; session approval returned focus to the composer;
+  `/permissions` rendered the persisted-rule center; `/exit` restored the shell.
+```
+
+This is a functional scoped approval vertical, not an OS sandbox or a claim of
+Claude/Codex permission parity. The lower process/network policy remains an
+independent enforcement layer.
+
 ## Latest root-cause closure - 2026-08-25
 
 This pass addressed the two runtime causes behind the repeated local-model

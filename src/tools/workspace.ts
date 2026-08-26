@@ -18,7 +18,11 @@ import {
   shellCommandEscapesWorkspace,
 } from "./permissions.js";
 import { ToolError } from "./errors.js";
-import type { ToolDefinition, ToolExecutionContext } from "./types.js";
+import type {
+  ToolApprovalRequest,
+  ToolDefinition,
+  ToolExecutionContext,
+} from "./types.js";
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error;
@@ -364,7 +368,8 @@ async function requirePermission(
   risk: "read" | "write" | "execute" | "destructive",
   description = `Run ${risk} workspace action`,
   command?: string,
-): Promise<void> {
+  target: Pick<ToolApprovalRequest, "tool" | "path"> = {},
+): Promise<boolean> {
   const decision = checkPermission({
     mode: ctx.permissionMode,
     risk,
@@ -376,24 +381,26 @@ async function requirePermission(
     allowed: decision.allowed,
     requiresApproval: decision.requiresApproval,
   });
-  if (decision.allowed) return;
+  if (decision.allowed) return false;
   if (decision.requiresApproval && ctx.approvalGranted === true) {
     ctx.logger?.info("tool.permission.approved", {
       risk,
       source: "controller-one-shot-approval",
     });
-    return;
+    return risk === "destructive";
   }
   if (decision.requiresApproval && ctx.requestApproval) {
     ctx.logger?.info("tool.permission.approval_requested", { risk });
     const allowed = await ctx.requestApproval({
       description,
       risk,
+      ...(target.tool ? { tool: target.tool } : {}),
+      ...(target.path ? { path: target.path } : {}),
       ...(command ? { command } : {}),
     });
     if (allowed) {
       ctx.logger?.info("tool.permission.approved", { risk });
-      return;
+      return risk === "destructive";
     }
     ctx.logger?.warn("tool.permission.denied", {
       risk,
@@ -545,7 +552,13 @@ export const readFileTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "read", `Read workspace file: ${input.path}`);
+    await requirePermission(
+      ctx,
+      "read",
+      `Read workspace file: ${input.path}`,
+      undefined,
+      { tool: "ReadFile", path: input.path },
+    );
     const absolute = await assertWorkspacePath(ctx.root, input.path);
     const info = await statForTool(absolute, input.path);
     if (info.isDirectory)
@@ -639,6 +652,8 @@ export const writeFileTool: ToolDefinition<
       ctx,
       "write",
       `Write workspace file: ${input.path}`,
+      undefined,
+      { tool: "WriteFile", path: input.path },
     );
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
@@ -725,6 +740,8 @@ export const createFileTool: ToolDefinition<
       ctx,
       "write",
       `Create workspace file: ${input.path}`,
+      undefined,
+      { tool: "CreateFile", path: input.path },
     );
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
@@ -836,7 +853,13 @@ export const editFileTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
-    await requirePermission(ctx, "write", `Edit workspace file: ${input.path}`);
+    await requirePermission(
+      ctx,
+      "write",
+      `Edit workspace file: ${input.path}`,
+      undefined,
+      { tool: "EditFile", path: input.path },
+    );
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
         "CONFLICT",
@@ -936,6 +959,8 @@ export const deleteFileTool: ToolDefinition<
       ctx,
       "destructive",
       `Delete workspace file: ${input.path}`,
+      undefined,
+      { tool: "DeleteFile", path: input.path },
     );
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
@@ -1003,6 +1028,8 @@ export const listFilesTool: ToolDefinition<
       ctx,
       "read",
       `List workspace directory: ${directory}`,
+      undefined,
+      { tool: "ListFiles", path: directory },
     );
     const absoluteDirectory = await assertWorkspacePath(ctx.root, directory);
     const info = await statForTool(absoluteDirectory, directory);
@@ -1117,6 +1144,8 @@ export const globFilesTool: ToolDefinition<
       ctx,
       "read",
       `Find workspace files matching ${input.pattern} in ${directory}`,
+      undefined,
+      { tool: "GlobFiles", path: directory },
     );
     const absoluteDirectory = await assertWorkspacePath(ctx.root, directory);
     const info = await statForTool(absoluteDirectory, directory);
@@ -1316,6 +1345,8 @@ export const searchTextTool: ToolDefinition<
       ctx,
       "read",
       `Search workspace for ${JSON.stringify(input.query)}`,
+      undefined,
+      { tool: "SearchText" },
     );
     const cwd = await assertWorkspacePath(ctx.root, input.path ?? ".");
     const result = await runCommand(
@@ -1423,11 +1454,12 @@ export const shellTool: ToolDefinition<
         },
       );
     const classification = classifyShellCommand(input.command);
-    await requirePermission(
+    const destructiveApproved = await requirePermission(
       ctx,
       classification,
       `Run command: ${input.command}`,
       input.command,
+      { tool: "Shell" },
     );
     const started = performance.now();
     const result = await runToolShellCommand(input.command, {
@@ -1444,6 +1476,7 @@ export const shellTool: ToolDefinition<
       network: ctx.network === false ? "deny" : "allow",
       isolation: ctx.osIsolation ?? "best_effort",
       allowWeakIsolation: ctx.allowWeakProcessIsolation ?? true,
+      allowDestructive: destructiveApproved,
       policyCommand: input.command,
       env: ctx.env,
       onOutput: ctx.onOutput,
@@ -1473,7 +1506,9 @@ export const gitStatusTool: ToolDefinition<
     return {};
   },
   async execute(_input, ctx) {
-    await requirePermission(ctx, "read", "Read Git status");
+    await requirePermission(ctx, "read", "Read Git status", undefined, {
+      tool: "GitStatus",
+    });
     const result = await runCommand("git", ["status", "--short", "--branch"], {
       intent: "read",
       cwd: ctx.root,
@@ -1524,6 +1559,8 @@ export const gitDiffTool: ToolDefinition<
       ctx,
       "read",
       `Read ${input.staged ? "staged " : "working tree "}Git diff`,
+      undefined,
+      { tool: "GitDiff" },
     );
     const result = await runCommand(
       "git",
@@ -1621,7 +1658,13 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
             "Use a local test command or a turn policy that explicitly permits network access.",
         },
       );
-    await requirePermission(ctx, "execute", `Run tests: ${command}`, command);
+    await requirePermission(
+      ctx,
+      "execute",
+      `Run tests: ${command}`,
+      command,
+      { tool: "RunTests" },
+    );
     const classification = classifyShellCommand(command);
     if (classification === "destructive")
       throw new ToolError(

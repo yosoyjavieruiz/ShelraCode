@@ -70,6 +70,8 @@ test("ASK prompts before reading a workspace file and executes after approval", 
     description: string;
     risk: string;
     command?: string;
+    tool?: string;
+    path?: string;
   }> = [];
   const result = await readFileTool.execute(
     { path: "note.txt" },
@@ -85,7 +87,12 @@ test("ASK prompts before reading a workspace file and executes after approval", 
   );
   expect(result.content).toBe("approved read");
   expect(requests).toEqual([
-    { description: "Read workspace file: note.txt", risk: "read" },
+    {
+      description: "Read workspace file: note.txt",
+      risk: "read",
+      tool: "ReadFile",
+      path: "note.txt",
+    },
   ]);
 });
 
@@ -102,7 +109,12 @@ test("ASK prompts before creating and editing workspace files", async () => {
     "existing.txt",
     "created.txt",
   ]);
-  const requests: Array<{ description: string; risk: string }> = [];
+  const requests: Array<{
+    description: string;
+    risk: string;
+    tool?: string;
+    path?: string;
+  }> = [];
   const ctx = {
     root,
     permissionMode: "ASK" as const,
@@ -125,8 +137,18 @@ test("ASK prompts before creating and editing workspace files", async () => {
   );
 
   expect(requests).toEqual([
-    { description: "Create workspace file: created.txt", risk: "write" },
-    { description: "Edit workspace file: existing.txt", risk: "write" },
+    {
+      description: "Create workspace file: created.txt",
+      risk: "write",
+      tool: "CreateFile",
+      path: "created.txt",
+    },
+    {
+      description: "Edit workspace file: existing.txt",
+      risk: "write",
+      tool: "EditFile",
+      path: "existing.txt",
+    },
   ]);
   expect(await Bun.file(path.join(root, "created.txt")).text()).toBe(
     "created\n",
@@ -142,6 +164,7 @@ test("destructive shell execution waits for an explicit approval decision", asyn
     description: string;
     risk: string;
     command?: string;
+    tool?: string;
   }> = [];
 
   await expect(
@@ -163,9 +186,31 @@ test("destructive shell execution waits for an explicit approval decision", asyn
     {
       description: "Run command: git reset --hard HEAD",
       risk: "destructive",
+      tool: "Shell",
       command: "git reset --hard HEAD",
     },
   ]);
+});
+
+test("an approved destructive shell command reaches execution without weakening network policy", async () => {
+  const command = process.platform === "win32" ? "runas /?" : "sudo --version";
+  const requests: string[] = [];
+  const result = await shellTool.execute(
+    { command },
+    {
+      root: process.cwd(),
+      permissionMode: "EDIT",
+      signal: new AbortController().signal,
+      network: false,
+      requestApproval: async (request) => {
+        requests.push(request.command ?? "");
+        return true;
+      },
+    },
+  );
+
+  expect(requests).toEqual([command]);
+  expect(result.exitCode).toBeTypeOf("number");
 });
 
 test("permission denials are typed and cannot be bypassed by a workspace tool", async () => {

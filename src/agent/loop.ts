@@ -4254,6 +4254,13 @@ export async function runAgent(
             typeof input.path === "string"
               ? normalizeWorkspacePath(input.path)
               : undefined;
+          const requestedCommand =
+            typeof input === "object" &&
+            input !== null &&
+            "command" in input &&
+            typeof input.command === "string"
+              ? input.command
+              : undefined;
           const context = await createExecutionContext();
           const requestControllerApproval = async (
             risk: ToolRisk,
@@ -4276,6 +4283,7 @@ export async function runAgent(
               risk,
               tool: tool.name,
               ...(requestedPath ? { path: requestedPath } : {}),
+              ...(requestedCommand ? { command: requestedCommand } : {}),
             });
             if (!allowed)
               throw new ToolError(

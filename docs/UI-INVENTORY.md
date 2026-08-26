@@ -46,8 +46,13 @@ Currently handled by the V1 app:
 ```text
 /models /routing /quota /privacy /providers /doctor
 /context /plan /diff /checkpoint /rollback /explain-route
+/permissions
 /help /clear /exit /quit
 ```
+
+`/permissions` opens the backed safety center. It lists session and project
+permission rules, allows revoking an individual rule with Enter, and clears
+project rules with X; it does not weaken workspace, network, or process policy.
 
 These are the commands that have current UI/service destinations. V2 may add
 `/new`, `/sessions`, `/changes`, `/settings`, `/theme`, `/keybinds`,

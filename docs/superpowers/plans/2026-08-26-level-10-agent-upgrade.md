@@ -498,41 +498,74 @@ Run: `bun test tests/unit/subagents.test.ts tests/integration/subagents.test.ts`
 - Modify: `docs/agent-kernel/STATUS.md`
 - Test: `tests/integration/agent-evaluations.test.ts`
 
-- [ ] **Step 1: Add failing evaluation assertions for the required journeys.**
+- [x] **Step 1: Add failing evaluation assertions for the required journeys.**
 
 Define a table of fixture IDs and expected terminal states; include one
 false-success fixture where the model claims completion without creating the
 artifact, one failing-test repair, one restart/resume, one dirty-worktree
 conflict, one compaction pressure run, and one strict-zero route rejection.
 
-- [ ] **Step 2: Run the evaluator against fake providers and record the baseline.**
+- [x] **Step 2: Run the evaluator against fake providers and record the baseline.**
 
 Run: `bun test tests/integration/agent-evaluations.test.ts`; expected output
 must include per-journey status, verification status, recovery count, and no
 aggregate success claim when a journey is unproven.
 
-- [ ] **Step 3: Run the same matrix against available local models without downloading models or using paid inference.**
+- [x] **Step 3: Run the same matrix against available local models without downloading models or using paid inference.**
 
 Use only models already discovered by the local runtime and record a skipped
 reason for unloaded/ineligible models; never add a cloud request as fallback.
 
-- [ ] **Step 4: Add artifact provenance and reproducible result output.**
+- [x] **Step 4: Add artifact provenance and reproducible result output.**
 
 Record source HEAD, executable hash, model/runtime/template/quant/context,
 generation settings, OS/hardware, fixture revision, and test command.
 
-- [ ] **Step 5: Run the release gate.**
+- [x] **Step 5: Run the release gate.**
 
 Run: `bun run format:check`; `bun run typecheck`; `bun run test`; `bun run build`; `bun run smoke`; `bun test tests/integration/functional-acceptance.test.ts`; then exercise the rebuilt TUI at 80, 100, 120, and 160 columns with submit, cancellation, and exit.
 
-- [ ] **Step 6: Re-score autonomy from fresh evidence and document remaining `UNPROVEN` capabilities.**
+- [x] **Step 6: Re-score autonomy from fresh evidence and document remaining `UNPROVEN` capabilities.**
 
 Update only claims supported by the evaluator output; do not raise a score for
 unit tests that did not exercise a real model/artifact path.
 
-- [ ] **Step 7: Commit the evaluation/release gate.**
+- [x] **Step 7: Commit the evaluation/release gate.**
 
 Run: `git add tests/evals scripts/evaluate-agent.ts scripts/smoke.ts tests/integration/agent-evaluations.test.ts docs/STATUS.md docs/agent-kernel/STATUS.md; git commit -m "test: add autonomous coding evaluation gate"`
+
+### Task 11: Add scoped ASK approvals and `/permissions` management (Phase 8)
+
+**Files:**
+
+- Create: `src/tools/permission-grants.ts`
+- Create: `src/tui/state/approval.ts`
+- Modify: `src/config/settings.ts`
+- Modify: `src/cli/control-plane.ts`
+- Modify: `src/tools/workspace.ts`
+- Modify: `src/tui/app.tsx`
+- Modify: `src/tui/components/ApprovalDialog.tsx`
+- Modify: `src/tui/views/Centers.tsx`
+- Modify: `src/tui/commands/registry.ts`
+- Test: `tests/unit/permission-grants.test.ts`
+- Test: `tests/unit/permissions.test.ts`
+- Test: `tests/unit/settings.test.ts`
+- Test: `tests/unit/tui-search.test.ts`
+- Test: `tests/integration/tui-v4-overlays.test.tsx`
+
+- [x] **Step 1: Define bounded session/project grants and secret-safe persistence.**
+
+- [x] **Step 2: Add the five-choice ASK modal and one-shot approval handoff.**
+
+- [x] **Step 3: Persist project rules and expose the canonical `/permissions` center.**
+
+- [x] **Step 4: Verify exact-command process rules and lower policy enforcement.**
+
+Run: `bun --conditions=browser test tests/unit/permission-grants.test.ts tests/unit/permissions.test.ts tests/unit/settings.test.ts tests/unit/tui-search.test.ts tests/integration/tui-v4-overlays.test.tsx`; `bun run typecheck`; `bun run test`; `bun run build`; `bun run smoke`.
+
+- [x] **Step 5: Commit the scoped approval vertical.**
+
+Run: `git add ...; git commit -m "feat: add scoped permission approvals"`
 
 ## Phase completion gate
 

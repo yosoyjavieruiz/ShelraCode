@@ -152,8 +152,18 @@ function requestsReview(objective: string, analysis: TaskAnalysis): boolean {
 }
 
 function hasMutationIntent(objective: string): boolean {
+  const normalized = normalizeObjective(objective);
+  // A symbol name can itself be a mutation verb (for example `add`). Do not
+  // widen a repository location question just because it asks where that
+  // symbol is implemented or defined.
+  if (
+    /\b(?:where|which\s+file|donde|en\s+que\s+archivo)\b[\s\S]*\b(?:implemented|defined|located|declared|referenced|implementado|implementada|definido|definida|ubicado|ubicada)\b/iu.test(
+      normalized,
+    )
+  )
+    return false;
   return /\b(?:add|change|create|delete|edit|fix|implement|modify|refactor|remove|rename|update|write|agrega|arregla|cambia|crea|elimina|implementa|modifica|renombra|actualiza)\b/iu.test(
-    normalizeObjective(objective),
+    normalized,
   );
 }
 

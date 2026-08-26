@@ -6,15 +6,23 @@ import type {
   RepositoryPrivacy,
   RoutingMode,
 } from "../shared/types.js";
+import {
+  parsePermissionGrants,
+  type PermissionGrant,
+} from "../tools/permission-grants.js";
 
 export interface LocalCodeSettings {
   privacy: RepositoryPrivacy;
   routingMode: RoutingMode;
   permissionMode: PermissionMode;
+  permissionRules: PermissionGrant[];
 }
 
 export type PersistedRepositorySettings = Partial<
-  Pick<LocalCodeSettings, "privacy" | "routingMode" | "permissionMode">
+  Pick<
+    LocalCodeSettings,
+    "privacy" | "routingMode" | "permissionMode" | "permissionRules"
+  >
 >;
 
 export function readSettings(
@@ -35,6 +43,7 @@ export function readSettings(
     privacy: classifyRepositoryPrivacy(env.LOCALCODE_PRIVACY),
     routingMode,
     permissionMode,
+    permissionRules: [],
   };
 }
 
@@ -65,6 +74,10 @@ function validSettings(value: unknown): PersistedRepositorySettings {
   )
     result.permissionMode =
       record.permissionMode as LocalCodeSettings["permissionMode"];
+  if (record.permissionRules !== undefined)
+    result.permissionRules = parsePermissionGrants(
+      record.permissionRules,
+    ).filter((grant) => grant.scope === "project");
   return result;
 }
 
@@ -98,9 +111,10 @@ export async function persistRepositorySettings(
 ): Promise<void> {
   const directory = path.join(root, ".localcode");
   await mkdir(directory, { recursive: true });
+  const existing = await readRepositorySettings(root);
   await writeFile(
     path.join(directory, "config.json"),
-    `${JSON.stringify(validSettings(settings), null, 2)}\n`,
+    `${JSON.stringify(validSettings({ ...existing, ...settings }), null, 2)}\n`,
     "utf8",
   );
 }

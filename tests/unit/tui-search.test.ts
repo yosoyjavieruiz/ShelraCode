@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  createUICommands,
   rankUICommands,
   type UICommand,
 } from "../../src/tui/commands/registry.js";
@@ -57,6 +58,16 @@ test("slash aliases outrank neighboring labels", () => {
     "/model",
   );
   expect(results[0]?.id).toBe("model");
+});
+
+test("permissions keeps the canonical slash command", () => {
+  const commands = createUICommands(() => undefined);
+  const permissionCommand = commands.find(
+    (command) => command.id === "permissions",
+  );
+
+  expect(permissionCommand?.slash).toBe("/permissions");
+  expect(commands.some((command) => command.slash === "/permiss")).toBe(false);
 });
 
 test("file references use non-contiguous fuzzy matching", () => {

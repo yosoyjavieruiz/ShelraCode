@@ -24,6 +24,16 @@ import type {
 import type { HardwareInspection } from "../hardware/types.js";
 import type { ProviderStatus } from "../providers/registry.js";
 import type { SessionSummary } from "../storage/database.js";
+import type { ToolApprovalRequest } from "../tools/types.js";
+import {
+  addPermissionGrant,
+  createPermissionGrant,
+  isPermissionGrantPersistable,
+  matchesPermissionGrant,
+  removePermissionGrant,
+  type ApprovalDecision,
+  type PermissionGrant,
+} from "../tools/permission-grants.js";
 import { verifyStructuralCodingCriteria } from "../agent/verification-criteria.js";
 import type { AgentTask } from "../agent/types.js";
 import type { AgentTaskLedger } from "../agent/task-state.js";
@@ -95,6 +105,10 @@ import { addPromptToHistory, navigatePromptHistory } from "./state/history.js";
 import { orderModelsForPicker } from "./state/search.js";
 import { moveSettingIndex } from "./state/settings.js";
 import {
+  APPROVAL_OPTIONS,
+  approvalDecisionForKey,
+} from "./state/approval.js";
+import {
   createUIFixture,
   readUIFixture,
   type UIFixtureKind,
@@ -103,6 +117,7 @@ import {
   ChangesView,
   GenericCenterView,
   ModelsView,
+  PermissionsView,
   PrivacyView,
   ProvidersView,
   QuotaView,
@@ -127,6 +142,7 @@ type RouteExecutionStrategy = "direct" | "progressive" | "discovery";
 interface ActiveApproval {
   description: string;
   impact: string;
+  request?: ToolApprovalRequest;
   resolve?: (allowed: boolean) => void;
 }
 type WithoutTranscriptIdentity<T> = T extends unknown
@@ -489,6 +505,14 @@ export function AppShell(
     createSignal<RoutingMode>("strict-zero");
   const [permissionMode, setPermissionMode] =
     createSignal<PermissionMode>("ASK");
+  const [permissionRules, setPermissionRules] = createSignal<PermissionGrant[]>(
+    [],
+  );
+  const [sessionPermissionGrants, setSessionPermissionGrants] = createSignal<
+    PermissionGrant[]
+  >([]);
+  const [permissionRuleIndex, setPermissionRuleIndex] = createSignal(0);
+  const [approvalIndex, setApprovalIndex] = createSignal(0);
   const [density, setDensity] = createSignal<"comfortable" | "compact">(
     "comfortable",
   );
@@ -638,6 +662,7 @@ export function AppShell(
       setPrivacy(controlPlane.settings.privacy);
       setRoutingMode(controlPlane.settings.routingMode);
       setPermissionMode(controlPlane.settings.permissionMode);
+      setPermissionRules(controlPlane.settings.permissionRules);
       setHardware(inspection);
     } finally {
       controlPlane.close();
@@ -711,12 +736,73 @@ export function AppShell(
     );
   };
 
-  const resolveApproval = (allowed: boolean): void => {
-    const request = activeApproval();
-    request?.resolve?.(allowed);
-    setActiveApproval(undefined);
-    setOverlay("none");
-    setNotice(allowed ? "Approval granted once" : "Approval denied");
+  const resolveApproval = async (decision: ApprovalDecision): Promise<void> => {
+    const approval = activeApproval();
+    const initialMessage =
+      decision === "session"
+        ? "Approval granted for this session"
+        : decision === "project"
+          ? "Approval saved for this project"
+          : decision === "once"
+            ? "Approval granted once"
+            : decision === "cancel"
+              ? "Turn cancelled"
+              : "Approval denied";
+    if (!approval) {
+      batch(() => {
+        setOverlay("none");
+        setNotice(initialMessage);
+      });
+      focusComposer();
+      return;
+    }
+
+    let allowed =
+      decision === "once" || decision === "session" || decision === "project";
+    let message = initialMessage;
+    batch(() => {
+      setActiveApproval(undefined);
+      setOverlay("none");
+      setNotice(
+        decision === "project" && approval.request
+          ? "Saving project permission rule…"
+          : message,
+      );
+    });
+
+    if (allowed && approval.request && decision !== "once") {
+      const grant = createPermissionGrant(
+        decision === "project" ? "project" : "session",
+        approval.request,
+      );
+      if (decision === "session") {
+        setSessionPermissionGrants((current) =>
+          addPermissionGrant(current, grant),
+        );
+      } else if (!isPermissionGrantPersistable(grant)) {
+        allowed = false;
+        message =
+          "Project permission rule was not saved because the command contains secret-shaped data";
+      } else {
+        const nextRules = addPermissionGrant(permissionRules(), grant);
+        try {
+          await persistRepositorySettings(process.cwd(), {
+            permissionRules: nextRules,
+          });
+          setPermissionRules(nextRules);
+        } catch (error) {
+          allowed = false;
+          message =
+            error instanceof Error
+              ? `Permission rule could not be saved · ${error.message}`
+              : "Permission rule could not be saved";
+        }
+      }
+    }
+
+    if (decision === "cancel") activeTaskAbort?.abort();
+    approval.resolve?.(allowed);
+    setNotice(message);
     focusComposer();
   };
 
@@ -831,7 +917,12 @@ export function AppShell(
         }
         return;
       }
-      if (target === "settings" || target === "sessions" || target === "help") {
+      if (
+        target === "settings" ||
+        target === "permissions" ||
+        target === "sessions" ||
+        target === "help"
+      ) {
         if (target === "help") {
           show(
             "help",
@@ -843,6 +934,18 @@ export function AppShell(
               ),
           );
           setNotice("Help · Ctrl+P to search");
+        } else if (target === "permissions") {
+          const { openControlPlane } = await import("../cli/control-plane.js");
+          const controlPlane = await openControlPlane(process.cwd());
+          try {
+            setPermissionMode(controlPlane.settings.permissionMode);
+            setPermissionRules(controlPlane.settings.permissionRules);
+          } finally {
+            controlPlane.close();
+          }
+          setPermissionRuleIndex(0);
+          show("permissions");
+          setNotice("Permissions · saved rules");
         } else if (target === "sessions") {
           const { openControlPlane } = await import("../cli/control-plane.js");
           const controlPlane = await openControlPlane(process.cwd());
@@ -1687,22 +1790,42 @@ export function AppShell(
               controlPlane.settings.permissionMode !== "AUTO",
             checkpoint,
             env: process.env,
-            requestApproval: (request) =>
-              new Promise<boolean>((resolve) => {
+            requestApproval: async (request) => {
+              const knownRules = [
+                ...sessionPermissionGrants(),
+                ...permissionRules(),
+                ...controlPlane.settings.permissionRules,
+              ];
+              if (knownRules.some((grant) => matchesPermissionGrant(grant, request))) {
+                taskLogger.debug("tool.permission.approved", {
+                  risk: request.risk,
+                  tool: request.tool,
+                  source:
+                    request.tool === "Shell" || request.tool === "RunTests"
+                      ? "saved-exact-command-rule"
+                      : "saved-tool-rule",
+                });
+                return true;
+              }
+              return new Promise<boolean>((resolve) => {
                 if (signal.aborted) {
                   resolve(false);
                   return;
                 }
-                const denyOnAbort = () => resolveApproval(false);
+                const denyOnAbort = () => {
+                  void resolveApproval("cancel");
+                };
                 signal.addEventListener("abort", denyOnAbort, {
                   once: true,
                 });
+                setApprovalIndex(0);
                 setActiveApproval({
                   description: request.description,
                   impact:
                     request.risk === "destructive"
                       ? "This action can change or remove workspace state."
                       : "This action requires explicit permission.",
+                  request,
                   resolve: (allowed) => {
                     signal.removeEventListener("abort", denyOnAbort);
                     resolve(allowed);
@@ -1715,7 +1838,8 @@ export function AppShell(
                 });
                 setOverlay("approval");
                 setNotice("Approval required");
-              }),
+              });
+            },
           });
           const subagentCoordinator = new ForegroundSubagentCoordinator({
             provider,
@@ -2180,10 +2304,67 @@ export function AppShell(
         privacy: privacy(),
         routingMode: routingMode(),
         permissionMode: permissionMode(),
+        permissionRules: permissionRules(),
       });
     } finally {
       controlPlane.close();
     }
+  };
+
+  const visiblePermissionGrants = createMemo(() => [
+    ...sessionPermissionGrants(),
+    ...permissionRules(),
+  ]);
+
+  const removePermissionRule = (grant: PermissionGrant): void => {
+    if (grant.scope === "session") {
+      setSessionPermissionGrants((current) =>
+        removePermissionGrant(current, grant.id),
+      );
+      setPermissionRuleIndex((current) =>
+        Math.max(0, Math.min(current, visiblePermissionGrants().length - 1)),
+      );
+      setNotice("Session permission rule revoked");
+      return;
+    }
+    const nextRules = removePermissionGrant(permissionRules(), grant.id);
+    void persistRepositorySettings(process.cwd(), {
+      permissionRules: nextRules,
+    })
+      .then(() => {
+        setPermissionRules(nextRules);
+        setPermissionRuleIndex((current) =>
+          Math.max(0, Math.min(current, visiblePermissionGrants().length - 1)),
+        );
+        setNotice("Project permission rule revoked");
+      })
+      .catch((error: unknown) => {
+        setNotice(
+          error instanceof Error
+            ? `Permission rule could not be revoked · ${error.message}`
+            : "Permission rule could not be revoked",
+        );
+      });
+  };
+
+  const clearProjectPermissionRules = (): void => {
+    if (permissionRules().length === 0) {
+      setNotice("No project permission rules to clear");
+      return;
+    }
+    void persistRepositorySettings(process.cwd(), { permissionRules: [] })
+      .then(() => {
+        setPermissionRules([]);
+        setPermissionRuleIndex(0);
+        setNotice("Project permission rules cleared");
+      })
+      .catch((error: unknown) => {
+        setNotice(
+          error instanceof Error
+            ? `Permission rules could not be cleared · ${error.message}`
+            : "Permission rules could not be cleared",
+        );
+      });
   };
 
   const cycleSettings = async (direction: 1 | -1): Promise<void> => {
@@ -2383,10 +2564,13 @@ export function AppShell(
     if (
       id === "theme" ||
       id === "keybinds" ||
-      id === "layout" ||
-      id === "permissions"
+      id === "layout"
     ) {
       void loadCenter("settings");
+      return;
+    }
+    if (id === "permissions") {
+      void loadCenter("permissions");
       return;
     }
     if (id === "conversation") {
@@ -2696,10 +2880,29 @@ export function AppShell(
     if (overlay() === "approval") {
       if (event.name === "escape" || event.name === "esc") {
         event.preventDefault();
-        resolveApproval(false);
+        event.stopPropagation();
+        void resolveApproval("deny");
       } else if (event.name === "return" || event.name === "enter") {
         event.preventDefault();
-        resolveApproval(true);
+        event.stopPropagation();
+        const option = APPROVAL_OPTIONS[approvalIndex()];
+        if (option) void resolveApproval(option.decision);
+      } else if (event.name === "up" || event.name === "down") {
+        event.preventDefault();
+        event.stopPropagation();
+        setApprovalIndex((current) =>
+          event.name === "up"
+            ? (current - 1 + APPROVAL_OPTIONS.length) %
+              APPROVAL_OPTIONS.length
+            : (current + 1) % APPROVAL_OPTIONS.length,
+        );
+      } else {
+        const decision = approvalDecisionForKey(event.name);
+        if (decision) {
+          event.preventDefault();
+          event.stopPropagation();
+          void resolveApproval(decision);
+        }
       }
       return;
     }
@@ -2718,6 +2921,31 @@ export function AppShell(
       if (event.name === "return" || event.name === "enter") {
         event.preventDefault();
         void cycleSettings(1);
+        return;
+      }
+    }
+    if (screen() === "permissions") {
+      if (event.name === "up" || event.name === "down") {
+        event.preventDefault();
+        const count = visiblePermissionGrants().length;
+        if (count > 0) {
+          setPermissionRuleIndex((current) =>
+            event.name === "up"
+              ? (current - 1 + count) % count
+              : (current + 1) % count,
+          );
+        }
+        return;
+      }
+      if (event.name === "return" || event.name === "enter") {
+        event.preventDefault();
+        const grant = visiblePermissionGrants()[permissionRuleIndex()];
+        if (grant) removePermissionRule(grant);
+        return;
+      }
+      if (event.name.toLowerCase() === "x") {
+        event.preventDefault();
+        clearProjectPermissionRules();
         return;
       }
     }
@@ -3028,6 +3256,16 @@ export function AppShell(
               setSettingsIndex(index);
               void cycleSettings(1);
             }}
+          />
+        );
+      case "permissions":
+        return (
+          <PermissionsView
+            theme={theme}
+            permissionMode={permissionMode()}
+            grants={visiblePermissionGrants()}
+            selectedIndex={permissionRuleIndex()}
+            onRemove={removePermissionRule}
           />
         );
       case "diff":
@@ -3610,12 +3848,21 @@ export function AppShell(
                 height={height()}
                 action={activeApproval()?.description}
                 impact={activeApproval()?.impact}
-                onApprove={() => {
-                  resolveApproval(true);
+                selectedIndex={approvalIndex()}
+                onDecision={(decision) => {
+                  void resolveApproval(decision);
                 }}
                 onCancel={() => {
-                  resolveApproval(false);
+                  void resolveApproval("deny");
                 }}
+                onMove={(delta) => {
+                  setApprovalIndex(
+                    (current) =>
+                      (current + delta + APPROVAL_OPTIONS.length) %
+                      APPROVAL_OPTIONS.length,
+                  );
+                }}
+                onKeyDown={handleKeyDown}
               />
             )}
           </box>

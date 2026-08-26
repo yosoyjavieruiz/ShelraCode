@@ -40,8 +40,8 @@ test("context picker filters, toggles by keyboard and mouse, and updates compose
   await setup.renderOnce();
   expect(setup.captureCharFrame()).toContain("1 selected");
 
-  setup.mockInput.pressEscape();
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await setup.mockInput.pressKeys(["ESCAPE"], 25);
+  await setup.flush();
   await setup.renderOnce();
   expect(setup.captureCharFrame()).toContain("@ context 1");
   expect(setup.renderer.currentFocusedRenderable?.id).toBe(
@@ -116,11 +116,29 @@ test("approval Escape denies and returns focus to the composer", async () => {
   const frame = setup.captureCharFrame();
   expect(frame).toContain("Approval required");
   expect(frame).toContain("npm publish");
+  expect(frame).toContain("Approve once");
+  expect(frame).toContain("Allow for this session");
+  expect(frame).toContain("Always allow in this project");
+  expect(frame).toContain("Deny");
+  expect(frame).toContain("Cancel turn");
   expect(setup.renderer.currentFocusedRenderable?.id).toBe("approval-dialog");
-  setup.mockInput.pressEscape();
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await setup.mockInput.pressKeys(["ESCAPE"], 25);
+  await setup.flush();
   await setup.renderOnce();
   expect(setup.captureCharFrame()).toContain("Approval denied");
+  expect(setup.renderer.currentFocusedRenderable?.id).toBe(
+    "core-composer-input",
+  );
+});
+
+test("approval session shortcut resolves the selected permission scope", async () => {
+  const setup = await renderFixture("approval");
+  await setup.mockInput.pressKeys(["s"]);
+  await setup.flush();
+
+  expect(setup.captureCharFrame()).toContain(
+    "Approval granted for this session",
+  );
   expect(setup.renderer.currentFocusedRenderable?.id).toBe(
     "core-composer-input",
   );

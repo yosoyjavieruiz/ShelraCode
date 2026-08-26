@@ -12,6 +12,10 @@ import type {
   RoutingMode,
   RouteDecision,
 } from "../../shared/types.js";
+import {
+  redactPermissionCommand,
+  type PermissionGrant,
+} from "../../tools/permission-grants.js";
 import type { ThemeTokens } from "../theme/tokens.js";
 import { themeColor } from "../theme/tokens.js";
 import {
@@ -38,6 +42,7 @@ export type CenterScreen =
   | "doctor"
   | "help"
   | "settings"
+  | "permissions"
   | "sessions"
   | "checkpoint"
   | "rollback"
@@ -978,6 +983,78 @@ export function SettingsView(props: {
           </box>
         </scrollbox>
       </box>
+    </box>
+  );
+}
+
+export function PermissionsView(props: {
+  theme: ThemeTokens;
+  permissionMode: PermissionMode;
+  grants: PermissionGrant[];
+  selectedIndex?: number;
+  onRemove?: (grant: PermissionGrant) => void;
+}) {
+  const colors = props.theme.colors;
+  const selected = () => props.selectedIndex ?? 0;
+  return (
+    <box flexDirection="column" gap={1} flexGrow={1}>
+      <SectionHeading
+        theme={props.theme}
+        eyebrow="Safety controls"
+        title="Permissions"
+        detail={`${props.grants.length} saved`}
+      />
+      <box
+        padding={1}
+        flexDirection="column"
+        gap={1}
+        backgroundColor={themeColor(props.theme, colors.background.active)}
+      >
+        <text fg={themeColor(props.theme, colors.purple[300])}>
+          <strong>{props.permissionMode}</strong>
+        </text>
+        <text fg={themeColor(props.theme, colors.text.secondary)}>
+          ASK requests approval. Saved rules only satisfy that approval layer;
+          workspace, network and process policy still apply.
+        </text>
+      </box>
+      <text fg={themeColor(props.theme, colors.text.muted)}>
+        SAVED SESSION AND PROJECT RULES
+      </text>
+      <scrollbox
+        ref={hideScrollbars}
+        flexGrow={1}
+        viewportCulling
+        scrollbarOptions={quietScrollbar(props.theme)}
+      >
+        <box flexDirection="column" gap={1}>
+          {props.grants.map((grant, index) => (
+            <SelectableRow
+              theme={props.theme}
+              selected={selected() === index}
+              title={`${grant.tool} · ${grant.risk}`}
+              subtitle={
+                grant.command
+                  ? `Exact command · ${redactPermissionCommand(grant.command)}`
+                  : "All workspace targets for this tool"
+              }
+              trailing={grant.scope}
+              onActivate={() => props.onRemove?.(grant)}
+            />
+          ))}
+          {props.grants.length === 0 ? (
+            <EmptyState
+              theme={props.theme}
+              title="No saved permission rules"
+              detail="Choose Allow for this session or Always allow in this project from the ASK dialog."
+            />
+          ) : null}
+        </box>
+      </scrollbox>
+      <text fg={themeColor(props.theme, colors.text.muted)}>
+        ↑↓ select · Enter revoke · X clear project rules · /settings changes
+        mode
+      </text>
     </box>
   );
 }
