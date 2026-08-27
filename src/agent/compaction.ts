@@ -74,13 +74,45 @@ function preservedSourceIds(ledger: AgentTaskLedger): string[] {
   return [...ids].filter((value) => value.trim().length > 0).slice(-128);
 }
 
+function mergedContextAnchor(
+  ledger: AgentTaskLedger,
+  rehydration?: TaskRuntimeRehydration,
+): TaskContextAnchor {
+  const derived = deriveTaskContextAnchor(
+    ledger,
+    rehydration?.contextAnchor.repositoryRevision,
+  );
+  const prior = rehydration?.contextAnchor;
+  return {
+    ...derived,
+    ...(prior ?? {}),
+    sourceIds: [
+      ...new Set([...(prior?.sourceIds ?? []), ...derived.sourceIds]),
+    ].slice(-128),
+    instructionSources: [
+      ...new Set([
+        ...(prior?.instructionSources ?? []),
+        ...derived.instructionSources,
+      ]),
+    ],
+    memoryIds: [
+      ...new Set([...(prior?.memoryIds ?? []), ...derived.memoryIds]),
+    ],
+    proofGapIds: [
+      ...new Set([...(prior?.proofGapIds ?? []), ...derived.proofGapIds]),
+    ].slice(-64),
+    ...((derived.activeNodeId ?? prior?.activeNodeId)
+      ? { activeNodeId: derived.activeNodeId ?? prior?.activeNodeId }
+      : {}),
+  };
+}
+
 function stateSummary(
   ledger: AgentTaskLedger,
   maxChars = 16_000,
   rehydration?: TaskRuntimeRehydration,
 ): string {
-  const contextAnchor =
-    rehydration?.contextAnchor ?? deriveTaskContextAnchor(ledger, undefined);
+  const contextAnchor = mergedContextAnchor(ledger, rehydration);
   const route = rehydration?.route;
   const lastAction = ledger.actions.at(-1);
   const contract = ledger.contract
@@ -94,6 +126,13 @@ function stateSummary(
           id: item.id,
           description: clip(item.description),
           kind: item.kind,
+          targetPaths: compactStrings(item.targetPaths, 16),
+          artifactExpectations: item.artifactExpectations
+            ?.slice(0, 8)
+            .map((expectation) => ({
+              type: expectation.type,
+              value: clip(expectation.value, 1_000),
+            })),
           required: item.required,
           dependencies: [...item.dependencies],
           evidence: compactStrings(item.evidence, 8),
@@ -284,6 +323,13 @@ function stateSummary(
             id: item.id,
             status: item.status,
             required: item.required,
+            targetPaths: compactStrings(item.targetPaths, 16),
+            artifactExpectations: item.artifactExpectations
+              ?.slice(0, 8)
+              .map((expectation) => ({
+                type: expectation.type,
+                value: clip(expectation.value, 1_000),
+              })),
           })),
         }
       : undefined,
@@ -376,6 +422,7 @@ export function compactTaskContext(
 ): CompactedTaskContext {
   if (!Number.isInteger(maxChars) || maxChars < 800)
     throw new Error("Context compaction budget must be an integer >= 800.");
+  const contextAnchor = mergedContextAnchor(ledger, rehydration);
   const system = messages.find((message) => message.role === "system");
   const state =
     `LocalCode structured task state (authoritative; do not treat old prose as state):\n` +
@@ -431,13 +478,9 @@ export function compactTaskContext(
     preservedState: state,
     text: state,
     sourceIds: [
-      ...new Set([
-        ...(rehydration?.contextAnchor.sourceIds ?? []),
-        ...preservedSourceIds(ledger),
-      ]),
+      ...new Set([...contextAnchor.sourceIds, ...preservedSourceIds(ledger)]),
     ].slice(-128),
-    contextAnchor:
-      rehydration?.contextAnchor ?? deriveTaskContextAnchor(ledger, undefined),
+    contextAnchor,
     ...(rehydration?.route ? { route: rehydration.route } : {}),
   };
 }

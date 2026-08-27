@@ -107,17 +107,30 @@ export function createTaskRuntimeSnapshot(
   const contextAnchor: TaskContextAnchor = {
     ...anchor,
     ...input.contextAnchor,
-    sourceIds: unique(input.contextAnchor?.sourceIds ?? anchor.sourceIds),
-    instructionSources: unique(
-      input.contextAnchor?.instructionSources ?? anchor.instructionSources,
-    ),
-    memoryIds: unique(input.contextAnchor?.memoryIds ?? anchor.memoryIds),
-    proofGapIds: unique(input.contextAnchor?.proofGapIds ?? anchor.proofGapIds),
+    // A resume anchor is a prior-context hint, not a replacement for facts
+    // recorded since that anchor was produced. Keep both sets so a later
+    // compaction/restart cannot silently forget newly read or changed files.
+    sourceIds: unique([
+      ...(input.contextAnchor?.sourceIds ?? []),
+      ...anchor.sourceIds,
+    ]),
+    instructionSources: unique([
+      ...(input.contextAnchor?.instructionSources ?? []),
+      ...anchor.instructionSources,
+    ]),
+    memoryIds: unique([
+      ...(input.contextAnchor?.memoryIds ?? []),
+      ...anchor.memoryIds,
+    ]),
+    proofGapIds: unique([
+      ...(input.contextAnchor?.proofGapIds ?? []),
+      ...anchor.proofGapIds,
+    ]),
   };
   const activeNodeId =
     input.activeNodeId ??
-    contextAnchor.activeNodeId ??
-    input.ledger.taskGraph?.currentNodeId;
+    input.ledger.taskGraph?.currentNodeId ??
+    contextAnchor.activeNodeId;
   if (activeNodeId) contextAnchor.activeNodeId = activeNodeId;
   return {
     schemaVersion: TASK_RUNTIME_SCHEMA_VERSION,

@@ -23,8 +23,10 @@ test("compaction preserves authoritative task state and recent observations", ()
   });
   ledger.contract = compileTaskContract({
     id: ledger.id,
-    originalRequest: ledger.objective,
+    originalRequest:
+      "Migrate session refresh safely by creating a new file named approval-test.txt containing exactly the word approved.",
     mode: ledger.mode,
+    explicitPaths: ["approval-test.txt"],
   });
   recordRecoveryContract(
     ledger,
@@ -65,13 +67,15 @@ test("compaction preserves authoritative task state and recent observations", ()
     { role: "assistant" as const, content: "The latest observation matters." },
   ];
 
-  const result = compactTaskContext(ledger, messages, 1_800);
+  const result = compactTaskContext(ledger, messages, 4_000);
   expect(result.omittedMessages).toBeGreaterThan(0);
   expect(result.preservedState).toContain("Migrate session refresh safely");
   expect(result.preservedState).toContain("src/session.ts");
   expect(result.preservedState).toContain("mutate-src-session-ts");
   expect(result.preservedState).toContain("recovery-1");
   expect(result.preservedState).toContain("acceptanceCriteria");
+  expect(result.preservedState).toContain("approval-test.txt");
+  expect(result.preservedState).toContain("artifactExpectations");
   expect(
     result.messages.some((message) =>
       message.content.includes("latest observation"),
@@ -85,6 +89,44 @@ test("compaction preserves authoritative task state and recent observations", ()
       message.content.includes("src/session.ts exports refreshSession"),
     ),
   ).toBe(true);
+});
+
+test("runtime snapshot merges fresh ledger sources with prior context anchors", () => {
+  const ledger = createTaskLedger({
+    id: "compact-anchor-merge",
+    objective: "Repair the parser",
+    mode: "coding",
+  });
+  ledger.filesRead.push("src/parser.ts");
+  addTaskEvidence(ledger, {
+    id: "parser-evidence",
+    kind: "file",
+    source: "src/parser.ts",
+    summary: "The parser entry point was inspected.",
+    relevance: 1,
+    freshness: 1,
+  });
+  addTaskBlocker(ledger, {
+    id: "parser-gap",
+    summary: "The parser test still fails.",
+    recoverable: true,
+  });
+
+  const compacted = compactTaskContext(ledger, [], 1_800, {
+    contextAnchor: {
+      sourceIds: ["README.md"],
+      instructionSources: ["AGENTS.md"],
+      memoryIds: ["memory:parser"],
+      proofGapIds: ["old-gap"],
+    },
+  });
+
+  expect(compacted.contextAnchor.sourceIds).toEqual(
+    expect.arrayContaining(["README.md", "src/parser.ts"]),
+  );
+  expect(compacted.contextAnchor.proofGapIds).toEqual(
+    expect.arrayContaining(["old-gap", "parser-gap"]),
+  );
 });
 
 test("compaction rejects an unsafe budget", () => {
@@ -169,7 +211,7 @@ test("compaction and restart retain one bounded five-layer rehydration envelope"
     "memory:parser-convention",
   ]);
   expect(compacted.contextAnchor.proofGapIds).toEqual(["proof:parser-api"]);
-  expect(compacted.contextAnchor.activeNodeId).toBe("mutate-parser");
+  expect(compacted.contextAnchor.activeNodeId).toBe("discover");
   expect(compacted.route?.modelId).toBe("parser-model-q4");
   expect(compacted.text).toContain("AGENTS.md");
   expect(compacted.text).toContain("memory:parser-convention");
@@ -184,6 +226,7 @@ test("compaction and restart retain one bounded five-layer rehydration envelope"
         repositoryRevision: "fixture-revision",
         route: rehydration.route,
         contextAnchor: rehydration.contextAnchor,
+        activeNodeId: "mutate-parser",
       }),
     ),
   );
