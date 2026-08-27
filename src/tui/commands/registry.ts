@@ -209,9 +209,20 @@ export function createUICommands(execute: (id: string) => void): UICommand[] {
     }),
     command("permissions", "Permissions", "Settings", {
       slash: "/permissions",
-      description: "Review and revoke session/project permission rules",
+      description:
+        "Review, authorize, or revoke session/project permission rules",
       icon: "◇",
-      keywords: ["approve", "allow", "deny", "session", "project", "rules"],
+      keywords: [
+        "approve",
+        "allow",
+        "authorize",
+        "deny",
+        "session",
+        "project",
+        "reads",
+        "writes",
+        "rules",
+      ],
     }),
     command("help", "Help", "System", {
       slash: "/help",

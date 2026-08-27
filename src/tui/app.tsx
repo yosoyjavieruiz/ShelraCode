@@ -77,6 +77,11 @@ import {
   rankUICommands,
   type UICommand,
 } from "./commands/registry.js";
+import {
+  parsePermissionsCommand,
+  PERMISSIONS_COMMAND_USAGE,
+  type PermissionsCommand,
+} from "./commands/permissions.js";
 import { CommandPalette } from "./components/CommandPalette.js";
 import { SlashCommandMenu } from "./components/SlashCommandMenu.js";
 import { Composer } from "./components/Composer.js";
@@ -2502,6 +2507,75 @@ export function AppShell(
       });
   };
 
+  const runPermissionsCommand = async (
+    command: PermissionsCommand,
+  ): Promise<void> => {
+    if (command.kind === "open") {
+      await loadCenter("permissions");
+      return;
+    }
+    if (command.kind === "usage") {
+      show("permissions", [
+        "Permission command usage",
+        PERMISSIONS_COMMAND_USAGE,
+        "Shell commands remain exact-command approvals from the ASK dialog.",
+      ]);
+      setNotice("Permissions Â· usage shown");
+      return;
+    }
+    if (command.kind === "revoke") {
+      const grant = visiblePermissionGrants().find(
+        (candidate) => candidate.id === command.id,
+      );
+      if (!grant) {
+        setNotice(`Permission rule not found Â· ${command.id}`);
+        return;
+      }
+      removePermissionRule(grant);
+      return;
+    }
+    if (command.kind === "clear") {
+      clearProjectPermissionRules();
+      return;
+    }
+
+    const request: Pick<ToolApprovalRequest, "tool" | "risk"> =
+      command.family === "workspace-read"
+        ? { tool: "ReadFile", risk: "read" }
+        : { tool: "WriteFile", risk: "write" };
+    const grant = createPermissionGrant(command.scope, request);
+    if (command.scope === "session") {
+      setSessionPermissionGrants((current) =>
+        addPermissionGrant(current, grant),
+      );
+      setNotice(
+        command.family === "workspace-read"
+          ? "Session authorization saved Â· workspace reads"
+          : "Session authorization saved Â· workspace writes",
+      );
+      return;
+    }
+
+    try {
+      const nextRules = addPermissionGrant(permissionRules(), grant);
+      await persistRepositorySettings(process.cwd(), {
+        permissionRules: nextRules,
+      });
+      setPermissionRules(nextRules);
+      setNotice(
+        command.family === "workspace-read"
+          ? "Project authorization saved Â· workspace reads"
+          : "Project authorization saved Â· workspace writes",
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? `Permission authorization failed Â· ${error.message}`
+          : "Permission authorization failed",
+      );
+    }
+  };
+
   const cycleSettings = async (direction: 1 | -1): Promise<void> => {
     const index = settingsIndex();
     if (index === 2) {
@@ -3192,6 +3266,18 @@ export function AppShell(
     if (!text) return;
     if (taskBusy()) {
       setNotice("Task already running Â· Ctrl+C or Esc to cancel");
+      return;
+    }
+    const permissionsCommand = parsePermissionsCommand(text);
+    if (permissionsCommand) {
+      void runPermissionsCommand(permissionsCommand).catch((error: unknown) => {
+        setNotice(
+          error instanceof Error
+            ? `Permissions command failed Â· ${error.message}`
+            : "Permissions command failed",
+        );
+      });
+      setComposerValue("");
       return;
     }
     if (text.startsWith("/")) {
