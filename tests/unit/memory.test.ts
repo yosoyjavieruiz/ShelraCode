@@ -40,6 +40,42 @@ test("memory selection is bounded, relevant and revision-aware", () => {
   ).toEqual([facts[0]!]);
 });
 
+test("does not treat unversioned or mixed-revision observed facts as current", () => {
+  const facts = [
+    {
+      id: memoryFactId("repo", "semantic", "unversioned"),
+      repository: "repo",
+      kind: "semantic" as const,
+      fact: "The parser lives under src/parser.ts.",
+      evidence: [{ source: "src/parser.ts" }],
+      provenance: "observed" as const,
+      confidence: 1,
+      scope: ["parser"],
+      tags: ["parser"],
+      createdAt: "2026-08-25T00:00:00.000Z",
+      lastValidatedAt: "2026-08-25T00:00:00.000Z",
+    },
+    {
+      id: memoryFactId("repo", "semantic", "mixed"),
+      repository: "repo",
+      kind: "semantic" as const,
+      fact: "The parser also has a legacy implementation.",
+      evidence: [
+        { source: "src/parser.ts", revision: "current" },
+        { source: "legacy/parser.ts", revision: "old" },
+      ],
+      provenance: "observed" as const,
+      confidence: 1,
+      scope: ["parser"],
+      tags: ["parser"],
+      createdAt: "2026-08-25T00:00:00.000Z",
+      lastValidatedAt: "2026-08-25T00:00:00.000Z",
+    },
+  ];
+
+  expect(selectRelevantMemory(facts, "parser", "current")).toEqual([]);
+});
+
 test("episodic memory redacts sensitive-looking objective content", () => {
   const fact = createTaskEpisodeMemoryFact({
     repository: "repo",

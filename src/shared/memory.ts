@@ -59,6 +59,15 @@ function isFresh(fact: MemoryFact, revision?: string): boolean {
   if (fact.expiresAt && new Date(fact.expiresAt).getTime() <= Date.now())
     return false;
   if (!revision) return true;
+  // Observed semantic facts describe repository structure. Without a matching
+  // revision they are not safe to present as current knowledge; historical
+  // episodic/user-confirmed facts may still be useful as explicitly labelled
+  // hints and are rechecked by the host before mutation.
+  if (fact.kind === "semantic" && fact.provenance === "observed")
+    return (
+      fact.evidence.length > 0 &&
+      fact.evidence.every((evidence) => evidence.revision === revision)
+    );
   return fact.evidence.some(
     (evidence) => !evidence.revision || evidence.revision === revision,
   );
