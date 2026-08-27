@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { LocalCodeDatabase } from "../../src/storage/database.js";
+import {
+  LocalCodeDatabase,
+  RuntimePersistenceConflictError,
+} from "../../src/storage/database.js";
 import { createTaskLedger, setTaskPhase } from "../../src/agent/task-state.js";
 import { createTaskEpisodeMemoryFact } from "../../src/shared/memory.js";
 import { createTaskRuntimeSnapshot } from "../../src/agent/task-runtime-state.js";
@@ -148,6 +151,34 @@ test("storage persists the versioned runtime envelope for durable resume", () =>
   ]);
   expect(restored.snapshot.updatedRevision).toBe(4);
   expect(latest.snapshot.taskId).toBe("runtime-task");
+  storage.close();
+});
+
+test("storage rejects an out-of-order runtime snapshot", () => {
+  const storage = new LocalCodeDatabase(":memory:");
+  const ledger = createTaskLedger({
+    id: "runtime-ordering",
+    objective: "Resume safely",
+    mode: "workspace_question",
+  });
+  const latest = createTaskRuntimeSnapshot({
+    ledger,
+    repositoryRoot: "D:/fixture/repository",
+    updatedRevision: 4,
+  });
+  const stale = createTaskRuntimeSnapshot({
+    ledger,
+    repositoryRoot: "D:/fixture/repository",
+    updatedRevision: 3,
+  });
+
+  storage.saveAgentRuntime(latest);
+  expect(() => storage.saveAgentRuntime(stale)).toThrow(
+    RuntimePersistenceConflictError,
+  );
+  const restored = storage.getAgentRuntime("runtime-ordering");
+  expect(restored?.ok).toBe(true);
+  if (restored?.ok) expect(restored.snapshot.updatedRevision).toBe(4);
   storage.close();
 });
 

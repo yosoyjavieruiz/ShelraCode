@@ -17,6 +17,21 @@ import type {
 const CURRENT_SCHEMA_VERSION = 4;
 type StoredAgentProbe = NonNullable<ModelCandidate["agentProbe"]>;
 
+export class RuntimePersistenceConflictError extends Error {
+  readonly code = "STALE_RUNTIME_SNAPSHOT" as const;
+
+  constructor(
+    readonly taskId: string,
+    readonly receivedRevision: number,
+    readonly storedRevision: number,
+  ) {
+    super(
+      `Cannot persist stale runtime snapshot ${taskId}: revision ${receivedRevision} is older than stored revision ${storedRevision}.`,
+    );
+    this.name = "RuntimePersistenceConflictError";
+  }
+}
+
 interface StoredModelCapability {
   probe: StoredAgentProbe;
   version: number;
@@ -374,33 +389,46 @@ export class LocalCodeDatabase {
       );
     const snapshot = restored.snapshot;
     const effectiveSessionId = sessionId ?? snapshot.sessionId;
-    this.db
-      .query(
-        `INSERT INTO agent_tasks
-          (id, session_id, objective, mode, phase, ledger_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           session_id = excluded.session_id,
-           objective = excluded.objective,
-           mode = excluded.mode,
-           phase = excluded.phase,
-           ledger_json = excluded.ledger_json,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
+    const existing = this.getAgentRuntime(snapshot.taskId);
+    if (
+      existing?.ok &&
+      existing.snapshot.updatedRevision > snapshot.updatedRevision
+    )
+      throw new RuntimePersistenceConflictError(
         snapshot.taskId,
-        effectiveSessionId ?? null,
-        snapshot.ledger.objective,
-        snapshot.ledger.mode,
-        snapshot.ledger.phase,
-        encoded,
-        snapshot.ledger.startedAt,
-        snapshot.updatedAt,
+        snapshot.updatedRevision,
+        existing.snapshot.updatedRevision,
       );
-    if (effectiveSessionId)
+    const persist = this.db.transaction(() => {
       this.db
-        .query("UPDATE sessions SET updated_at = ? WHERE id = ?")
-        .run(snapshot.updatedAt, effectiveSessionId);
+        .query(
+          `INSERT INTO agent_tasks
+            (id, session_id, objective, mode, phase, ledger_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             session_id = excluded.session_id,
+             objective = excluded.objective,
+             mode = excluded.mode,
+             phase = excluded.phase,
+             ledger_json = excluded.ledger_json,
+             updated_at = excluded.updated_at`,
+        )
+        .run(
+          snapshot.taskId,
+          effectiveSessionId ?? null,
+          snapshot.ledger.objective,
+          snapshot.ledger.mode,
+          snapshot.ledger.phase,
+          encoded,
+          snapshot.ledger.startedAt,
+          snapshot.updatedAt,
+        );
+      if (effectiveSessionId)
+        this.db
+          .query("UPDATE sessions SET updated_at = ? WHERE id = ?")
+          .run(snapshot.updatedAt, effectiveSessionId);
+    });
+    persist();
     this.logger?.debug("storage.runtime.persisted", {
       taskId: snapshot.taskId,
       sessionId: effectiveSessionId,
