@@ -786,6 +786,12 @@ export function restoreTaskRuntime(
   )
     return invalid("snapshot working-tree revision is invalid");
   if (
+    snapshot.repositoryWorkingTreePaths !== undefined &&
+    (!boundedArray(snapshot.repositoryWorkingTreePaths, 512) ||
+      !stringArray(snapshot.repositoryWorkingTreePaths))
+  )
+    return invalid("snapshot working-tree paths are invalid");
+  if (
     snapshot.activeNodeId !== undefined &&
     typeof snapshot.activeNodeId !== "string"
   )

@@ -1,6 +1,7 @@
 import type { AgentTaskLedger } from "./task-state.js";
 
 export const TASK_RUNTIME_SCHEMA_VERSION = 1;
+const MAX_RUNTIME_WORKTREE_PATHS = 512;
 
 export interface TaskRuntimeRouteIdentity {
   candidateId: string;
@@ -48,6 +49,7 @@ export interface TaskRuntimeSnapshot {
   repositoryRoot: string;
   repositoryRevision?: string;
   repositoryWorkingTreeRevision?: string;
+  repositoryWorkingTreePaths?: string[];
   ledger: AgentTaskLedger;
   route?: TaskRuntimeRouteIdentity;
   contextAnchor: TaskContextAnchor;
@@ -64,6 +66,7 @@ export interface TaskRuntimeSnapshotInput {
   sessionId?: string;
   repositoryRevision?: string;
   repositoryWorkingTreeRevision?: string;
+  repositoryWorkingTreePaths?: string[];
   route?: TaskRuntimeRouteIdentity;
   contextAnchor?: Partial<TaskContextAnchor>;
   activeNodeId?: string;
@@ -148,6 +151,13 @@ export function createTaskRuntimeSnapshot(
       : {}),
     ...(input.repositoryWorkingTreeRevision
       ? { repositoryWorkingTreeRevision: input.repositoryWorkingTreeRevision }
+      : {}),
+    ...(input.repositoryWorkingTreePaths
+      ? {
+          repositoryWorkingTreePaths: unique(
+            input.repositoryWorkingTreePaths,
+          ).slice(0, MAX_RUNTIME_WORKTREE_PATHS),
+        }
       : {}),
     ledger: structuredClone(input.ledger),
     ...(input.route ? { route: structuredClone(input.route) } : {}),

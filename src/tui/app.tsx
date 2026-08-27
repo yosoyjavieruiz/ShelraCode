@@ -50,6 +50,7 @@ import {
   type TaskRuntimeRehydration,
   type TaskRuntimeSnapshot,
 } from "../agent/task-runtime-state.js";
+import { assessResumeWorkspace } from "../agent/resume-policy.js";
 import { reviewWorkspaceChange } from "../agent/workspace-review.js";
 import { runCodeReview } from "../agent/code-review-agent.js";
 import {
@@ -1318,21 +1319,28 @@ export function AppShell(
               "Cannot resume this task from a different repository root.",
             );
           const currentRevision = routingContext.snapshot?.revision;
-          if (
-            resumeRuntime.repositoryRevision &&
-            currentRevision !== resumeRuntime.repositoryRevision
-          )
-            throw new Error(
-              "Cannot resume this task because the repository revision changed.",
+          const resumeWorkspace = assessResumeWorkspace({
+            savedRepositoryRevision: resumeRuntime.repositoryRevision,
+            currentRepositoryRevision: currentRevision,
+            savedWorkingTreeRevision:
+              resumeRuntime.repositoryWorkingTreeRevision,
+            currentWorkingTreeRevision:
+              routingContext.snapshot?.workingTreeRevision,
+            currentWorkingTreePaths:
+              routingContext.snapshot?.workingTreePaths,
+            taskPaths: resumeRuntime.ledger.filesChanged,
+            inFlightTarget: resumeRuntime.inFlight?.target,
+          });
+          if (resumeWorkspace.status === "blocked")
+            throw new Error(resumeWorkspace.reason);
+          if (resumeWorkspace.status === "task_changes_detected") {
+            taskLogger.warn("tui.task.resume.task_changes_detected", {
+              changedPaths: resumeWorkspace.changedPaths,
+            });
+            setNotice(
+              "Resuming with task-owned workspace changes · fresh observations required",
             );
-          if (
-            resumeRuntime.repositoryWorkingTreeRevision &&
-            routingContext.snapshot?.workingTreeRevision !==
-              resumeRuntime.repositoryWorkingTreeRevision
-          )
-            throw new Error(
-              "Cannot resume this task because the working-tree state changed.",
-            );
+          }
         }
         if (routingContext.snapshot) {
           for (const fact of repositorySnapshotMemoryFacts(
@@ -1791,6 +1799,12 @@ export function AppShell(
                   ? {
                       repositoryWorkingTreeRevision:
                         agentContext.snapshot.workingTreeRevision,
+                    }
+                  : {}),
+                ...(agentContext.snapshot?.workingTreePaths
+                  ? {
+                      repositoryWorkingTreePaths:
+                        agentContext.snapshot.workingTreePaths,
                     }
                   : {}),
                 route: runtimeRoute,
@@ -2369,7 +2383,8 @@ export function AppShell(
     setNotice("Resuming task from the current workspace state…");
     void (async () => {
       const { openControlPlane } = await import("../cli/control-plane.js");
-      const controlPlane = await openControlPlane(process.cwd());
+      const sessionRoot = path.resolve(session.repository);
+      const controlPlane = await openControlPlane(sessionRoot);
       let runtimeResult;
       try {
         runtimeResult = controlPlane.db.getLatestAgentRuntime(session.id);
@@ -2390,6 +2405,17 @@ export function AppShell(
       }
       if (runtimeResult.snapshot.ledger.phase === "complete") {
         setNotice("Task already completed; start a new request to continue");
+        return;
+      }
+      if (
+        path.resolve(runtimeResult.snapshot.repositoryRoot).toLowerCase() !==
+        sessionRoot.toLowerCase()
+      ) {
+        appendError(
+          "Task resume refused: saved task repository does not match the session repository.",
+          "The persisted task state was not replaced with a new task.",
+        );
+        setNotice("Resume blocked - repository identity mismatch");
         return;
       }
       await runTask(

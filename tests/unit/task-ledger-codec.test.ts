@@ -62,6 +62,8 @@ test("round-trips the complete ledger, route and context anchor", () => {
     ledger,
     repositoryRoot: "D:/fixture/repository",
     repositoryRevision: "abc123",
+    repositoryWorkingTreeRevision: "tree-123",
+    repositoryWorkingTreePaths: ["src/parser.ts", "tests/parser.test.ts"],
     route: {
       candidateId: "local/qwen",
       providerId: "lm-studio",
@@ -91,6 +93,11 @@ test("round-trips the complete ledger, route and context anchor", () => {
   expect(restored.snapshot.route?.modelId).toBe("qwen-coder");
   expect(restored.snapshot.activeNodeId).toBe("mutate-parser");
   expect(restored.snapshot.contextAnchor.memoryIds).toEqual(["memory:parser"]);
+  expect(restored.snapshot.repositoryWorkingTreeRevision).toBe("tree-123");
+  expect(restored.snapshot.repositoryWorkingTreePaths).toEqual([
+    "src/parser.ts",
+    "tests/parser.test.ts",
+  ]);
   expect(restored.snapshot.updatedRevision).toBe(7);
 });
 

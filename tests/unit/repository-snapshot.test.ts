@@ -74,6 +74,7 @@ test("repository snapshot fingerprints staged, unstaged and untracked content", 
   await writeFile(path.join(root, "app.ts"), "export const value = 2;\n");
   const unstaged = await inspectRepositorySnapshot(root);
   expect(unstaged.workingTreeRevision).not.toBe(clean.workingTreeRevision);
+  expect(unstaged.workingTreePaths).toContain("app.ts");
 
   await git("add", "app.ts");
   const staged = await inspectRepositorySnapshot(root);
@@ -82,6 +83,9 @@ test("repository snapshot fingerprints staged, unstaged and untracked content", 
   await writeFile(path.join(root, "notes.txt"), "first\n");
   const untracked = await inspectRepositorySnapshot(root);
   expect(untracked.workingTreeRevision).not.toBe(staged.workingTreeRevision);
+  expect(untracked.workingTreePaths).toEqual(
+    expect.arrayContaining(["app.ts", "notes.txt"]),
+  );
   await writeFile(path.join(root, "notes.txt"), "second\n");
   const untrackedChanged = await inspectRepositorySnapshot(root);
   expect(untrackedChanged.workingTreeRevision).not.toBe(

@@ -28,6 +28,8 @@ export interface RepositorySnapshot {
   revision?: string;
   /** Hash of the checked-out branch and current working-tree state. */
   workingTreeRevision?: string;
+  /** Paths currently changed relative to HEAD, including untracked paths. */
+  workingTreePaths?: string[];
   branch?: string;
   topLevelEntries: string[];
   manifests: ProjectManifest[];
@@ -243,7 +245,7 @@ async function gitWorkingTreeRevision(
   branch: string | undefined,
   signal?: AbortSignal,
   logger?: LocalCodeLogger,
-): Promise<string | undefined> {
+): Promise<{ revision: string; paths: string[] } | undefined> {
   const status = await runCommand(
     "git",
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -331,7 +333,7 @@ async function gitWorkingTreeRevision(
       return undefined;
     }
   }
-  return digest.digest("hex");
+  return { revision: digest.digest("hex"), paths };
 }
 
 export async function inspectRepositorySnapshot(
@@ -429,7 +431,7 @@ export async function inspectRepositorySnapshot(
     logger,
   );
   const gitStatus = await gitValue(absoluteRoot, ["status", "--short"], logger);
-  const workingTreeRevision =
+  const workingTree =
     gitRoot && revision
       ? await gitWorkingTreeRevision(
           absoluteRoot,
@@ -443,7 +445,12 @@ export async function inspectRepositorySnapshot(
     cwd: absoluteRoot,
     ...(gitRoot ? { gitRoot } : {}),
     ...(revision ? { revision } : {}),
-    ...(workingTreeRevision ? { workingTreeRevision } : {}),
+    ...(workingTree
+      ? {
+          workingTreeRevision: workingTree.revision,
+          workingTreePaths: workingTree.paths,
+        }
+      : {}),
     ...(branch ? { branch } : {}),
     topLevelEntries,
     manifests,
