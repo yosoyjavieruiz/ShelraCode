@@ -53,6 +53,19 @@ test("an empty repository opens the gate only for greenfield intent", () => {
   expect(blocked).toMatchObject({ allowed: false, state: "INSUFFICIENT" });
 });
 
+test("a host-verified missing greenfield target opens the gate in a non-empty repository", () => {
+  const result = evaluateMutationEvidenceGate({
+    mode: "coding",
+    declaredState: "INSUFFICIENT",
+    evidence: [],
+    repositoryState: "non_empty",
+    greenfieldIntent: true,
+    greenfieldTargetAuthorized: true,
+  });
+
+  expect(result).toEqual({ allowed: true, state: "SUFFICIENT" });
+});
+
 test("conflicting discovery never authorizes mutation", () => {
   const result = evaluateMutationEvidenceGate({
     mode: "coding",

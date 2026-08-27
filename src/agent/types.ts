@@ -69,8 +69,10 @@ export interface AgentTask {
   contextEvidenceState?: "SUFFICIENT" | "INSUFFICIENT" | "CONFLICTING";
   /** Host-observed repository shape used to distinguish greenfield work. */
   repositoryState?: "empty" | "non_empty" | "unknown";
-  /** Generic compiler signal; only authorizes empty-workspace bootstrap work. */
+  /** Generic compiler signal used with host-verified greenfield targets. */
   greenfieldIntent?: boolean;
+  /** Missing explicit creation targets whose parent was host-verified. */
+  greenfieldCreationPaths?: string[];
   containsHighConfidenceSecret?: boolean;
   /** @deprecated Use verificationCommands for new callers. */
   verificationCommand?: string;

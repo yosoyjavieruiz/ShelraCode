@@ -30,6 +30,8 @@ import {
   createPermissionGrant,
   isPermissionGrantPersistable,
   matchesPermissionGrant,
+  permissionGrantFamily,
+  permissionGrantScopeDescription,
   removePermissionGrant,
   type ApprovalDecision,
   type PermissionGrant,
@@ -54,8 +56,9 @@ import {
 } from "../agent/objective-review.js";
 import { isGreenfieldObjective } from "../agent/task-contract.js";
 import {
+  hasVerifiedCodingScope,
+  inspectVerifiedPreparationTargets,
   selectProgressiveTargets,
-  verifiedPreparationTargets,
 } from "../agent/progressive-plan.js";
 import { recommendedAgentContextChars } from "../agent/context-budget.js";
 import {
@@ -104,10 +107,7 @@ import { resolveEscapeAction } from "./state/navigation.js";
 import { addPromptToHistory, navigatePromptHistory } from "./state/history.js";
 import { orderModelsForPicker } from "./state/search.js";
 import { moveSettingIndex } from "./state/settings.js";
-import {
-  APPROVAL_OPTIONS,
-  approvalDecisionForKey,
-} from "./state/approval.js";
+import { APPROVAL_OPTIONS, approvalDecisionForKey } from "./state/approval.js";
 import {
   createUIFixture,
   readUIFixture,
@@ -142,6 +142,7 @@ type RouteExecutionStrategy = "direct" | "progressive" | "discovery";
 interface ActiveApproval {
   description: string;
   impact: string;
+  scopeDescription?: string;
   request?: ToolApprovalRequest;
   resolve?: (allowed: boolean) => void;
 }
@@ -513,6 +514,8 @@ export function AppShell(
   >([]);
   const [permissionRuleIndex, setPermissionRuleIndex] = createSignal(0);
   const [approvalIndex, setApprovalIndex] = createSignal(0);
+  const [approvalBusy, setApprovalBusy] = createSignal(false);
+  let approvalResolutionInFlight = false;
   const [density, setDensity] = createSignal<"comfortable" | "compact">(
     "comfortable",
   );
@@ -737,6 +740,7 @@ export function AppShell(
   };
 
   const resolveApproval = async (decision: ApprovalDecision): Promise<void> => {
+    if (approvalResolutionInFlight) return;
     const approval = activeApproval();
     const initialMessage =
       decision === "session"
@@ -757,53 +761,66 @@ export function AppShell(
       return;
     }
 
+    approvalResolutionInFlight = true;
+    setApprovalBusy(true);
     let allowed =
       decision === "once" || decision === "session" || decision === "project";
     let message = initialMessage;
-    batch(() => {
-      setActiveApproval(undefined);
-      setOverlay("none");
-      setNotice(
-        decision === "project" && approval.request
-          ? "Saving project permission rule…"
-          : message,
-      );
-    });
+    try {
+      // Keep the approval surface mounted until a project rule is actually
+      // persisted. Closing it first made a slow filesystem write look like a
+      // second agent freeze and allowed duplicate key events to race the
+      // unresolved tool request.
+      if (decision === "project" && approval.request)
+        setNotice("Saving project permission rule…");
 
-    if (allowed && approval.request && decision !== "once") {
-      const grant = createPermissionGrant(
-        decision === "project" ? "project" : "session",
-        approval.request,
-      );
-      if (decision === "session") {
-        setSessionPermissionGrants((current) =>
-          addPermissionGrant(current, grant),
+      if (allowed && approval.request && decision !== "once") {
+        const grant = createPermissionGrant(
+          decision === "project" ? "project" : "session",
+          approval.request,
         );
-      } else if (!isPermissionGrantPersistable(grant)) {
-        allowed = false;
-        message =
-          "Project permission rule was not saved because the command contains secret-shaped data";
-      } else {
-        const nextRules = addPermissionGrant(permissionRules(), grant);
-        try {
-          await persistRepositorySettings(process.cwd(), {
-            permissionRules: nextRules,
-          });
-          setPermissionRules(nextRules);
-        } catch (error) {
+        if (decision === "session") {
+          setSessionPermissionGrants((current) =>
+            addPermissionGrant(current, grant),
+          );
+        } else if (!isPermissionGrantPersistable(grant)) {
           allowed = false;
           message =
-            error instanceof Error
-              ? `Permission rule could not be saved · ${error.message}`
-              : "Permission rule could not be saved";
+            "Project permission rule was not saved because the command contains secret-shaped data";
+        } else {
+          const nextRules = addPermissionGrant(permissionRules(), grant);
+          try {
+            await persistRepositorySettings(process.cwd(), {
+              permissionRules: nextRules,
+            });
+            setPermissionRules(nextRules);
+          } catch (error) {
+            allowed = false;
+            message =
+              error instanceof Error
+                ? `Permission rule could not be saved · ${error.message}`
+                : "Permission rule could not be saved";
+          }
         }
       }
-    }
 
-    if (decision === "cancel") activeTaskAbort?.abort();
-    approval.resolve?.(allowed);
-    setNotice(message);
-    focusComposer();
+      if (decision === "cancel") activeTaskAbort?.abort();
+      batch(() => {
+        setActiveApproval(undefined);
+        setOverlay("none");
+        setApprovalBusy(false);
+      });
+      // Keep this final status update outside the overlay batch. The custom
+      // terminal renderer flushes its last visible update from this setter;
+      // otherwise the resolved approval can remain painted until another
+      // event arrives even though the request has already been answered.
+      setNotice(message);
+      approval.resolve?.(allowed);
+      focusComposer();
+    } finally {
+      approvalResolutionInFlight = false;
+      setApprovalBusy(false);
+    }
   };
 
   const chooseModel = (
@@ -980,6 +997,7 @@ export function AppShell(
 
       const { openControlPlane } = await import("../cli/control-plane.js");
       const controlPlane = await openControlPlane(process.cwd());
+      setNotice("Loading local providers…");
       try {
         if (target === "models") {
           const result = await controlPlane.discoverModels(
@@ -1349,17 +1367,29 @@ export function AppShell(
         // gate. This is the controller-owned decomposition that lets an
         // measured local coding_agent contribute without relabelling it as
         // advanced_coding_agent.
-        const verifiedProgressiveTargets =
+        const verifiedPreparation =
           turnMode === "coding"
-            ? await verifiedPreparationTargets(
+            ? await inspectVerifiedPreparationTargets(
                 process.cwd(),
                 objective,
                 progressiveTargets,
               )
             : [];
-        const verifiedCodingScope =
-          routingContext.evidenceState === "SUFFICIENT" &&
-          verifiedProgressiveTargets.length > 0;
+        const verifiedProgressiveTargets = verifiedPreparation.map(
+          (target) => target.path,
+        );
+        const greenfieldCreationPaths =
+          greenfieldIntent && explicitObjectivePaths.length > 0
+            ? verifiedPreparation
+                .filter((target) => !target.exists)
+                .map((target) => target.path)
+            : [];
+        const verifiedCodingScope = hasVerifiedCodingScope({
+          evidenceState: routingContext.evidenceState,
+          greenfieldIntent,
+          explicitPaths: explicitObjectivePaths,
+          targets: verifiedPreparation,
+        });
         // Any coding task without a host-proven scope must enter a safe local
         // discovery stage. The previous condition only covered the
         // advanced_coding_agent branch, so an ordinary coding_agent task could
@@ -1374,6 +1404,7 @@ export function AppShell(
         // into "no coding route" before the router ever saw behavioral
         // evidence. Keep ordinary discovery fast, but give a coding probe a
         // real budget; the probe itself remains bounded and cancellable.
+        setNotice("Checking local model capability…");
         const catalog = await controlPlane.discoverModels(
           AbortSignal.timeout(
             turnPolicy.repositoryRead
@@ -1396,6 +1427,7 @@ export function AppShell(
         setProviders(controlPlane.providers.statuses);
         setPrivacy(controlPlane.settings.privacy);
         setRoutingMode(controlPlane.settings.routingMode);
+        setNotice("Selecting a safe execution route…");
         const selectedModel = activeModelId()
           ? catalog.models.find((model) => model.id === activeModelId())
           : undefined;
@@ -1587,9 +1619,10 @@ export function AppShell(
             (tool) => tool.risk === "read",
           );
           setNotice(
-            `Running ${selected.providerId} · ${selected.displayName}…`,
+            strategy === "discovery"
+              ? "Inspecting repository scope…"
+              : `Preparing ${selected.providerId} · ${selected.displayName}…`,
           );
-          if (strategy === "discovery") setNotice("Localizing task...");
           const activeContextBudget = recommendedAgentContextChars(
             selected,
             executionMode,
@@ -1613,6 +1646,11 @@ export function AppShell(
                 logger: taskLogger,
               })
             : routingContext;
+          setNotice(
+            strategy === "discovery"
+              ? "Waiting for the model to inspect the repository…"
+              : "Waiting for the model to choose the next action…",
+          );
           const adaptiveProfile = selectExecutionProfile({
             mode: executionMode,
             complexity: analyzedTask.complexity,
@@ -1737,6 +1775,9 @@ export function AppShell(
             ...(executionMode === "coding" && boundedScope.length > 0
               ? { stagedPaths: [...boundedScope] }
               : {}),
+            ...(greenfieldCreationPaths.length > 0
+              ? { greenfieldCreationPaths: [...greenfieldCreationPaths] }
+              : {}),
             repositoryPolicy: controlPlane.settings.privacy,
             permissionMode: controlPlane.settings.permissionMode,
             context: agentContext.prompt || undefined,
@@ -1796,12 +1837,20 @@ export function AppShell(
                 ...permissionRules(),
                 ...controlPlane.settings.permissionRules,
               ];
-              if (knownRules.some((grant) => matchesPermissionGrant(grant, request))) {
+              const matchingRule = knownRules.find((grant) =>
+                matchesPermissionGrant(grant, request),
+              );
+              if (matchingRule) {
+                const matchingFamily =
+                  matchingRule.family ?? permissionGrantFamily(matchingRule);
                 taskLogger.debug("tool.permission.approved", {
                   risk: request.risk,
                   tool: request.tool,
-                  source:
-                    request.tool === "Shell" || request.tool === "RunTests"
+                  ruleId: matchingRule.id,
+                  ...(matchingFamily ? { family: matchingFamily } : {}),
+                  source: matchingFamily
+                    ? `saved-${matchingFamily}-rule`
+                    : request.tool === "Shell" || request.tool === "RunTests"
                       ? "saved-exact-command-rule"
                       : "saved-tool-rule",
                 });
@@ -1818,26 +1867,30 @@ export function AppShell(
                 signal.addEventListener("abort", denyOnAbort, {
                   once: true,
                 });
-                setApprovalIndex(0);
-                setActiveApproval({
-                  description: request.description,
-                  impact:
-                    request.risk === "destructive"
-                      ? "This action can change or remove workspace state."
-                      : "This action requires explicit permission.",
-                  request,
-                  resolve: (allowed) => {
-                    signal.removeEventListener("abort", denyOnAbort);
-                    resolve(allowed);
-                  },
+                batch(() => {
+                  setApprovalBusy(false);
+                  setApprovalIndex(0);
+                  setActiveApproval({
+                    description: request.description,
+                    impact:
+                      request.risk === "destructive"
+                        ? "This action can change or remove workspace state."
+                        : "This action requires explicit permission.",
+                    scopeDescription: permissionGrantScopeDescription(request),
+                    request,
+                    resolve: (allowed) => {
+                      signal.removeEventListener("abort", denyOnAbort);
+                      resolve(allowed);
+                    },
+                  });
+                  setOverlay("approval");
+                  setNotice("Approval required · waiting for your decision");
                 });
                 appEvents.emit({
                   type: "approval.requested",
                   description: request.description,
                   risk: request.risk,
                 });
-                setOverlay("approval");
-                setNotice("Approval required");
               });
             },
           });
@@ -1862,6 +1915,13 @@ export function AppShell(
               : baseExecutionTools;
           let result: Awaited<ReturnType<typeof runAgent>>;
           try {
+            setNotice(
+              modelPlanning
+                ? "Waiting for the model to build the task plan…"
+                : strategy === "discovery"
+                  ? "Waiting for the model to inspect the repository…"
+                  : "Waiting for the model to choose the next action…",
+            );
             result = await runAgent(
               agentTask,
               {
@@ -2036,11 +2096,13 @@ export function AppShell(
             ...explicitObjectivePaths,
             ...extractObjectivePaths(preparationResult?.text ?? ""),
           ];
-          const discoveredTargets = await verifiedPreparationTargets(
-            process.cwd(),
-            objective,
-            preparationCandidates,
-          );
+          const discoveredTargets = (
+            await inspectVerifiedPreparationTargets(
+              process.cwd(),
+              objective,
+              preparationCandidates,
+            )
+          ).map((target) => target.path);
           trace.record({
             taskId: turnId,
             type: "context.built",
@@ -2561,11 +2623,7 @@ export function AppShell(
       void loadCenter("doctor");
       return;
     }
-    if (
-      id === "theme" ||
-      id === "keybinds" ||
-      id === "layout"
-    ) {
+    if (id === "theme" || id === "keybinds" || id === "layout") {
       void loadCenter("settings");
       return;
     }
@@ -2892,8 +2950,7 @@ export function AppShell(
         event.stopPropagation();
         setApprovalIndex((current) =>
           event.name === "up"
-            ? (current - 1 + APPROVAL_OPTIONS.length) %
-              APPROVAL_OPTIONS.length
+            ? (current - 1 + APPROVAL_OPTIONS.length) % APPROVAL_OPTIONS.length
             : (current + 1) % APPROVAL_OPTIONS.length,
         );
       } else {
@@ -3388,7 +3445,6 @@ export function AppShell(
       if (activeFixture === "diff") show("diff");
       if (activeFixture === "provider-error") show("providers");
       if (activeFixture === "approval") {
-        setTimeout(() => setOverlay("approval"), 0);
         setNotice("Approval requested");
       }
       if (fixture.fixtureScreen)
@@ -3848,6 +3904,8 @@ export function AppShell(
                 height={height()}
                 action={activeApproval()?.description}
                 impact={activeApproval()?.impact}
+                scopeDescription={activeApproval()?.scopeDescription}
+                busy={approvalBusy()}
                 selectedIndex={approvalIndex()}
                 onDecision={(decision) => {
                   void resolveApproval(decision);

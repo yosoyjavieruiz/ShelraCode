@@ -4,7 +4,7 @@ import path from "node:path";
 const CODE_FILE_PATTERN =
   /\.(?:c|cc|cpp|cs|go|h|java|js|jsx|mjs|py|rs|ts|tsx|vue|svelte)$/iu;
 const CREATABLE_ARTIFACT_PATTERN =
-  /\.(?:c|cc|cpp|cs|css|go|h|html|java|js|json|jsx|less|md|mjs|py|rs|scss|svelte|toml|ts|tsx|vue|xml|ya?ml)$/iu;
+  /\.(?:c|cc|cpp|cs|css|csv|go|gql|graphql|h|html|java|js|json|jsx|less|md|mjs|php|py|rs|scss|sh|sql|svelte|toml|ts|tsx|txt|vue|xml|ya?ml)$/iu;
 const CREATION_INTENT_PATTERN =
   /\b(?:add|build|create|generate|implement|scaffold|write|agrega|anade|construye|crea|genera|implementa|escribe)\b/iu;
 const CONTEXT_ONLY_BASENAMES = new Set([
@@ -133,22 +133,42 @@ export function selectProgressiveTargets(
   return inferProgressiveTargets(objective, matches, limit);
 }
 
+export interface VerifiedPreparationTarget {
+  path: string;
+  exists: boolean;
+}
+
+export function hasVerifiedCodingScope(input: {
+  evidenceState: "SUFFICIENT" | "INSUFFICIENT" | "CONFLICTING";
+  greenfieldIntent: boolean;
+  explicitPaths: readonly string[];
+  targets: readonly VerifiedPreparationTarget[];
+}): boolean {
+  if (input.evidenceState === "SUFFICIENT" && input.targets.length > 0)
+    return true;
+  if (!input.greenfieldIntent || input.explicitPaths.length === 0) return false;
+  const explicitPaths = new Set(input.explicitPaths.map(normalize));
+  return input.targets.some(
+    (target) => !target.exists && explicitPaths.has(normalize(target.path)),
+  );
+}
+
 /**
  * Resolve a model/host preparation proposal into a bounded mutation scope.
  * Existing files remain valid edit targets. Missing files are accepted only
  * for an explicit creation objective, when the proposed artifact is a normal
  * source/document path whose parent already exists inside the workspace.
  */
-export async function verifiedPreparationTargets(
+export async function inspectVerifiedPreparationTargets(
   root: string,
   objective: string,
   candidates: readonly string[],
   limit = 8,
-): Promise<string[]> {
+): Promise<VerifiedPreparationTarget[]> {
   const rootPath = path.resolve(root);
   const creationRequested = CREATION_INTENT_PATTERN.test(objective);
   const objectiveLower = objective.toLowerCase();
-  const eligible: string[] = [];
+  const eligible: VerifiedPreparationTarget[] = [];
 
   for (const candidate of candidates) {
     const normalized = normalize(candidate);
@@ -161,7 +181,9 @@ export async function verifiedPreparationTargets(
     )
       continue;
     if (
-      CONTEXT_ONLY_BASENAMES.has(path.posix.basename(normalized).toLowerCase()) &&
+      CONTEXT_ONLY_BASENAMES.has(
+        path.posix.basename(normalized).toLowerCase(),
+      ) &&
       !objectiveLower.includes(normalized.toLowerCase())
     )
       continue;
@@ -173,7 +195,10 @@ export async function verifiedPreparationTargets(
 
     try {
       if ((await stat(absolute)).isFile())
-        eligible.push(relative.replaceAll("\\", "/"));
+        eligible.push({
+          path: relative.replaceAll("\\", "/"),
+          exists: true,
+        });
       continue;
     } catch {
       if (!creationRequested) continue;
@@ -181,25 +206,59 @@ export async function verifiedPreparationTargets(
 
     try {
       if ((await stat(path.dirname(absolute))).isDirectory())
-        eligible.push(relative.replaceAll("\\", "/"));
+        eligible.push({
+          path: relative.replaceAll("\\", "/"),
+          exists: false,
+        });
     } catch {
       // A missing parent is not a bounded file-creation scope. The agent may
       // discover an existing parent or report the genuine blocker instead.
     }
   }
 
-  const uniqueEligible = [...new Set(eligible)];
+  const uniqueEligible = [
+    ...new Map(
+      eligible.map((candidate) => [candidate.path, candidate]),
+    ).values(),
+  ];
   const explicit = selectProgressiveTargets(
     objective,
-    uniqueEligible.filter((candidate) =>
-      objectiveLower.includes(candidate.toLowerCase()),
-    ),
+    uniqueEligible
+      .filter((candidate) =>
+        objectiveLower.includes(candidate.path.toLowerCase()),
+      )
+      .map((candidate) => candidate.path),
     [],
     limit,
   );
-  if (explicit.length > 0) return explicit;
-  if (creationRequested) {
-    return uniqueEligible.slice(0, Math.max(1, limit));
-  }
-  return selectProgressiveTargets(objective, [], uniqueEligible, limit);
+  const selectedPaths =
+    explicit.length > 0
+      ? explicit
+      : creationRequested
+        ? uniqueEligible
+            .slice(0, Math.max(1, limit))
+            .map((candidate) => candidate.path)
+        : selectProgressiveTargets(
+            objective,
+            [],
+            uniqueEligible.map((candidate) => candidate.path),
+            limit,
+          );
+  return selectedPaths.flatMap((selectedPath) => {
+    const target = uniqueEligible.find(
+      (candidate) => candidate.path === selectedPath,
+    );
+    return target ? [target] : [];
+  });
+}
+
+export async function verifiedPreparationTargets(
+  root: string,
+  objective: string,
+  candidates: readonly string[],
+  limit = 8,
+): Promise<string[]> {
+  return (
+    await inspectVerifiedPreparationTargets(root, objective, candidates, limit)
+  ).map((target) => target.path);
 }

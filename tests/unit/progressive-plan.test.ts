@@ -3,6 +3,7 @@ import { mkdtemp, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  hasVerifiedCodingScope,
   inferProgressiveTargets,
   selectProgressiveTargets,
 } from "../../src/agent/progressive-plan.js";
@@ -62,9 +63,7 @@ test("target inference is used only when the objective has no explicit path", ()
 });
 
 test("creation preparation authorizes a safe missing file inside the workspace", async () => {
-  const progressivePlan = await import(
-    "../../src/agent/progressive-plan.js"
-  );
+  const progressivePlan = await import("../../src/agent/progressive-plan.js");
   expect("verifiedPreparationTargets" in progressivePlan).toBe(true);
   if (!("verifiedPreparationTargets" in progressivePlan)) return;
 
@@ -80,10 +79,42 @@ test("creation preparation authorizes a safe missing file inside the workspace",
   ).toEqual(["index.html"]);
 });
 
+test("creation preparation accepts ordinary text artifacts", async () => {
+  const progressivePlan = await import("../../src/agent/progressive-plan.js");
+  expect("verifiedPreparationTargets" in progressivePlan).toBe(true);
+  if (!("verifiedPreparationTargets" in progressivePlan)) return;
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "shelra-create-text-"));
+  expect(
+    await progressivePlan.verifiedPreparationTargets(
+      root,
+      "Create a new file named approval-test.txt containing exactly approved.",
+      ["approval-test.txt"],
+    ),
+  ).toEqual(["approval-test.txt"]);
+});
+
+test("a missing explicit greenfield target is a verified coding scope", () => {
+  expect(
+    hasVerifiedCodingScope({
+      evidenceState: "INSUFFICIENT",
+      greenfieldIntent: true,
+      explicitPaths: ["approval-test.txt"],
+      targets: [{ path: "approval-test.txt", exists: false }],
+    }),
+  ).toBe(true);
+  expect(
+    hasVerifiedCodingScope({
+      evidenceState: "INSUFFICIENT",
+      greenfieldIntent: true,
+      explicitPaths: ["approval-test.txt"],
+      targets: [{ path: "approval-test.txt", exists: true }],
+    }),
+  ).toBe(false);
+});
+
 test("greenfield creation does not invent a domain-specific artifact without a model path", async () => {
-  const progressivePlan = await import(
-    "../../src/agent/progressive-plan.js"
-  );
+  const progressivePlan = await import("../../src/agent/progressive-plan.js");
   expect("verifiedPreparationTargets" in progressivePlan).toBe(true);
   if (!("verifiedPreparationTargets" in progressivePlan)) return;
 
@@ -98,9 +129,7 @@ test("greenfield creation does not invent a domain-specific artifact without a m
 });
 
 test("preparation evidence does not promote an unrelated project manifest into creation scope", async () => {
-  const progressivePlan = await import(
-    "../../src/agent/progressive-plan.js"
-  );
+  const progressivePlan = await import("../../src/agent/progressive-plan.js");
   expect("verifiedPreparationTargets" in progressivePlan).toBe(true);
   if (!("verifiedPreparationTargets" in progressivePlan)) return;
 

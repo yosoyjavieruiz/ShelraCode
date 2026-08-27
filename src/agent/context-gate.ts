@@ -19,6 +19,12 @@ export interface MutationEvidenceGateInput {
   repositoryState?: "empty" | "non_empty" | "unknown";
   /** Generic intent classification; never a task-specific acceptance rule. */
   greenfieldIntent?: boolean;
+  /**
+   * Host-verified exception for an explicitly named new artifact. The target
+   * path and its parent were checked before the task was admitted; this does
+   * not authorize an arbitrary mutation outside that staged scope.
+   */
+  greenfieldTargetAuthorized?: boolean;
 }
 
 export interface MutationEvidenceGateResult {
@@ -53,13 +59,22 @@ export function evaluateMutationEvidenceGate(
   // An empty workspace is itself relevant evidence for a greenfield
   // objective. Requiring a pre-existing source file in that case creates a
   // deadlock: the model cannot create the first artifact because the gate is
-  // waiting for evidence that can only exist after creation. Existing-code
-  // repair/migration tasks remain blocked because they do not carry the
-  // greenfield intent signal.
+  // waiting for evidence that can only exist after creation. The same narrow
+  // exception applies to a missing, explicitly named artifact whose parent
+  // directory the host verified before routing. Existing-code repair and
+  // migration tasks remain blocked because they do not carry both the
+  // greenfield intent and the host authorization signal.
   if (
     state !== "CONFLICTING" &&
     input.repositoryState === "empty" &&
     input.greenfieldIntent === true
+  )
+    return { allowed: true, state: "SUFFICIENT" };
+
+  if (
+    state !== "CONFLICTING" &&
+    input.greenfieldIntent === true &&
+    input.greenfieldTargetAuthorized === true
   )
     return { allowed: true, state: "SUFFICIENT" };
 

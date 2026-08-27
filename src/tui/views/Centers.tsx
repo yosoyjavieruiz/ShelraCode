@@ -13,6 +13,7 @@ import type {
   RouteDecision,
 } from "../../shared/types.js";
 import {
+  permissionGrantFamily,
   redactPermissionCommand,
   type PermissionGrant,
 } from "../../tools/permission-grants.js";
@@ -1032,11 +1033,17 @@ export function PermissionsView(props: {
             <SelectableRow
               theme={props.theme}
               selected={selected() === index}
-              title={`${grant.tool} · ${grant.risk}`}
+              title={`${grant.family ?? permissionGrantFamily(grant) ?? grant.tool} · ${grant.risk}`}
               subtitle={
                 grant.command
                   ? `Exact command · ${redactPermissionCommand(grant.command)}`
-                  : "All workspace targets for this tool"
+                  : grant.family === "workspace-write" ||
+                      permissionGrantFamily(grant) === "workspace-write"
+                    ? "All workspace file writes"
+                    : grant.family === "workspace-read" ||
+                        permissionGrantFamily(grant) === "workspace-read"
+                      ? "All workspace reads"
+                      : "All workspace targets for this tool"
               }
               trailing={grant.scope}
               onActivate={() => props.onRemove?.(grant)}

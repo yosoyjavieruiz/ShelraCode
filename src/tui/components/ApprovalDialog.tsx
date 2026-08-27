@@ -13,6 +13,8 @@ export function ApprovalDialog(props: {
   height: number;
   action?: string;
   impact?: string;
+  scopeDescription?: string;
+  busy?: boolean;
   selectedIndex?: number;
   onDecision?: (decision: ApprovalOption["decision"]) => void;
   onMove?: (delta: 1 | -1) => void;
@@ -47,6 +49,10 @@ export function ApprovalDialog(props: {
       focused
       zIndex={220}
       onKeyDown={(event: KeyEvent) => {
+        if (props.busy) {
+          event.preventDefault();
+          return;
+        }
         if (event.name === "return" || event.name === "enter") {
           event.preventDefault();
           const option = APPROVAL_OPTIONS[selectedIndex()];
@@ -61,14 +67,18 @@ export function ApprovalDialog(props: {
           props.onMove?.(event.name === "up" ? -1 : 1);
         } else {
           const decision = approvalDecisionForKey(event.name);
-          if (decision) props.onDecision?.(decision);
-          else props.onKeyDown?.(event);
+          if (decision) {
+            event.preventDefault();
+            props.onDecision?.(decision);
+          } else props.onKeyDown?.(event);
         }
       }}
     >
       <box flexDirection="column" gap={1}>
         <text fg={themeColor(props.theme, colors.status.warning)}>
-          <strong>Approval required</strong>
+          <strong>
+            {props.busy ? "Saving permission" : "Approval required"}
+          </strong>
         </text>
         <text fg={themeColor(props.theme, colors.text.primary)}>
           Allow workspace action
@@ -80,7 +90,9 @@ export function ApprovalDialog(props: {
           {props.impact ?? "This creates an external side effect."}
         </text>
         <text fg={themeColor(props.theme, colors.text.muted)}>
-          Review the action and choose how long the permission should last.
+          {props.busy
+            ? "Saving your permission before the agent continues…"
+            : "Review the action and choose how long the permission should last."}
         </text>
         <box flexDirection="column" gap={0}>
           {APPROVAL_OPTIONS.map((option, index) => (
@@ -99,7 +111,13 @@ export function ApprovalDialog(props: {
                 <strong>
                   {`${index === selectedIndex() ? "›" : " "} [${option.key}] ${option.label}`}
                 </strong>
-                {` · ${option.detail}`}
+                {` · ${
+                  option.decision === "session" && props.scopeDescription
+                    ? `Do not ask again for ${props.scopeDescription} this session`
+                    : option.decision === "project" && props.scopeDescription
+                      ? `Save ${props.scopeDescription} for this project`
+                      : option.detail
+                }`}
               </text>
             </box>
           ))}

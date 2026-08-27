@@ -19,13 +19,13 @@ export const APPROVAL_OPTIONS: readonly ApprovalOption[] = [
     decision: "session",
     key: "s",
     label: "Allow for this session",
-    detail: "Do not ask again for this tool/risk",
+    detail: "Do not ask again for this action type this session",
   },
   {
     decision: "project",
     key: "p",
     label: "Always allow in this project",
-    detail: "Save a project permission rule",
+    detail: "Save this action type for this project",
   },
   {
     decision: "deny",

@@ -150,7 +150,10 @@ describe("agent loop", () => {
     const checkpoint = new CheckpointService(db, root);
     const events: string[] = [];
     const logs: LogRecord[] = [];
-    const provider = new FakeAgentProvider(true);
+    // The UI must announce that it is waiting for a model decision even when
+    // the provider exposes no private reasoning stream. Otherwise a slow
+    // local inference looks like a frozen agent until the first tool call.
+    const provider = new FakeAgentProvider(false);
 
     const result = await runAgent(
       {
@@ -237,6 +240,9 @@ describe("agent loop", () => {
     );
     expect(events).toContain("verification.finished");
     expect(events).toContain("model.progress");
+    expect(events.indexOf("model.progress")).toBeLessThan(
+      events.indexOf("tool.started"),
+    );
     expect(logs.map((record) => record.event)).toEqual(
       expect.arrayContaining([
         "agent.task.started",
@@ -253,6 +259,113 @@ describe("agent loop", () => {
     expect(
       await readFile(path.join(root, "src", "value.ts"), "utf8"),
     ).toContain("value = 2");
+    db.close();
+  });
+
+  test("allows a host-verified explicit greenfield file when repository evidence is otherwise insufficient", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-greenfield-file-loop-"),
+    );
+    await writeFile(
+      path.join(root, "README.md"),
+      "fixture workspace\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    let turn = 0;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Fake local",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" as const };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream(): AsyncIterable<ProviderEvent> {
+        turn += 1;
+        if (turn === 1) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "create-greenfield",
+              name: "CreateFile",
+              arguments: JSON.stringify({
+                path: "approval-test.txt",
+                content: "approved\n",
+              }),
+            },
+          };
+        } else {
+          yield {
+            type: "text.delta",
+            text: "The explicit greenfield artifact was created.",
+          };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-greenfield-file",
+        objective:
+          "Create a new file named approval-test.txt containing exactly approved.",
+        root,
+        candidate,
+        repositoryPolicy: "local_only",
+        permissionMode: "AUTO",
+        mode: "coding",
+        context: "The host verified the workspace root as the creation parent.",
+        contextEvidenceState: "INSUFFICIENT",
+        repositoryState: "non_empty",
+        greenfieldIntent: true,
+        greenfieldCreationPaths: ["approval-test.txt"],
+        stagedPaths: ["approval-test.txt"],
+        successCriteria: ["approval-test.txt is created"],
+        maxTurns: 3,
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        verifySuccessCriteria: (_task, ledger) => ({
+          pass: ledger.filesChanged.includes("approval-test.txt"),
+          satisfiedCriterionIds: ledger.filesChanged.includes(
+            "approval-test.txt",
+          )
+            ? ["criterion-1"]
+            : [],
+        }),
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "AUTO" as const,
+          signal: new AbortController().signal,
+          checkpoint,
+        }),
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.verified).toBe(true);
+    expect(result.toolRuns.map((run) => run.tool)).toEqual(["CreateFile"]);
+    expect(await readFile(path.join(root, "approval-test.txt"), "utf8")).toBe(
+      "approved\n",
+    );
     db.close();
   });
 

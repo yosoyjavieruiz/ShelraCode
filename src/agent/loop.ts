@@ -3397,6 +3397,17 @@ export async function runAgent(
         0,
       ),
     });
+    // A local runtime may take a long time before yielding its first token or
+    // tool call, and many runtimes do not expose a reasoning channel at all.
+    // Emit an immediate bounded progress marker so the host can distinguish
+    // "waiting for model" from a frozen agent. The marker contains no private
+    // reasoning and is closed below when the provider turn ends.
+    emit(loopOptions, {
+      type: "model.progress",
+      phase: "reasoning",
+      chars: 0,
+      streaming: true,
+    });
     const toolCalls: ToolCall[] = [];
     let sawText = false;
     let reasoningChars = 0;
@@ -3471,6 +3482,13 @@ export async function runAgent(
           type: "model.progress",
           phase: "reasoning",
           chars: reasoningChars,
+          streaming: false,
+        });
+      } else {
+        emit(loopOptions, {
+          type: "model.progress",
+          phase: "reasoning",
+          chars: 0,
           streaming: false,
         });
       }
@@ -4494,6 +4512,13 @@ export async function runAgent(
               evidence: ledger.evidence,
               repositoryState: task.repositoryState,
               greenfieldIntent: task.greenfieldIntent,
+              greenfieldTargetAuthorized:
+                task.greenfieldIntent === true &&
+                requestedPath !== undefined &&
+                (task.greenfieldCreationPaths ?? []).some(
+                  (candidate) =>
+                    normalizeWorkspacePath(candidate) === requestedPath,
+                ),
             });
             if (!evidenceGate.allowed)
               throw new ToolError(

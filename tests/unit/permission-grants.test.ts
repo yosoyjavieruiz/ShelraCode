@@ -3,6 +3,8 @@ import {
   addPermissionGrant,
   createPermissionGrant,
   isPermissionGrantPersistable,
+  permissionGrantFamily,
+  permissionGrantScopeDescription,
   matchesPermissionGrant,
   parsePermissionGrants,
   redactPermissionCommand,
@@ -53,6 +55,99 @@ test("project grants match the selected tool and preserve a safe scope", () => {
       risk: "destructive",
     }),
   ).toBe(false);
+});
+
+test("session and project file permissions cover the whole safe file operation family", () => {
+  const grant = createPermissionGrant("session", {
+    risk: "write",
+    tool: "EditFile",
+    path: "src/app.ts",
+  });
+
+  expect(permissionGrantFamily({ tool: "EditFile", risk: "write" })).toBe(
+    "workspace-write",
+  );
+  expect(grant.family).toBe("workspace-write");
+  expect(
+    matchesPermissionGrant(grant, {
+      risk: "write",
+      tool: "CreateFile",
+      path: "src/new.ts",
+    }),
+  ).toBe(true);
+  expect(
+    matchesPermissionGrant(grant, {
+      risk: "write",
+      tool: "WriteFile",
+      path: "src/other.ts",
+    }),
+  ).toBe(true);
+  expect(
+    matchesPermissionGrant(grant, {
+      risk: "destructive",
+      tool: "DeleteFile",
+      path: "src/other.ts",
+    }),
+  ).toBe(false);
+  expect(
+    matchesPermissionGrant(grant, {
+      risk: "execute",
+      tool: "Shell",
+      command: "git status",
+    }),
+  ).toBe(false);
+});
+
+test("file-family grants remain deduplicated across CreateFile, WriteFile and EditFile", () => {
+  const grants = [
+    createPermissionGrant("project", {
+      risk: "write",
+      tool: "CreateFile",
+      path: "a.ts",
+    }),
+    createPermissionGrant("project", {
+      risk: "write",
+      tool: "EditFile",
+      path: "b.ts",
+    }),
+  ];
+
+  expect(addPermissionGrant([], grants[0]!)).toHaveLength(1);
+  expect(addPermissionGrant([grants[0]!], grants[1]!)).toHaveLength(1);
+});
+
+test("legacy file grants widen to the safe family when they have no exact scope", () => {
+  const legacyGrant: PermissionGrant = {
+    id: "legacy-edit-grant",
+    scope: "project",
+    tool: "EditFile",
+    risk: "write",
+    createdAt: "2026-08-25T00:00:00.000Z",
+  };
+
+  expect(
+    matchesPermissionGrant(legacyGrant, {
+      risk: "write",
+      tool: "CreateFile",
+      path: "src/new.ts",
+    }),
+  ).toBe(true);
+});
+
+test("approval copy exposes the real persistence scope", () => {
+  expect(
+    permissionGrantScopeDescription({ tool: "EditFile", risk: "write" }),
+  ).toBe("workspace file writes");
+  expect(
+    permissionGrantScopeDescription({ tool: "ReadFile", risk: "read" }),
+  ).toBe("workspace reads");
+  expect(
+    permissionGrantScopeDescription({
+      tool: "Shell",
+      risk: "execute",
+      command: "bun test",
+    }),
+  ).toBe("this exact command");
 });
 
 test("shell grants remain exact-command grants", () => {
