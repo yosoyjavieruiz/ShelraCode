@@ -190,7 +190,7 @@ test("compaction and restart retain one bounded five-layer rehydration envelope"
       instructionSources: ["AGENTS.md"],
       memoryIds: ["memory:parser-convention"],
       proofGapIds: ["proof:parser-api"],
-      activeNodeId: "mutate-parser",
+      activeNodeId: "discover",
       repositoryRevision: "fixture-revision",
     },
     route: {
@@ -226,7 +226,7 @@ test("compaction and restart retain one bounded five-layer rehydration envelope"
         repositoryRevision: "fixture-revision",
         route: rehydration.route,
         contextAnchor: rehydration.contextAnchor,
-        activeNodeId: "mutate-parser",
+        activeNodeId: "discover",
       }),
     ),
   );

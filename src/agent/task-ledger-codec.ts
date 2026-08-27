@@ -626,7 +626,8 @@ function validAnchor(value: unknown): boolean {
       typeof anchor.repositoryRevision === "string") &&
     (anchor.repositoryWorkingTreeRevision === undefined ||
       typeof anchor.repositoryWorkingTreeRevision === "string") &&
-    (anchor.summary === undefined || typeof anchor.summary === "string"),
+    (anchor.summary === undefined ||
+      (typeof anchor.summary === "string" && anchor.summary.length <= 16_000)),
   );
 }
 

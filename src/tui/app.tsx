@@ -46,6 +46,7 @@ import {
 import {
   createTaskRuntimeSnapshot,
   type TaskInFlightMarker,
+  type TaskRuntimeRehydration,
   type TaskRuntimeSnapshot,
 } from "../agent/task-runtime-state.js";
 import { reviewWorkspaceChange } from "../agent/workspace-review.js";
@@ -1762,6 +1763,7 @@ export function AppShell(
           const persistRuntime = (
             ledger: AgentTaskLedger,
             inFlight?: TaskInFlightMarker,
+            rehydration?: TaskRuntimeRehydration,
           ): void => {
             runtimeRevision += 1;
             controlPlane.db.saveAgentRuntime(
@@ -1779,7 +1781,34 @@ export function AppShell(
                     }
                   : {}),
                 route: runtimeRoute,
-                contextAnchor: runtimeContextAnchor,
+                contextAnchor: {
+                  ...runtimeContextAnchor,
+                  ...(rehydration?.contextAnchor ?? {}),
+                  sourceIds: [
+                    ...new Set([
+                      ...runtimeContextAnchor.sourceIds,
+                      ...(rehydration?.contextAnchor.sourceIds ?? []),
+                    ]),
+                  ],
+                  instructionSources: [
+                    ...new Set([
+                      ...runtimeContextAnchor.instructionSources,
+                      ...(rehydration?.contextAnchor.instructionSources ?? []),
+                    ]),
+                  ],
+                  memoryIds: [
+                    ...new Set([
+                      ...runtimeContextAnchor.memoryIds,
+                      ...(rehydration?.contextAnchor.memoryIds ?? []),
+                    ]),
+                  ],
+                  proofGapIds: [
+                    ...new Set([
+                      ...runtimeContextAnchor.proofGapIds,
+                      ...(rehydration?.contextAnchor.proofGapIds ?? []),
+                    ]),
+                  ],
+                },
                 ...(ledger.taskGraph?.currentNodeId
                   ? { activeNodeId: ledger.taskGraph.currentNodeId }
                   : {}),

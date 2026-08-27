@@ -266,4 +266,49 @@ describe("durable task resume", () => {
       ),
     ).toBe(true);
   });
+
+  test("persists the compaction envelope before continuing after context pressure", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-resume-compaction-"),
+    );
+    const objective = "Retain the objective while compacting a long task";
+    const provider = new ResumeProvider();
+    const compactedAnchors: Array<string | undefined> = [];
+    const result = await runAgent(
+      {
+        id: "compaction-task",
+        objective,
+        root,
+        candidate,
+        repositoryPolicy: "private",
+        permissionMode: "PLAN",
+        mode: "workspace_question",
+        planningMode: "none",
+        systemPromptProfile: "workspace",
+        context: "Host observation: " + "x".repeat(2_400),
+        contextBudgetChars: 800,
+        maxTurns: 1,
+        runtimeSnapshot: undefined,
+      },
+      {
+        provider,
+        tools: [],
+        toolChoice: "none",
+        persistTask: (_ledger, _inFlight, rehydration) => {
+          if (rehydration?.contextAnchor.summary)
+            compactedAnchors.push(rehydration.contextAnchor.summary);
+        },
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "PLAN",
+          signal: new AbortController().signal,
+        }),
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(compactedAnchors.length).toBeGreaterThan(0);
+    expect(compactedAnchors.at(-1)).toContain(objective);
+    expect(compactedAnchors.at(-1)).toContain("rehydration");
+  });
 });

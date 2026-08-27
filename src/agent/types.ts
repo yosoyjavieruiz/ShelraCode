@@ -28,6 +28,7 @@ import type { TaskContract } from "./task-contract.js";
 import type { ObjectiveProofAssessment } from "./objective-proof.js";
 import type {
   TaskInFlightMarker,
+  TaskRuntimeRehydration,
   TaskRuntimeSnapshot,
 } from "./task-runtime-state.js";
 import type { InstructionTrust } from "../instructions/trust-policy.js";
@@ -220,6 +221,7 @@ export interface AgentLoopOptions {
   persistTask?: (
     ledger: AgentTaskLedger,
     inFlight?: TaskInFlightMarker,
+    rehydration?: TaskRuntimeRehydration,
   ) => void;
   /**
    * Host-owned preservation check. The kernel must not assume that the

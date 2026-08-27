@@ -1067,8 +1067,14 @@ export async function runAgent(
   });
   transitionPhase(ledger, "discover", loopOptions);
   options.persistTask?.(ledger);
-  const persistLedger = (inFlight?: TaskInFlightMarker): void =>
-    options.persistTask?.(ledger, inFlight);
+  let persistedRehydration: TaskRuntimeRehydration | undefined;
+  const persistLedger = (
+    inFlight?: TaskInFlightMarker,
+    rehydration?: TaskRuntimeRehydration,
+  ): void => {
+    if (rehydration) persistedRehydration = structuredClone(rehydration);
+    options.persistTask?.(ledger, inFlight, persistedRehydration);
+  };
   const emitPlan = (): void => {
     if (!ledger.plan) return;
     persistLedger();
@@ -1132,9 +1138,9 @@ export async function runAgent(
         constraints,
       });
   }
-  persistLedger();
   const currentRuntimeRehydration = (): TaskRuntimeRehydration => {
     const baseAnchor =
+      persistedRehydration?.contextAnchor ??
       restoredRuntime?.contextAnchor ??
       deriveTaskContextAnchor(
         ledger,
@@ -1162,11 +1168,17 @@ export async function runAgent(
           ? { activeNodeId: ledger.taskGraph.currentNodeId }
           : {}),
       },
-      ...(restoredRuntime?.route
-        ? { route: structuredClone(restoredRuntime.route) }
+      ...((persistedRehydration?.route ?? restoredRuntime?.route)
+        ? {
+            route: structuredClone(
+              persistedRehydration?.route ?? restoredRuntime?.route,
+            ),
+          }
         : {}),
     };
   };
+  persistedRehydration = currentRuntimeRehydration();
+  persistLedger();
   const currentModelNode = (): TaskNode | undefined => {
     if (planningMode !== "model" || !ledger.taskGraph) return undefined;
     return scheduleNextTaskNode(ledger.taskGraph);
@@ -3137,6 +3149,18 @@ export async function runAgent(
         currentRuntimeRehydration(),
       );
       messages.splice(0, messages.length, ...compacted.messages);
+      // Compaction is a durable state transition, not only a local transcript
+      // rewrite. Persist the bounded state packet so a process restart after
+      // compaction can rehydrate the same objective, graph, proof gaps and
+      // next-action context instead of falling back to the pre-compaction
+      // anchor.
+      persistLedger(undefined, {
+        contextAnchor: {
+          ...compacted.contextAnchor,
+          summary: compacted.preservedState,
+        },
+        ...(compacted.route ? { route: compacted.route } : {}),
+      });
     }
     if (pendingRecoveryInstruction) {
       messages.push({ role: "user", content: pendingRecoveryInstruction });
