@@ -93,3 +93,17 @@ test("compiles explicit artifact content expectations without guessing a plan", 
     { type: "exact_text", value: "approved" },
   ]);
 });
+
+test("compiles an explicit exported symbol expectation for one source target", () => {
+  const contract = compileTaskContract({
+    id: "symbol-contract",
+    originalRequest:
+      "Create src/parser.ts with export function parse and preserve the public API.",
+    mode: "coding",
+    explicitPaths: ["src/parser.ts"],
+  });
+
+  expect(contract.deliverables[0]?.artifactExpectations).toEqual([
+    { type: "exported_symbol", value: "parse" },
+  ]);
+});

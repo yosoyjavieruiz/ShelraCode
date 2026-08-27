@@ -118,6 +118,10 @@ function artifactExpectationPasses(
   const expected = normalizeArtifactText(expectation.value);
   if (expectation.type === "exact_text") return actual === expected;
   if (expectation.type === "contains_text") return actual.includes(expected);
+  if (expectation.type === "declares_symbol")
+    return hasDeclaredSymbol(actual, expectation.value);
+  if (expectation.type === "exported_symbol")
+    return hasExportedSymbol(actual, expectation.value);
   return !actual.includes(expected);
 }
 
@@ -128,7 +132,62 @@ function artifactExpectationDescription(
     return `exact content ${JSON.stringify(expectation.value)}`;
   if (expectation.type === "contains_text")
     return `content containing ${JSON.stringify(expectation.value)}`;
+  if (expectation.type === "declares_symbol")
+    return `declared symbol ${JSON.stringify(expectation.value)}`;
+  if (expectation.type === "exported_symbol")
+    return `exported symbol ${JSON.stringify(expectation.value)}`;
   return `content excluding ${JSON.stringify(expectation.value)}`;
+}
+
+function escapedRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+/**
+ * Conservative declaration evidence for common source languages. This is a
+ * syntax-level host check, not an AST or type checker: it only accepts a
+ * declaration at a line/statement boundary and therefore does not let a
+ * comment or a quoted sentence satisfy a symbol requirement.
+ */
+function hasDeclaredSymbol(content: string, symbol: string): boolean {
+  const name = escapedRegExp(symbol);
+  const patterns = [
+    new RegExp(
+      `(?:^|[\\r\\n;{}])\\s*(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?function\\s+${name}\\b`,
+      "mu",
+    ),
+    new RegExp(
+      `(?:^|[\\r\\n;{}])\\s*(?:export\\s+)?(?:declare\\s+)?(?:class|interface|type|enum|const|let|var)\\s+${name}\\b`,
+      "mu",
+    ),
+    new RegExp(`^\\s*(?:async\\s+)?def\\s+${name}\\b`, "mu"),
+    new RegExp(`^\\s*class\\s+${name}\\b`, "mu"),
+    new RegExp(
+      `^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${name}\\b`,
+      "mu",
+    ),
+    new RegExp(
+      `^\\s*func\\s+(?:\\([^)]*\\)\\s*)?${name}\\b`,
+      "mu",
+    ),
+    new RegExp(`^\\s*(?:struct|trait)\\s+${name}\\b`, "mu"),
+  ];
+  return patterns.some((pattern) => pattern.test(content));
+}
+
+function hasExportedSymbol(content: string, symbol: string): boolean {
+  if (!hasDeclaredSymbol(content, symbol)) return false;
+  const name = escapedRegExp(symbol);
+  return [
+    new RegExp(
+      `(?:^|[\\r\\n;{}])\\s*export\\s+(?:default\\s+)?(?:async\\s+)?(?:function|class|interface|type|enum|const|let|var)\\s+${name}\\b`,
+      "mu",
+    ),
+    new RegExp(
+      `(?:^|[\\r\\n;{}])\\s*export\\s*\\{[^}]*\\b${name}\\b[^}]*\\}`,
+      "mu",
+    ),
+  ].some((pattern) => pattern.test(content));
 }
 
 function missingArtifactFact(
@@ -335,7 +394,14 @@ function assessDeliverable(
       requirementId: deliverable.id,
       kind: "deliverable",
       source: target,
-      summary: status === "proven" ? `Host evidence covers ${target}.` : reason,
+      summary:
+        status === "proven"
+          ? `Host evidence covers ${target}${
+              expectations.length > 0
+                ? ` and ${expectations.map(artifactExpectationDescription).join(", ")}`
+                : ""
+            }.`
+          : reason,
       observedAt: ledger.updatedAt,
       status,
       ...(fact?.revision ? { revision: fact.revision } : {}),

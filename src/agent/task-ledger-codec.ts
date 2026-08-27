@@ -373,9 +373,13 @@ function validTaskContract(value: unknown): boolean {
             const item = record(expectation);
             return Boolean(
               item &&
-              ["exact_text", "contains_text", "excludes_text"].includes(
-                String(item.type),
-              ) &&
+              [
+                "exact_text",
+                "contains_text",
+                "excludes_text",
+                "declares_symbol",
+                "exported_symbol",
+              ].includes(String(item.type)) &&
               typeof item.value === "string",
             );
           })))

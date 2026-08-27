@@ -14,7 +14,11 @@ export interface ContractConstraint {
 }
 
 export type ArtifactExpectationType =
-  "exact_text" | "contains_text" | "excludes_text";
+  | "exact_text"
+  | "contains_text"
+  | "excludes_text"
+  | "declares_symbol"
+  | "exported_symbol";
 
 /**
  * Host-checkable content facts explicitly stated by the user.  The compiler
@@ -246,6 +250,33 @@ function explicitArtifactExpectations(
 }
 
 /**
+ * Extract only code-shaped symbol declarations that are explicitly bound to
+ * the single target path. Natural-language references such as "function to
+ * parse" are intentionally ignored; the host must not turn an ambiguous
+ * phrase into a completion requirement.
+ */
+function explicitSymbolExpectation(
+  request: string,
+): ArtifactExpectation | undefined {
+  const exported = request.match(
+    /\b(?:export|exported)\s+(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/iu,
+  )?.[1];
+  if (exported) return { type: "exported_symbol", value: exported };
+
+  const quoted = request.match(
+    /\b(?:function|class|interface|type|enum|const|let|var|def|struct|trait|fn|func)\s+(?:named|called)\s*["'`]([A-Za-z_$][A-Za-z0-9_$]*)["'`]/iu,
+  )?.[1];
+  if (quoted) return { type: "declares_symbol", value: quoted };
+
+  const codeShaped = request.match(
+    /\b(?:function|class|interface|type|enum|const|let|var|def|struct|trait|fn|func)\s+["'`]([A-Za-z_$][A-Za-z0-9_$]*)["'`](?=\s|$|[({:=;,.])/iu,
+  )?.[1];
+  if (codeShaped) return { type: "declares_symbol", value: codeShaped };
+
+  return undefined;
+}
+
+/**
  * Preserve high-signal constraints stated in the user's natural-language
  * request.  These are deliberately generic intent facts, not a task-specific
  * workflow: semantic decomposition and implementation order remain owned by
@@ -317,10 +348,14 @@ export function compileTaskContract(
     input.mode === "review";
   const coding = input.mode === "coding";
   const score = defaultRisk(input, explicitPaths.length);
-  const artifactExpectations = explicitArtifactExpectations(
-    request,
-    explicitPaths.length,
-  );
+  const symbolExpectation =
+    explicitPaths.length === 1
+      ? explicitSymbolExpectation(request)
+      : undefined;
+  const artifactExpectations = [
+    ...explicitArtifactExpectations(request, explicitPaths.length),
+    ...(symbolExpectation ? [symbolExpectation] : []),
+  ];
   const constraints: ContractConstraint[] = unique([
     ...(input.constraints ?? []),
     ...explicitUserConstraints(request),

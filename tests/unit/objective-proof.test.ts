@@ -374,3 +374,93 @@ test("proves an explicit exact artifact expectation after host inspection", () =
 
   expect(assessment.pass).toBe(true);
 });
+
+test("proves an explicitly requested exported symbol from host artifact content", () => {
+  const contract = compileTaskContract({
+    id: "proof-exported-symbol-pass",
+    originalRequest:
+      "Create src/parser.ts with export function parse and preserve the public API.",
+    mode: "coding",
+    explicitPaths: ["src/parser.ts"],
+  });
+  const ledger = createTaskLedger({
+    id: "proof-exported-symbol-pass",
+    objective: contract.objective,
+    mode: "coding",
+    contract,
+  });
+  addTaskEvidence(ledger, {
+    id: "repo",
+    kind: "file",
+    source: "src/parser.ts",
+    summary: "The parser target was inspected.",
+    relevance: 1,
+    freshness: 1,
+  });
+  addReadAndWrite(ledger, "src/parser.ts");
+  addReview(ledger);
+
+  const assessment = assessObjectiveProof(contract, ledger, ledger.evidence, [
+    {
+      path: "src/parser.ts",
+      exists: true,
+      content: "export function parse(input: string) { return input; }\n",
+    },
+  ]);
+
+  expect(assessment.pass).toBe(true);
+  expect(assessment.proofs).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        source: "src/parser.ts",
+        status: "proven",
+        summary: expect.stringContaining("exported symbol"),
+      }),
+    ]),
+  );
+});
+
+test("does not treat a comment as proof of an explicitly requested exported symbol", () => {
+  const contract = compileTaskContract({
+    id: "proof-exported-symbol-fail",
+    originalRequest:
+      "Create src/parser.ts with export function parse and preserve the public API.",
+    mode: "coding",
+    explicitPaths: ["src/parser.ts"],
+  });
+  const ledger = createTaskLedger({
+    id: "proof-exported-symbol-fail",
+    objective: contract.objective,
+    mode: "coding",
+    contract,
+  });
+  addTaskEvidence(ledger, {
+    id: "repo",
+    kind: "file",
+    source: "src/parser.ts",
+    summary: "The parser target was inspected.",
+    relevance: 1,
+    freshness: 1,
+  });
+  addReadAndWrite(ledger, "src/parser.ts");
+  addReview(ledger);
+
+  const assessment = assessObjectiveProof(contract, ledger, ledger.evidence, [
+    {
+      path: "src/parser.ts",
+      exists: true,
+      content:
+        "// export function parse(input: string)\nexport const other = true;\n",
+    },
+  ]);
+
+  expect(assessment.pass).toBe(false);
+  expect(assessment.missingRequirements).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        requirementId: "deliverable-path-1",
+        reason: expect.stringContaining("exported symbol"),
+      }),
+    ]),
+  );
+});
