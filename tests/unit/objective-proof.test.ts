@@ -81,7 +81,10 @@ test("reports the unproven explicit deliverable when only one target changed", (
   });
   addReview(ledger);
 
-  const assessment = assessObjectiveProof(contract, ledger, ledger.evidence);
+  const assessment = assessObjectiveProof(contract, ledger, ledger.evidence, [
+    { path: "src/a.ts", exists: true },
+    { path: "src/b.ts", exists: true },
+  ]);
 
   expect(assessment.pass).toBe(false);
   expect(assessment.missingRequirements).toEqual(
@@ -132,6 +135,38 @@ test("proves every explicit deliverable only with fresh reads, writes, artifact 
   expect(
     assessment.proofs.filter((proof) => proof.status === "proven").length,
   ).toBeGreaterThanOrEqual(5);
+});
+
+test("does not treat a successful model read and write as artifact proof without a host fact", () => {
+  const contract = codingContract(["src/a.ts"]);
+  const ledger = createTaskLedger({
+    id: "proof-no-artifact-fact",
+    objective: contract.objective,
+    mode: "coding",
+    contract,
+  });
+  addTaskEvidence(ledger, {
+    id: "repo",
+    kind: "file",
+    source: "src/a.ts",
+    summary: "The target was inspected.",
+    relevance: 1,
+    freshness: 1,
+  });
+  addReadAndWrite(ledger, "src/a.ts");
+  addReview(ledger);
+
+  const assessment = assessObjectiveProof(contract, ledger, ledger.evidence);
+
+  expect(assessment.pass).toBe(false);
+  expect(assessment.missingRequirements).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        requirementId: "deliverable-path-1",
+        reason: expect.stringContaining("artifact fact"),
+      }),
+    ]),
+  );
 });
 
 test("does not convert a model completion claim into proof for an unscoped objective", () => {

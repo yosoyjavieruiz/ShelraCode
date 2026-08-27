@@ -297,7 +297,12 @@ function assessDeliverable(
       status = "unproven";
       reason = "The requested writable target has no successful mutation.";
       nextAction = `Apply and verify the requested change in ${target}.`;
-    } else if (fact && !fact.exists) {
+    } else if (!fact) {
+      status = "unproven";
+      reason =
+        "The host did not return a bounded artifact fact for the explicit target.";
+      nextAction = `Inspect ${target} with the host artifact verifier before completion.`;
+    } else if (!fact.exists) {
       status = "failed";
       reason = fact.inspectionError
         ? `The host could not inspect the target: ${fact.inspectionError}`
