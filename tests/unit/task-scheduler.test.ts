@@ -42,6 +42,24 @@ test("reports blocked descendants and a deadlock without inventing work", () => 
   expect(scheduleNextTaskNode(graph)).toBeUndefined();
 });
 
+test("reconciles a stale ready node when a dependency fails", () => {
+  const graph = compileTaskGraph({
+    objective: "Update src/value.ts",
+    mode: "coding",
+    candidateFiles: ["src/value.ts"],
+  });
+
+  graph.nodes.find((node) => node.id === "analyze")!.status = "ready";
+  expect(setTaskNodeStatus(graph, "discover", "failed")).toBe(true);
+
+  const schedule = inspectTaskSchedule(graph);
+  expect(graph.nodes.find((node) => node.id === "analyze")?.status).toBe(
+    "blocked",
+  );
+  expect(schedule.blockedNodeIds).toContain("analyze");
+  expect(scheduleNextTaskNode(graph)).toBeUndefined();
+});
+
 test("preserves an active node and never schedules a later ready node concurrently", () => {
   const graph = compileTaskGraph({
     objective: "Answer from repository evidence",

@@ -77,7 +77,10 @@ function applyDerivedStatuses(
 ): void {
   for (const node of graph.nodes) {
     const derived = statuses.get(node.id);
-    if (derived === "blocked" && node.status === "pending")
+    if (
+      derived === "blocked" &&
+      (node.status === "pending" || node.status === "ready")
+    )
       node.status = "blocked";
     else if (derived === "ready" && node.status === "pending")
       node.status = "ready";
