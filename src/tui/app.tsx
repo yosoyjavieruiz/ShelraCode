@@ -1200,7 +1200,9 @@ export function AppShell(
     turnId: string,
     sessionId = turnId,
     resumeRuntime?: TaskRuntimeSnapshot,
+    repositoryRoot = process.cwd(),
   ): Promise<void> => {
+    const taskRoot = path.resolve(repositoryRoot);
     const taskAbort = new AbortController();
     activeTaskAbort = taskAbort;
     setTaskBusy(true);
@@ -1238,7 +1240,7 @@ export function AppShell(
         import("../checkpoint/checkpoint.js"),
         import("../agent/turn-policy.js"),
       ]);
-      const controlPlane = await openControlPlane(process.cwd());
+      const controlPlane = await openControlPlane(taskRoot);
       const signal = taskAbort.signal;
       const trace = createAgentTraceRecorder();
       const taskLogger = controlPlane.logger.child({
@@ -1254,7 +1256,7 @@ export function AppShell(
       let presentationEventBuffer:
         ReturnType<typeof createPresentationEventBuffer> | undefined;
       if (!controlPlane.db.sessionExists(sessionId))
-        controlPlane.db.createSession(sessionId, process.cwd(), objective);
+        controlPlane.db.createSession(sessionId, taskRoot, objective);
       controlPlane.db.appendMessage(sessionId, "user", objective);
       try {
         // Tools follow user intent: classify the turn before deciding
@@ -1266,7 +1268,7 @@ export function AppShell(
         const turnPolicy = resolveTurnPolicyForObjective(turnMode, objective);
         const needsRepositoryContext = turnPolicy.repositoryRead;
         let semanticMemoryFacts = needsRepositoryContext
-          ? controlPlane.db.listMemoryFacts(process.cwd(), "semantic")
+          ? controlPlane.db.listMemoryFacts(taskRoot, "semantic")
           : [];
         if (needsRepositoryContext) setNotice("Preparing repository context…");
         // Build a bounded routing context first. The selected model is not
@@ -1275,7 +1277,7 @@ export function AppShell(
         // context is rebuilt below with the selected model's active budget.
         const routingContext = needsRepositoryContext
           ? await buildRepositoryContext({
-              root: process.cwd(),
+              root: taskRoot,
               objective,
               maxChars: 12_000,
               signal,
@@ -1300,7 +1302,7 @@ export function AppShell(
           const expectedRoot = path
             .resolve(resumeRuntime.repositoryRoot)
             .toLowerCase();
-          const currentRoot = path.resolve(process.cwd()).toLowerCase();
+          const currentRoot = taskRoot.toLowerCase();
           if (expectedRoot !== currentRoot)
             throw new Error(
               "Cannot resume this task from a different repository root.",
@@ -1325,12 +1327,12 @@ export function AppShell(
         if (routingContext.snapshot) {
           for (const fact of repositorySnapshotMemoryFacts(
             routingContext.snapshot,
-            process.cwd(),
+            taskRoot,
           )) {
             controlPlane.db.saveMemoryFact(fact);
           }
           semanticMemoryFacts = controlPlane.db.listMemoryFacts(
-            process.cwd(),
+            taskRoot,
             "semantic",
           );
         }
@@ -1349,7 +1351,7 @@ export function AppShell(
           },
         });
         const projectCommands = needsRepositoryContext
-          ? await discoverProjectCommands(process.cwd(), taskLogger)
+          ? await discoverProjectCommands(taskRoot, taskLogger)
           : {};
         const verificationPlan =
           turnMode === "coding" ? selectVerificationPlan(projectCommands) : [];
@@ -1383,7 +1385,7 @@ export function AppShell(
         const verifiedPreparation =
           turnMode === "coding"
             ? await inspectVerifiedPreparationTargets(
-                process.cwd(),
+                taskRoot,
                 objective,
                 progressiveTargets,
               )
@@ -1589,7 +1591,7 @@ export function AppShell(
         }
         const checkpoint = new CheckpointService(
           controlPlane.db,
-          process.cwd(),
+          taskRoot,
           taskLogger,
         );
         const runSelectedAgent = async (
@@ -1643,7 +1645,7 @@ export function AppShell(
           );
           const agentContext = needsRepositoryContext
             ? await buildRepositoryContext({
-                root: process.cwd(),
+                root: taskRoot,
                 objective,
                 // Leave room for the system prompt, tool schemas, ledger
                 // state, and future observations. Raw files remain
@@ -1770,7 +1772,7 @@ export function AppShell(
             controlPlane.db.saveAgentRuntime(
               createTaskRuntimeSnapshot({
                 ledger,
-                repositoryRoot: process.cwd(),
+                repositoryRoot: taskRoot,
                 sessionId,
                 ...(agentContext.snapshot?.revision
                   ? { repositoryRevision: agentContext.snapshot.revision }
@@ -1822,7 +1824,7 @@ export function AppShell(
           const agentTask: AgentTask = {
             id: runtimeTaskId,
             objective,
-            root: process.cwd(),
+            root: taskRoot,
             candidate: selected,
             mode: executionMode,
             executionProfile: adaptiveProfile,
@@ -2162,7 +2164,7 @@ export function AppShell(
           ];
           const discoveredTargets = (
             await inspectVerifiedPreparationTargets(
-              process.cwd(),
+              taskRoot,
               objective,
               preparationCandidates,
             )
@@ -2280,7 +2282,7 @@ export function AppShell(
           : result.status;
         controlPlane.db.saveMemoryFact(
           createTaskEpisodeMemoryFact({
-            repository: process.cwd(),
+            repository: taskRoot,
             taskId: result.ledger.id,
             objective: result.ledger.objective,
             status: reportedStatus,
@@ -2384,6 +2386,7 @@ export function AppShell(
         turnId,
         session.id,
         runtimeResult.snapshot,
+        runtimeResult.snapshot.repositoryRoot,
       );
     })().catch((error: unknown) => {
       appendError(error instanceof Error ? error.message : "Task failed");
