@@ -11,6 +11,7 @@ import type { ModelCandidate } from "../../src/shared/types.js";
 import { runAgent } from "../../src/agent/loop.js";
 import type { AgentTask } from "../../src/agent/types.js";
 import {
+  createParallelSubagentDelegationTool,
   ForegroundSubagentCoordinator,
   createSubagentDelegationTool,
 } from "../../src/agent/subagents/coordinator.js";
@@ -45,6 +46,7 @@ class ParentChildProvider implements ProviderAdapter {
   readonly displayName = "Parent child fixture";
   readonly requests: NormalizedModelRequest[] = [];
   private parentDelegated = false;
+  private parallelDelegated = false;
   private childSearched = false;
 
   async discoverModels(): Promise<ModelCandidate[]> {
@@ -80,7 +82,35 @@ class ParentChildProvider implements ProviderAdapter {
             : "";
         })
         .filter(Boolean) ?? [];
-    if (names.includes("DelegateSubagent") && !this.parentDelegated) {
+    if (names.includes("DelegateSubagents") && !this.parallelDelegated) {
+      this.parallelDelegated = true;
+      yield {
+        type: "tool.call",
+        call: {
+          id: "delegate-parallel-1",
+          name: "DelegateSubagents",
+          arguments: JSON.stringify({
+            requests: [
+              {
+                objective: "inspect parser implementation",
+                allowedTools: ["SearchText"],
+                sourceIds: ["src/parser.ts"],
+              },
+              {
+                objective: "inspect parser tests",
+                allowedTools: ["SearchText"],
+                sourceIds: ["tests/parser.test.ts"],
+              },
+            ],
+          }),
+        },
+      };
+    } else if (names.includes("DelegateSubagents")) {
+      yield {
+        type: "text.delta",
+        text: "Parent incorporated parallel evidence.",
+      };
+    } else if (names.includes("DelegateSubagent") && !this.parentDelegated) {
       this.parentDelegated = true;
       yield {
         type: "tool.call",
@@ -198,4 +228,97 @@ test("parent delegates, child uses fresh context, and parent remains the finishe
   expect(JSON.stringify(childRequest?.messages ?? [])).not.toContain(
     "PARENT_ONLY_SECRET",
   );
+});
+
+test("parent incorporates evidence from bounded parallel child investigations", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-subagent-parallel-parent-"),
+  );
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await mkdir(path.join(root, "tests"), { recursive: true });
+  await writeFile(
+    path.join(root, "src", "parser.ts"),
+    "export function parse(input: string) { return input.trim(); }\n",
+    "utf8",
+  );
+  await writeFile(
+    path.join(root, "tests", "parser.test.ts"),
+    "test('parser', () => expect(true).toBe(true));\n",
+    "utf8",
+  );
+  const provider = new ParentChildProvider();
+  const coordinator = new ForegroundSubagentCoordinator({
+    provider,
+    tools: [searchTextTool],
+  });
+  const parentTask: AgentTask = {
+    id: "parallel-parent",
+    objective: "Investigate parser implementation and tests",
+    root,
+    candidate,
+    repositoryPolicy: "private",
+    permissionMode: "PLAN",
+    mode: "workspace_question",
+    context: "PARENT_ONLY_SECRET",
+    contextEvidenceState: "SUFFICIENT",
+    systemPromptProfile: "workspace",
+    maxTurns: 4,
+  };
+  const parentContext = (): ToolExecutionContext => ({
+    root,
+    permissionMode: "PLAN",
+    signal: new AbortController().signal,
+    network: false,
+  });
+  const delegation = createParallelSubagentDelegationTool(coordinator, {
+    task: parentTask,
+    signal: new AbortController().signal,
+    createExecutionContext: async () => parentContext(),
+  });
+  const result = await runAgent(parentTask, {
+    provider,
+    tools: [delegation],
+    toolChoice: "auto",
+    createExecutionContext: async () => parentContext(),
+  });
+
+  expect(result.status).toBe("completed");
+  expect(result.text).toContain("Parent incorporated parallel evidence");
+  expect(
+    result.ledger.actions.some(
+      (action) =>
+        action.target === "DelegateSubagents" && action.status === "succeeded",
+    ),
+  ).toBe(true);
+  expect(
+    result.ledger.evidence.some(
+      (evidence) => evidence.source === "src/parser.ts",
+    ),
+  ).toBe(true);
+  expect(
+    result.ledger.evidence.some(
+      (evidence) => evidence.source === "tests/parser.test.ts",
+    ),
+  ).toBe(true);
+  expect(provider.requests.length).toBeGreaterThanOrEqual(4);
+  expect(
+    provider.requests.some((request) =>
+      request.tools?.some((tool) =>
+        JSON.stringify(tool).includes("DelegateSubagents"),
+      ),
+    ),
+  ).toBe(true);
+  const childRequests = provider.requests.filter(
+    (request) =>
+      !request.tools?.some((tool) =>
+        JSON.stringify(tool).includes("DelegateSubagents"),
+      ),
+  );
+  expect(childRequests.length).toBeGreaterThanOrEqual(2);
+  expect(
+    childRequests.every(
+      (request) =>
+        !JSON.stringify(request.messages).includes("PARENT_ONLY_SECRET"),
+    ),
+  ).toBe(true);
 });
