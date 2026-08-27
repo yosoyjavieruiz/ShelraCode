@@ -1855,13 +1855,24 @@ export async function runAgent(
             ? "execute"
             : "execute";
     const output = objectOutput(result.output);
-    if (
-      call.name === "DelegateSubagent" &&
-      result.ok &&
-      output?.status === "completed" &&
-      Array.isArray(output.evidence)
-    ) {
-      for (const item of output.evidence.slice(0, 32)) {
+    const delegatedEvidence =
+      result.ok && call.name === "DelegateSubagent"
+        ? output?.status === "completed" && Array.isArray(output.evidence)
+          ? output.evidence
+          : []
+        : result.ok && call.name === "DelegateSubagents"
+          ? Array.isArray(output?.results)
+            ? output.results.flatMap((child) => {
+                const childRecord = objectOutput(child);
+                return childRecord?.status === "completed" &&
+                  Array.isArray(childRecord.evidence)
+                  ? childRecord.evidence
+                  : [];
+              })
+            : []
+          : [];
+    if (delegatedEvidence.length > 0) {
+      for (const item of delegatedEvidence.slice(0, 64)) {
         const evidence = objectOutput(item);
         if (
           typeof evidence?.sourceId !== "string" ||
@@ -1879,7 +1890,7 @@ export async function runAgent(
       }
       logger?.info("agent.subagent.evidence", {
         callId: call.id,
-        evidenceCount: output.evidence.length,
+        evidenceCount: delegatedEvidence.length,
       });
     }
     const executionFailed =

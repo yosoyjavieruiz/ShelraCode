@@ -74,3 +74,20 @@ export interface DelegationToolInput {
 }
 
 export type DelegationToolResult = SubagentResult;
+
+/** A bounded batch of independent read-only investigations. */
+export interface ParallelDelegationRequest {
+  objective: string;
+  allowedTools: string[];
+  sourceIds: string[];
+  isolated?: boolean;
+}
+
+export interface ParallelDelegationToolInput {
+  requests: ParallelDelegationRequest[];
+}
+
+export interface ParallelDelegationToolResult {
+  status: "completed" | "partial";
+  results: SubagentResult[];
+}

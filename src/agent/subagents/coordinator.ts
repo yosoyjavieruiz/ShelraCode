@@ -4,6 +4,8 @@ import { buildSubagentContext } from "./context.js";
 import type {
   DelegationToolInput,
   DelegationToolResult,
+  ParallelDelegationToolInput,
+  ParallelDelegationToolResult,
   SubagentCoordinator,
   SubagentCoordinatorOptions,
   SubagentParentContext,
@@ -21,6 +23,7 @@ import {
 
 const MAX_ALLOWED_TOOLS = 8;
 const MAX_OBJECTIVE_CHARS = 2_000;
+const MAX_PARALLEL_SUBAGENTS = 3;
 
 function inputRecord(input: unknown): Record<string, unknown> {
   if (typeof input !== "object" || input === null || Array.isArray(input))
@@ -317,6 +320,96 @@ export function createSubagentDelegationTool(
         { ...parent, signal: ctx.signal },
       );
       return result;
+    },
+  };
+}
+
+function validateParallelDelegationRequest(
+  input: unknown,
+): ParallelDelegationToolInput {
+  const value = inputRecord(input);
+  if (
+    !Array.isArray(value.requests) ||
+    value.requests.length === 0 ||
+    value.requests.length > MAX_PARALLEL_SUBAGENTS
+  )
+    throw new Error(
+      `requests must contain between 1 and ${MAX_PARALLEL_SUBAGENTS} independent investigations.`,
+    );
+  return {
+    requests: value.requests.map((request, index) => {
+      try {
+        const parsed = validateSubagentRequest(request);
+        return {
+          objective: parsed.objective,
+          allowedTools: parsed.allowedTools,
+          sourceIds: parsed.sourceIds,
+          ...(parsed.isolated === undefined
+            ? {}
+            : { isolated: parsed.isolated }),
+        };
+      } catch (error) {
+        throw new Error(
+          `requests[${index}] is invalid: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }),
+  };
+}
+
+/**
+ * Run independent child investigations concurrently, while keeping the
+ * single-child coordinator as the only lifecycle implementation. Every child
+ * still receives its own fresh context and read-only tools; this operation
+ * never authorizes parallel mutation or an implicit merge.
+ */
+export function createParallelSubagentDelegationTool(
+  coordinator: SubagentCoordinator,
+  parent: SubagentParentContext,
+): ToolDefinition<ParallelDelegationToolInput, ParallelDelegationToolResult> {
+  return {
+    name: "DelegateSubagents",
+    description:
+      "Run up to three independent bounded read-only repository investigations in parallel and return structured child evidence.",
+    risk: "read",
+    parameters: {
+      type: "object",
+      properties: {
+        requests: {
+          type: "array",
+          description:
+            "One to three independent investigations; each must include objective, allowedTools and sourceIds.",
+        },
+      },
+      required: ["requests"],
+      additionalProperties: false,
+    },
+    validate: validateParallelDelegationRequest,
+    async execute(input, ctx) {
+      const requests: SubagentRequest[] = input.requests.map(
+        (request, index) => ({
+          id: `parallel-${index + 1}`,
+          objective: request.objective,
+          allowedTools: request.allowedTools,
+          context: { sourceIds: request.sourceIds },
+          ...(request.isolated === undefined
+            ? {}
+            : { isolated: request.isolated }),
+        }),
+      );
+      const results = await Promise.all(
+        requests.map((request) =>
+          coordinator.run(request, { ...parent, signal: ctx.signal }),
+        ),
+      );
+      return {
+        status: results.every((result) => result.status === "completed")
+          ? "completed"
+          : "partial",
+        results,
+      };
     },
   };
 }

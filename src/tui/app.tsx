@@ -41,6 +41,7 @@ import type { AgentTask } from "../agent/types.js";
 import type { AgentTaskLedger } from "../agent/task-state.js";
 import {
   createSubagentDelegationTool,
+  createParallelSubagentDelegationTool,
   ForegroundSubagentCoordinator,
 } from "../agent/subagents/coordinator.js";
 import {
@@ -1964,9 +1965,17 @@ export function AppShell(
               createExecutionContext,
             },
           );
+          const parallelDelegationTool = createParallelSubagentDelegationTool(
+            subagentCoordinator,
+            {
+              task: agentTask,
+              signal,
+              createExecutionContext,
+            },
+          );
           const executionTools =
             baseExecutionTools.length > 0
-              ? [...baseExecutionTools, delegationTool]
+              ? [...baseExecutionTools, delegationTool, parallelDelegationTool]
               : baseExecutionTools;
           let result: Awaited<ReturnType<typeof runAgent>>;
           try {

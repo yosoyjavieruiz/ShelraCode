@@ -11,9 +11,14 @@ import type { ModelCandidate } from "../../src/shared/types.js";
 import { searchTextTool } from "../../src/tools/workspace.js";
 import { editFileTool } from "../../src/tools/workspace.js";
 import {
+  createParallelSubagentDelegationTool,
   ForegroundSubagentCoordinator,
   validateSubagentRequest,
 } from "../../src/agent/subagents/coordinator.js";
+import type {
+  SubagentCoordinator,
+  SubagentParentContext,
+} from "../../src/agent/subagents/types.js";
 import type { AgentTask } from "../../src/agent/types.js";
 import type { ToolExecutionContext } from "../../src/tools/types.js";
 import { runCommand } from "../../src/shared/process.js";
@@ -268,4 +273,79 @@ test("an isolated child reads a clean detached worktree and cleans it up", async
   expect(result.status).toBe("completed");
   expect(result.sourceIds).toContain("src/parser.ts");
   expect(worktrees.stdout).not.toContain("localcode-subagent-worktree-");
+});
+
+test("parallel delegation runs bounded independent read-only children and returns structured results", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-subagent-parallel-"),
+  );
+  let active = 0;
+  let maximumConcurrent = 0;
+  const requests: string[] = [];
+  const coordinator: SubagentCoordinator = {
+    async run(request, _parent) {
+      requests.push(request.id ?? "");
+      active += 1;
+      maximumConcurrent = Math.max(maximumConcurrent, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      return {
+        id: request.id ?? "child",
+        objective: request.objective,
+        status: "completed",
+        text: `Evidence for ${request.objective}`,
+        evidence: [
+          {
+            sourceId: request.context.sourceIds[0] ?? "src/unknown.ts",
+            kind: "finding",
+            summary: "Bounded child evidence",
+          },
+        ],
+        sourceIds: [...request.context.sourceIds],
+        toolRuns: 1,
+      };
+    },
+  };
+  const parent: SubagentParentContext = {
+    task: parentTask(root),
+    signal: new AbortController().signal,
+    createExecutionContext: async () => executionContext(root),
+  };
+  const tool = createParallelSubagentDelegationTool(coordinator, parent);
+  const input = tool.validate({
+    requests: [
+      {
+        objective: "inspect parser definitions",
+        allowedTools: ["SearchText"],
+        sourceIds: ["src/parser.ts"],
+      },
+      {
+        objective: "inspect parser tests",
+        allowedTools: ["ReadFile"],
+        sourceIds: ["tests/parser.test.ts"],
+      },
+    ],
+  });
+  const result = await tool.execute(input, executionContext(root));
+
+  expect(result.status).toBe("completed");
+  expect(result.results).toHaveLength(2);
+  expect(result.results.every((child) => child.status === "completed")).toBe(
+    true,
+  );
+  expect(requests).toEqual(["parallel-1", "parallel-2"]);
+  expect(maximumConcurrent).toBe(2);
+  expect(result.results[0]?.evidence[0]?.sourceId).toBe("src/parser.ts");
+  expect(result.results[1]?.evidence[0]?.sourceId).toBe("tests/parser.test.ts");
+
+  expect(() =>
+    tool.validate({
+      requests: [
+        input.requests[0],
+        input.requests[0],
+        input.requests[0],
+        input.requests[0],
+      ],
+    }),
+  ).toThrow("between 1 and 3");
 });
