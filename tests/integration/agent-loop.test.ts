@@ -336,6 +336,7 @@ describe("agent loop", () => {
         greenfieldIntent: true,
         greenfieldCreationPaths: ["approval-test.txt"],
         stagedPaths: ["approval-test.txt"],
+        enforceTaskContract: true,
         successCriteria: ["approval-test.txt is created"],
         maxTurns: 3,
       },
@@ -365,6 +366,126 @@ describe("agent loop", () => {
     expect(result.toolRuns.map((run) => run.tool)).toEqual(["CreateFile"]);
     expect(await readFile(path.join(root, "approval-test.txt"), "utf8")).toBe(
       "approved\n",
+    );
+    db.close();
+  });
+
+  test("rejects a greenfield artifact when host inspection finds the wrong content", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-greenfield-content-proof-"),
+    );
+    await writeFile(
+      path.join(root, "README.md"),
+      "fixture workspace\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    let turn = 0;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Fake local",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" as const };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream(): AsyncIterable<ProviderEvent> {
+        turn += 1;
+        if (turn === 1) {
+          yield {
+            type: "tool.call",
+            call: {
+              id: "create-wrong-content",
+              name: "CreateFile",
+              arguments: JSON.stringify({
+                path: "approval-test.txt",
+                content: "rejected\n",
+              }),
+            },
+          };
+        } else {
+          yield {
+            type: "text.delta",
+            text: "The artifact was created.",
+          };
+        }
+        yield { type: "done" };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "task-greenfield-wrong-content",
+        objective:
+          "Create a new file named approval-test.txt containing exactly the word approved.",
+        root,
+        candidate,
+        repositoryPolicy: "local_only",
+        permissionMode: "AUTO",
+        mode: "coding",
+        context: "The host verified the workspace root as the creation parent.",
+        contextEvidenceState: "INSUFFICIENT",
+        repositoryState: "non_empty",
+        greenfieldIntent: true,
+        greenfieldCreationPaths: ["approval-test.txt"],
+        stagedPaths: ["approval-test.txt"],
+        enforceTaskContract: true,
+        successCriteria: ["approval-test.txt is created"],
+        maxTurns: 3,
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        verifySuccessCriteria: (_task, ledger) => ({
+          pass: ledger.filesChanged.includes("approval-test.txt"),
+          satisfiedCriterionIds: ledger.filesChanged.includes(
+            "approval-test.txt",
+          )
+            ? ["criterion-1"]
+            : [],
+        }),
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "AUTO" as const,
+          signal: new AbortController().signal,
+          checkpoint,
+        }),
+      },
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.verified).toBe(false);
+    expect(result.completion.reasons).toEqual(
+      expect.arrayContaining([
+        "required objective proof is missing: deliverable-path-1",
+      ]),
+    );
+    expect(result.objectiveProof?.missingRequirements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          requirementId: "deliverable-path-1",
+          reason: expect.stringContaining("exact content"),
+        }),
+      ]),
+    );
+    expect(await readFile(path.join(root, "approval-test.txt"), "utf8")).toBe(
+      "rejected\n",
     );
     db.close();
   });

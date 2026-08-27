@@ -144,8 +144,91 @@ const terminalPhases = new Set<AgentPhase>([
   "cancelled",
 ]);
 
+const phaseTransitions: Readonly<Record<AgentPhase, ReadonlySet<AgentPhase>>> =
+  {
+    frame: new Set(["discover", "blocked", "failed", "cancelled"]),
+    discover: new Set(["analyze", "reflect", "blocked", "failed", "cancelled"]),
+    analyze: new Set([
+      "plan",
+      "act",
+      "reflect",
+      "verify",
+      "review",
+      "blocked",
+      "failed",
+      "cancelled",
+    ]),
+    plan: new Set([
+      "act",
+      "reflect",
+      "verify",
+      "review",
+      "blocked",
+      "failed",
+      "cancelled",
+    ]),
+    act: new Set([
+      "observe",
+      "reflect",
+      "verify",
+      "plan",
+      "blocked",
+      "failed",
+      "cancelled",
+    ]),
+    observe: new Set([
+      "act",
+      "reflect",
+      "verify",
+      "plan",
+      "review",
+      "blocked",
+      "failed",
+      "cancelled",
+    ]),
+    reflect: new Set([
+      "discover",
+      "plan",
+      "act",
+      "observe",
+      "verify",
+      "review",
+      "blocked",
+      "failed",
+      "cancelled",
+    ]),
+    verify: new Set([
+      "reflect",
+      "review",
+      "plan",
+      "act",
+      "blocked",
+      "failed",
+      "cancelled",
+    ]),
+    review: new Set([
+      "complete",
+      "blocked",
+      "plan",
+      "reflect",
+      "failed",
+      "cancelled",
+    ]),
+    complete: new Set(),
+    blocked: new Set(),
+    failed: new Set(),
+    cancelled: new Set(),
+  };
+
 export function terminalPhase(phase: AgentPhase): boolean {
   return terminalPhases.has(phase);
+}
+
+export function canTransitionTaskPhase(
+  from: AgentPhase,
+  to: AgentPhase,
+): boolean {
+  return from === to || phaseTransitions[from].has(to);
 }
 
 /**
@@ -207,11 +290,7 @@ export function createTaskLedger(input: {
 export function setTaskPhase(ledger: AgentTaskLedger, phase: AgentPhase): void {
   if (terminalPhases.has(ledger.phase))
     throw new Error(`Cannot transition terminal task phase ${ledger.phase}`);
-  if (
-    phase === "complete" &&
-    ledger.phase !== "review" &&
-    ledger.phase !== "verify"
-  )
+  if (!canTransitionTaskPhase(ledger.phase, phase))
     throw new Error(
       `Invalid task phase transition ${ledger.phase} -> ${phase}`,
     );

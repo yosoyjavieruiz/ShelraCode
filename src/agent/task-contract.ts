@@ -13,12 +13,27 @@ export interface ContractConstraint {
   source: "user" | "controller";
 }
 
+export type ArtifactExpectationType =
+  "exact_text" | "contains_text" | "excludes_text";
+
+/**
+ * Host-checkable content facts explicitly stated by the user.  The compiler
+ * only creates these for unambiguous wording; it never invents a semantic
+ * payload from a generic request.
+ */
+export interface ArtifactExpectation {
+  type: ArtifactExpectationType;
+  value: string;
+}
+
 export interface Deliverable {
   id: string;
   description: string;
   kind: string;
   /** Host-normalized artifacts that must be proven for this deliverable. */
   targetPaths?: string[];
+  /** Explicit content assertions that the host can verify without the model. */
+  artifactExpectations?: ArtifactExpectation[];
   required: boolean;
   dependencies: string[];
   evidence: string[];
@@ -132,6 +147,13 @@ export function cloneTaskContract(contract: TaskContract): TaskContract {
     deliverables: contract.deliverables.map((item) => ({
       ...item,
       ...(item.targetPaths ? { targetPaths: [...item.targetPaths] } : {}),
+      ...(item.artifactExpectations
+        ? {
+            artifactExpectations: item.artifactExpectations.map((item) => ({
+              ...item,
+            })),
+          }
+        : {}),
       dependencies: [...item.dependencies],
       evidence: [...item.evidence],
     })),
@@ -180,6 +202,47 @@ function hasExplicitTests(request: string): boolean {
   return /\b(?:test|tests|testing|spec|coverage|prueba|pruebas)\b/iu.test(
     request,
   );
+}
+
+function explicitArtifactExpectations(
+  request: string,
+  explicitPathCount: number,
+): ArtifactExpectation[] {
+  // Applying one content assertion to several paths would be a semantic
+  // guess.  Keep the compiler conservative until a future structured request
+  // format can bind each assertion to its own path.
+  if (explicitPathCount !== 1) return [];
+
+  const phrase = request
+    .match(
+      /\b(?:containing|with|que\s+contenga|con)\s+(?:exactly|exactamente)\s+(.+?)(?:[.!?]|$)/iu,
+    )?.[1]
+    ?.trim();
+  if (!phrase) return [];
+
+  const word = phrase.match(
+    /^(?:the\s+word|la\s+palabra)\s+["'`]?(\S+?)["'`]?$/iu,
+  )?.[1];
+  if (word) {
+    const value = word.replace(/[.,;:]+$/u, "").trim();
+    return value ? [{ type: "exact_text", value }] : [];
+  }
+
+  const quotedText = phrase.match(
+    /^(?:the\s+)?(?:text|content|texto|contenido)\s+(["'`])([\s\S]*?)\1$/iu,
+  )?.[2];
+  if (quotedText !== undefined)
+    return [{ type: "exact_text", value: quotedText }];
+
+  const directQuoted = phrase.match(/^["'`]([\s\S]*?)["'`]$/u)?.[1];
+  if (directQuoted !== undefined)
+    return [{ type: "exact_text", value: directQuoted }];
+
+  // “containing exactly approved” is explicit enough to check, while the
+  // parser intentionally rejects longer natural-language prose here.
+  if (/^[^\s.,;:]+$/u.test(phrase))
+    return [{ type: "exact_text", value: phrase }];
+  return [];
 }
 
 /**
@@ -254,6 +317,10 @@ export function compileTaskContract(
     input.mode === "review";
   const coding = input.mode === "coding";
   const score = defaultRisk(input, explicitPaths.length);
+  const artifactExpectations = explicitArtifactExpectations(
+    request,
+    explicitPaths.length,
+  );
   const constraints: ContractConstraint[] = unique([
     ...(input.constraints ?? []),
     ...explicitUserConstraints(request),
@@ -279,6 +346,7 @@ export function compileTaskContract(
         description: `The requested outcome is reflected in the approved path ${pathValue}.`,
         kind: "repository_artifact",
         targetPaths: [pathValue],
+        ...(artifactExpectations.length ? { artifactExpectations } : {}),
         required: true,
         dependencies: [],
         evidence: [`scope:${pathValue}`],

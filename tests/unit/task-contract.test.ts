@@ -80,3 +80,16 @@ test("classifies generic greenfield intent without naming a domain", () => {
   );
   expect(isGreenfieldObjective("Update src/auth.ts")).toBe(false);
 });
+
+test("compiles explicit artifact content expectations without guessing a plan", () => {
+  const contract = compileTaskContract({
+    originalRequest:
+      "Create a new file named approval-test.txt containing exactly the word approved.",
+    mode: "coding",
+    explicitPaths: ["approval-test.txt"],
+  });
+
+  expect(contract.deliverables[0]?.artifactExpectations).toEqual([
+    { type: "exact_text", value: "approved" },
+  ]);
+});

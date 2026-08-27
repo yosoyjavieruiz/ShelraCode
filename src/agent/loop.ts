@@ -11,7 +11,10 @@ import { ToolError, toolErrorDetails } from "../tools/errors.js";
 import type { ToolDefinition, ToolResult, ToolRisk } from "../tools/types.js";
 import { evaluateCompletionGate } from "./completion-gate.js";
 import { independentlyVerifyTask } from "./verifier.js";
-import { assessObjectiveProof } from "./objective-proof.js";
+import {
+  assessObjectiveProof,
+  inspectObjectiveArtifacts,
+} from "./objective-proof.js";
 import { compactTaskContext } from "./compaction.js";
 import {
   MAX_TOOL_CALLS_PER_RESPONSE,
@@ -32,6 +35,7 @@ import {
   type TaskNode,
   setTaskNodeStatus,
 } from "./task-graph.js";
+import { inspectTaskSchedule, scheduleNextTaskNode } from "./task-scheduler.js";
 export { recoverTextToolCalls } from "./tool-envelope.js";
 import { normalizeVerificationPlan } from "./verification-plan.js";
 import { isNeverRemotePath, scanSecrets } from "../privacy/policy.js";
@@ -1160,11 +1164,8 @@ export async function runAgent(
     };
   };
   const currentModelNode = (): TaskNode | undefined => {
-    if (planningMode !== "model" || !ledger.taskGraph?.currentNodeId)
-      return undefined;
-    return ledger.taskGraph.nodes.find(
-      (node) => node.id === ledger.taskGraph?.currentNodeId,
-    );
+    if (planningMode !== "model" || !ledger.taskGraph) return undefined;
+    return scheduleNextTaskNode(ledger.taskGraph);
   };
   const modelPlanHasUnfinishedNodes = (): boolean =>
     planningMode === "model" &&
@@ -1176,12 +1177,15 @@ export async function runAgent(
   const modelPlanHasRunnableContinuation = (): boolean =>
     planningMode === "model" &&
     Boolean(
-      ledger.taskGraph?.nodes.some(
-        (node) =>
-          node.status === "ready" ||
-          node.status === "running" ||
-          node.status === "verifying",
-      ),
+      ledger.taskGraph &&
+      (() => {
+        const schedule = inspectTaskSchedule(ledger.taskGraph);
+        return (
+          schedule.status === "ready" ||
+          schedule.status === "running" ||
+          schedule.status === "verifying"
+        );
+      })(),
     );
   const modelPlanIsComplete = (): boolean =>
     planningMode !== "model" ||
@@ -2474,9 +2478,14 @@ export async function runAgent(
     return (await check?.(checkpointId)) ?? true;
   };
 
-  const objectiveProofForLedger = () =>
+  const objectiveProofForLedger = async () =>
     contractCriteriaEnabled
-      ? assessObjectiveProof(taskContract, ledger, ledger.evidence)
+      ? assessObjectiveProof(
+          taskContract,
+          ledger,
+          ledger.evidence,
+          await inspectObjectiveArtifacts(task.root, taskContract, signal),
+        )
       : undefined;
 
   const completionFor = async (turns: number): Promise<AgentRunResult> => {
@@ -2502,7 +2511,7 @@ export async function runAgent(
         .every((criterion) => criterion.satisfied);
     const finalReviewPerformed = await reviewFinalDiff();
     const preserved = await userWorkPreserved();
-    const objectiveProof = objectiveProofForLedger();
+    const objectiveProof = await objectiveProofForLedger();
     let completion = evaluateCompletionGate({
       mode,
       objectiveSatisfied:
@@ -2671,7 +2680,7 @@ export async function runAgent(
       });
       persistLedger();
     }
-    const objectiveProof = objectiveProofForLedger();
+    const objectiveProof = await objectiveProofForLedger();
     const independent = options.independentVerifier
       ? await options.independentVerifier(task, ledger)
       : independentlyVerifyTask({

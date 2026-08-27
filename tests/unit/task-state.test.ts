@@ -4,6 +4,7 @@ import {
   createTaskLedger,
   recordTaskAction,
   recordVerificationRun,
+  canTransitionTaskPhase,
   setTaskPhase,
 } from "../../src/agent/task-state.js";
 
@@ -46,6 +47,26 @@ test("task ledger rejects an invalid lifecycle jump", () => {
   expect(() => setTaskPhase(ledger, "complete")).toThrow(
     /invalid task phase transition/i,
   );
+});
+
+test("task ledger exposes and enforces the phase transition authority", () => {
+  expect(canTransitionTaskPhase("frame", "discover")).toBe(true);
+  expect(canTransitionTaskPhase("discover", "verify")).toBe(false);
+  expect(canTransitionTaskPhase("review", "complete")).toBe(true);
+
+  const ledger = createTaskLedger({
+    id: "task-phase-authority",
+    objective: "Review the repository",
+    mode: "review",
+  });
+  expect(() => setTaskPhase(ledger, "verify")).toThrow(
+    /invalid task phase transition/i,
+  );
+  setTaskPhase(ledger, "discover");
+  setTaskPhase(ledger, "analyze");
+  setTaskPhase(ledger, "review");
+  setTaskPhase(ledger, "complete");
+  expect(ledger.phase).toBe("complete");
 });
 
 test("task ledger keeps blockers visible instead of silently completing", () => {

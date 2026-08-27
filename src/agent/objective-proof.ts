@@ -1,11 +1,15 @@
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import type { ContextEvidence, AgentTaskLedger } from "./task-state.js";
 import type {
   AcceptanceCriterion,
+  ArtifactExpectation,
   Deliverable,
   EvidenceRequirement,
   TaskContract,
 } from "./task-contract.js";
 import { isGreenfieldObjective } from "./task-contract.js";
+import { assertWorkspacePath } from "../shared/paths.js";
 
 export type ObjectiveProofStatus =
   "unproven" | "proven" | "failed" | "not_applicable";
@@ -35,7 +39,14 @@ export interface ObjectiveArtifactFact {
   path: string;
   exists: boolean;
   revision?: string;
+  /** Bounded text read by the host for explicit content expectations. */
+  content?: string;
+  /** A conservative explanation when existence or content could not be read. */
+  inspectionError?: string;
 }
+
+const MAX_OBJECTIVE_ARTIFACTS = 16;
+const MAX_OBJECTIVE_ARTIFACT_CHARS = 64_000;
 
 export interface ObjectiveProofAssessment {
   pass: boolean;
@@ -93,6 +104,115 @@ function artifactFact(
   target: string,
 ): ObjectiveArtifactFact | undefined {
   return facts.find((fact) => pathMatches(fact.path, target));
+}
+
+function normalizeArtifactText(value: string): string {
+  return value.replace(/\r\n?/gu, "\n").replace(/\n$/u, "");
+}
+
+function artifactExpectationPasses(
+  content: string,
+  expectation: ArtifactExpectation,
+): boolean {
+  const actual = normalizeArtifactText(content);
+  const expected = normalizeArtifactText(expectation.value);
+  if (expectation.type === "exact_text") return actual === expected;
+  if (expectation.type === "contains_text") return actual.includes(expected);
+  return !actual.includes(expected);
+}
+
+function artifactExpectationDescription(
+  expectation: ArtifactExpectation,
+): string {
+  if (expectation.type === "exact_text")
+    return `exact content ${JSON.stringify(expectation.value)}`;
+  if (expectation.type === "contains_text")
+    return `content containing ${JSON.stringify(expectation.value)}`;
+  return `content excluding ${JSON.stringify(expectation.value)}`;
+}
+
+function missingArtifactFact(
+  relativePath: string,
+  error: unknown,
+): ObjectiveArtifactFact {
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? String((error as { code?: unknown }).code)
+      : undefined;
+  if (code === "ENOENT" || code === "ENOTDIR")
+    return { path: relativePath, exists: false };
+  return {
+    path: relativePath,
+    exists: false,
+    inspectionError:
+      error instanceof Error
+        ? error.message
+        : "Host artifact inspection failed.",
+  };
+}
+
+/**
+ * Read only the concrete deliverable files needed by the objective proof.
+ * This is deliberately host-owned and bounded: model prose never supplies
+ * artifact content, and an unreadable/oversized/binary file cannot satisfy an
+ * explicit content expectation.
+ */
+export async function inspectObjectiveArtifacts(
+  root: string,
+  contract: TaskContract,
+  signal?: AbortSignal,
+): Promise<ObjectiveArtifactFact[]> {
+  const targets = unique(
+    contract.deliverables.flatMap(
+      (deliverable) => deliverable.targetPaths ?? [],
+    ),
+  ).slice(0, MAX_OBJECTIVE_ARTIFACTS);
+  const absoluteRoot = path.resolve(root);
+  const facts: ObjectiveArtifactFact[] = [];
+  for (const target of targets) {
+    if (signal?.aborted) break;
+    const relativePath = target.replaceAll("\\", "/");
+    try {
+      const absolutePath = await assertWorkspacePath(
+        absoluteRoot,
+        relativePath,
+      );
+      const metadata = await stat(absolutePath);
+      if (!metadata.isFile()) {
+        facts.push({
+          path: relativePath,
+          exists: true,
+          inspectionError: "The target is not a regular file.",
+        });
+        continue;
+      }
+      if (metadata.size > MAX_OBJECTIVE_ARTIFACT_CHARS) {
+        facts.push({
+          path: relativePath,
+          exists: true,
+          inspectionError: `The file exceeds the ${MAX_OBJECTIVE_ARTIFACT_CHARS}-character host inspection bound.`,
+        });
+        continue;
+      }
+      const content = await readFile(absolutePath, "utf8");
+      if (content.includes("\0")) {
+        facts.push({
+          path: relativePath,
+          exists: true,
+          inspectionError: "Binary content is not eligible for text proof.",
+        });
+        continue;
+      }
+      facts.push({
+        path: relativePath,
+        exists: true,
+        content,
+      });
+    } catch (error) {
+      facts.push(missingArtifactFact(relativePath, error));
+    }
+  }
+  return facts;
 }
 
 function addProof(
@@ -179,8 +299,32 @@ function assessDeliverable(
       nextAction = `Apply and verify the requested change in ${target}.`;
     } else if (fact && !fact.exists) {
       status = "failed";
-      reason = "The host artifact fact says the target does not exist.";
-      nextAction = `Restore or create ${target}, then verify the artifact again.`;
+      reason = fact.inspectionError
+        ? `The host could not inspect the target: ${fact.inspectionError}`
+        : "The host artifact fact says the target does not exist.";
+      nextAction = fact.inspectionError
+        ? `Make ${target} readable inside the workspace, then verify the artifact again.`
+        : `Restore or create ${target}, then verify the artifact again.`;
+    }
+    const expectations = deliverable.artifactExpectations ?? [];
+    if (status === "proven" && expectations.length > 0) {
+      if (fact?.content === undefined) {
+        status = "unproven";
+        reason = fact?.inspectionError
+          ? `The host cannot prove the ${artifactExpectationDescription(expectations[0]!)} because ${fact.inspectionError}`
+          : "Host content evidence is unavailable for the explicit artifact expectation.";
+        nextAction = `Read ${target} as text and verify the requested artifact content before completion.`;
+      } else {
+        const failedExpectation = expectations.find(
+          (expectation) =>
+            !artifactExpectationPasses(fact.content!, expectation),
+        );
+        if (failedExpectation) {
+          status = "failed";
+          reason = `The target does not satisfy the requested ${artifactExpectationDescription(failedExpectation)}.`;
+          nextAction = `Repair ${target} so its content satisfies the explicit artifact expectation, then verify again.`;
+        }
+      }
     }
     addProof(proofs, {
       requirementId: deliverable.id,

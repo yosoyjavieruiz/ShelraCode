@@ -257,3 +257,85 @@ test("treats project verification as not applicable only when the contract says 
     ]),
   );
 });
+
+test("rejects a created artifact whose explicit exact content is wrong", () => {
+  const contract = compileTaskContract({
+    id: "proof-exact-content",
+    originalRequest:
+      "Create a new file named approval-test.txt containing exactly the word approved.",
+    mode: "coding",
+    explicitPaths: ["approval-test.txt"],
+  });
+  const ledger = createTaskLedger({
+    id: "proof-exact-content",
+    objective: contract.objective,
+    mode: "coding",
+    contract,
+  });
+  addTaskEvidence(ledger, {
+    id: "repo",
+    kind: "file",
+    source: "approval-test.txt",
+    summary: "The requested artifact scope was checked.",
+    relevance: 1,
+    freshness: 1,
+  });
+  recordTaskAction(ledger, {
+    id: "write",
+    kind: "write",
+    target: "approval-test.txt",
+    status: "succeeded",
+  });
+  addReview(ledger);
+
+  const assessment = assessObjectiveProof(contract, ledger, ledger.evidence, [
+    { path: "approval-test.txt", exists: true, content: "rejected\n" },
+  ]);
+
+  expect(assessment.pass).toBe(false);
+  expect(assessment.missingRequirements).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        requirementId: "deliverable-path-1",
+        reason: expect.stringContaining("exact content"),
+      }),
+    ]),
+  );
+});
+
+test("proves an explicit exact artifact expectation after host inspection", () => {
+  const contract = compileTaskContract({
+    id: "proof-exact-content-pass",
+    originalRequest:
+      "Create a new file named approval-test.txt containing exactly the word approved.",
+    mode: "coding",
+    explicitPaths: ["approval-test.txt"],
+  });
+  const ledger = createTaskLedger({
+    id: "proof-exact-content-pass",
+    objective: contract.objective,
+    mode: "coding",
+    contract,
+  });
+  addTaskEvidence(ledger, {
+    id: "repo",
+    kind: "file",
+    source: "approval-test.txt",
+    summary: "The requested artifact scope was checked.",
+    relevance: 1,
+    freshness: 1,
+  });
+  recordTaskAction(ledger, {
+    id: "write",
+    kind: "write",
+    target: "approval-test.txt",
+    status: "succeeded",
+  });
+  addReview(ledger);
+
+  const assessment = assessObjectiveProof(contract, ledger, ledger.evidence, [
+    { path: "approval-test.txt", exists: true, content: "approved\n" },
+  ]);
+
+  expect(assessment.pass).toBe(true);
+});

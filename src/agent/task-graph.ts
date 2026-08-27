@@ -111,7 +111,11 @@ function node(
 ): TaskNode {
   return {
     ...input,
-    status: input.status ?? "blocked",
+    // A node whose dependencies are not complete is pending, not blocked.
+    // "blocked" is reserved for an explicit failure/clarification boundary;
+    // the scheduler must be able to release ordinary dependent work once its
+    // prerequisites pass.
+    status: input.status ?? "pending",
     attempts: input.attempts ?? 0,
   };
 }
