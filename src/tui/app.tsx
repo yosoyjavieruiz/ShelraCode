@@ -145,6 +145,8 @@ interface ActiveApproval {
   description: string;
   impact: string;
   scopeDescription?: string;
+  /** Repository root whose policy is being changed by this approval. */
+  repositoryRoot?: string;
   request?: ToolApprovalRequest;
   resolve?: (allowed: boolean) => void;
 }
@@ -792,9 +794,12 @@ export function AppShell(
         } else {
           const nextRules = addPermissionGrant(permissionRules(), grant);
           try {
-            await persistRepositorySettings(process.cwd(), {
-              permissionRules: nextRules,
-            });
+            await persistRepositorySettings(
+              approval.repositoryRoot ?? process.cwd(),
+              {
+                permissionRules: nextRules,
+              },
+            );
             setPermissionRules(nextRules);
           } catch (error) {
             allowed = false;
@@ -1935,6 +1940,7 @@ export function AppShell(
                         ? "This action can change or remove workspace state."
                         : "This action requires explicit permission.",
                     scopeDescription: permissionGrantScopeDescription(request),
+                    repositoryRoot: taskRoot,
                     request,
                     resolve: (allowed) => {
                       signal.removeEventListener("abort", denyOnAbort);
