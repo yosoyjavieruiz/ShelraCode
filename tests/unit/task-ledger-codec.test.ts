@@ -94,6 +94,35 @@ test("round-trips the complete ledger, route and context anchor", () => {
   expect(restored.snapshot.updatedRevision).toBe(7);
 });
 
+test("round-trips host-checkable symbol expectations in the contract", () => {
+  const ledger = createTaskLedger({
+    id: "runtime-symbol-contract",
+    objective: "Update src/value.ts to export function parse.",
+    mode: "coding",
+  });
+  ledger.contract = compileTaskContract({
+    id: ledger.id,
+    originalRequest: ledger.objective,
+    mode: ledger.mode,
+    explicitPaths: ["src/value.ts"],
+  });
+
+  const restored = restoreTaskRuntime(
+    JSON.parse(
+      serializeTaskRuntime({
+        ledger,
+        repositoryRoot: "D:/fixture/repository",
+      }),
+    ),
+  );
+
+  expect(restored.ok).toBe(true);
+  if (!restored.ok) return;
+  expect(
+    restored.snapshot.ledger.contract?.deliverables[0]?.artifactExpectations,
+  ).toEqual([{ type: "exported_symbol", value: "parse" }]);
+});
+
 test("rejects corrupt and future runtime snapshots with a typed result", () => {
   const corrupt = restoreTaskRuntime({ schemaVersion: 1, ledger: null });
   expect(corrupt).toEqual({

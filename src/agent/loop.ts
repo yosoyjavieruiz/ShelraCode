@@ -2742,6 +2742,69 @@ export async function runAgent(
       persistLedger();
     }
     const objectiveProof = await objectiveProofForLedger();
+    if (objectiveProof && !objectiveProof.pass) {
+      // A completed tool action is not proof that the user's requested
+      // artifact is correct. In model-planning mode, turn a host-detected
+      // objective gap into bounded semantic recovery before allowing the
+      // independent verifier or completion gate to produce a terminal
+      // blocker. The planner remains responsible for choosing the repair;
+      // the controller only carries the host evidence and preserves the
+      // failed node boundary.
+      if (planningMode === "model" && allowRecovery) {
+        const gapPaths = new Set(
+          objectiveProof.missingRequirements.flatMap((gap) =>
+            taskContract.deliverables
+              .find((deliverable) => deliverable.id === gap.requirementId)
+              ?.targetPaths?.map(normalizeWorkspacePath) ?? [],
+          ),
+        );
+        const candidateNodes = [
+          currentModelNode(),
+          lastModelMutationNodeId
+            ? ledger.taskGraph?.nodes.find(
+                (node) => node.id === lastModelMutationNodeId,
+              )
+            : undefined,
+        ].filter((node): node is TaskNode => Boolean(node));
+        const failedNode = candidateNodes.find(
+          (node) =>
+            gapPaths.size === 0 ||
+            node.scope.candidateFiles.some((candidate) =>
+              gapPaths.has(normalizeWorkspacePath(candidate)),
+            ),
+        );
+        if (failedNode && failedNode.status !== "passed")
+          updateTaskNode(failedNode.id, "failed");
+        const replanned = await appendModelRecoveryPlan(
+          objectiveProof.missingRequirements.map(
+            (gap) => `${gap.requirementId}: ${gap.reason}`,
+          ),
+          objectiveProof.nextActions,
+          "OBJECTIVE_PROOF_FAILED",
+          failedNode?.id,
+        );
+        if (replanned) {
+          unresolvedBlockers = 0;
+          repeatedErrorCount = 0;
+          lastErrorCode = undefined;
+          repeatedCallCount = 0;
+          lastCallSignature = undefined;
+          noActionCount = 0;
+          transitionPhase(ledger, "plan", loopOptions);
+          persistLedger();
+          return CONTINUE_AGENT_LOOP;
+        }
+      }
+      unresolvedBlockers = Math.max(1, unresolvedBlockers);
+      for (const gap of objectiveProof.missingRequirements.slice(0, 8))
+        addTaskBlocker(ledger, {
+          id: `${task.id}:objective-proof:${gap.requirementId}`,
+          summary: gap.reason,
+          recoverable: planningMode === "model",
+          suggestedAction: gap.nextAction,
+        });
+      persistLedger();
+    }
     const independent = options.independentVerifier
       ? await options.independentVerifier(task, ledger)
       : independentlyVerifyTask({

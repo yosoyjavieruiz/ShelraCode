@@ -988,6 +988,208 @@ test("does not mark a mutation node complete from a context read", async () => {
   }
 });
 
+test("replans when the host objective proof finds a missing exported symbol", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-planner-objective-proof-recovery-"),
+  );
+  await mkdir(path.join(root, "src"));
+  await writeFile(
+    path.join(root, "src", "value.ts"),
+    "export const value = 1;\n",
+    "utf8",
+  );
+  const objective = "Update src/value.ts to export function parse.";
+  const initialProposal = {
+    schemaVersion: 1,
+    proposalId: "llm-plan-objective-proof-1",
+    objective,
+    nodes: [
+      {
+        id: "update-value",
+        objective: "Update the value implementation in src/value.ts.",
+        kind: "workspace",
+        dependencies: [],
+        scope: {
+          candidateFiles: ["src/value.ts"],
+          allowedTools: ["ReadFile", "EditFile"],
+        },
+      },
+    ],
+  };
+  const recoveryProposal = {
+    schemaVersion: 1,
+    proposalId: "llm-plan-objective-proof-recovery-1",
+    objective,
+    supersedes: ["update-value"],
+    nodes: [
+      {
+        id: "export-parse",
+        objective: "Add the requested exported parse function to src/value.ts.",
+        kind: "workspace",
+        dependencies: [],
+        scope: {
+          candidateFiles: ["src/value.ts"],
+          allowedTools: ["ReadFile", "EditFile"],
+        },
+      },
+    ],
+  };
+  const provider = createScriptedProvider(
+    [
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "plan-objective-proof-1",
+            name: "ProposeTaskPlan",
+            arguments: JSON.stringify(initialProposal),
+          },
+        },
+        { type: "done" },
+      ],
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "read-value-1",
+            name: "ReadFile",
+            arguments: JSON.stringify({ path: "src/value.ts" }),
+          },
+        },
+        { type: "done" },
+      ],
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "edit-value-wrong-1",
+            name: "EditFile",
+            arguments: JSON.stringify({
+              path: "src/value.ts",
+              oldText: "export const value = 1;",
+              newText: "export const value = 2;",
+            }),
+          },
+        },
+        { type: "done" },
+      ],
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "plan-objective-proof-recovery-1",
+            name: "ProposeTaskPlan",
+            arguments: JSON.stringify(recoveryProposal),
+          },
+        },
+        { type: "done" },
+      ],
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "read-value-2",
+            name: "ReadFile",
+            arguments: JSON.stringify({ path: "src/value.ts" }),
+          },
+        },
+        { type: "done" },
+      ],
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "edit-value-correct-1",
+            name: "EditFile",
+            arguments: JSON.stringify({
+              path: "src/value.ts",
+              oldText: "export const value = 2;",
+              newText:
+                "export const value = 2;\n\nexport function parse() { return value; }\n",
+            }),
+          },
+        },
+        { type: "done" },
+      ],
+    ],
+    { stopAfter: true },
+  );
+  const db = new LocalCodeDatabase(":memory:");
+  const checkpoint = new CheckpointService(db, root);
+  try {
+    const result = await runAgent(
+      {
+        id: "planner-objective-proof-recovery-task",
+        objective,
+        root,
+        candidate: fakeAgentCandidate,
+        repositoryPolicy: "private",
+        permissionMode: "EDIT",
+        mode: "coding",
+        executionProfile: "structured",
+        planningMode: "model",
+        repositoryState: "non_empty",
+        enforceTaskContract: true,
+        verificationPolicy: "not_required",
+        maxTurns: 8,
+      },
+      {
+        provider,
+        tools: workspaceTools.filter((tool) =>
+          ["ReadFile", "EditFile"].includes(tool.name),
+        ),
+        toolChoice: "auto",
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "EDIT",
+          signal: new AbortController().signal,
+          checkpoint,
+        }),
+        reviewFinalDiff: () => true,
+        verifySuccessCriteria: async (_task, ledger) => ({
+          pass: true,
+          satisfiedCriterionIds: ledger.successCriteria.map(
+            (criterion) => criterion.id,
+          ),
+        }),
+        independentVerifier: async () => ({
+          pass: true,
+          confidence: 1,
+          issues: [],
+        }),
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.verified).toBe(true);
+    expect(result.ledger.recoveryContracts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ cause: "OBJECTIVE_PROOF_FAILED" }),
+      ]),
+    );
+    expect(result.ledger.planRevisions).toHaveLength(2);
+    expect(result.ledger.planRevisions[1]?.supersededNodeIds).toEqual([
+      "update-value",
+    ]);
+    expect(
+      result.ledger.taskGraph?.nodes.map((node) => [
+        node.id,
+        node.status,
+      ]),
+    ).toEqual([
+      ["update-value", "superseded"],
+      ["export-parse", "passed"],
+    ]);
+    expect(result.objectiveProof?.pass).toBe(true);
+    expect(await Bun.file(path.join(root, "src", "value.ts")).text()).toContain(
+      "export function parse",
+    );
+    expect(provider.requests).toHaveLength(6);
+  } finally {
+    db.close();
+  }
+});
+
 test("turns a plan-scope conflict into an LLM-authored monotonic repair node", async () => {
   const root = await mkdtemp(
     path.join(os.tmpdir(), "localcode-planner-recovery-"),
