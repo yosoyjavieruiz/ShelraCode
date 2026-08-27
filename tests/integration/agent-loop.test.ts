@@ -262,6 +262,77 @@ describe("agent loop", () => {
     db.close();
   });
 
+  test("compatibility execution advances one authoritative graph node at a time", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-compatibility-scheduler-"),
+    );
+    await mkdir(path.join(root, "src"));
+    await writeFile(
+      path.join(root, "src", "value.ts"),
+      "export const value = 1;\n",
+      "utf8",
+    );
+    const db = new LocalCodeDatabase(":memory:");
+    const checkpoint = new CheckpointService(db, root);
+    const result = await runAgent(
+      {
+        id: "compatibility-scheduler-task",
+        objective: "Update src/value.ts from 1 to 2.",
+        root,
+        candidate,
+        repositoryPolicy: "private",
+        permissionMode: "EDIT",
+        mode: "coding",
+        planningMode: "compatibility",
+        context: "src/value.ts contains export const value = 1;",
+        contextEvidenceState: "SUFFICIENT",
+        successCriteria: ["src/value.ts is updated"],
+        verificationPolicy: "not_required",
+        maxTurns: 5,
+      },
+      {
+        provider: new FakeAgentProvider(false),
+        tools: workspaceTools,
+        reviewFinalDiff: () => true,
+        verifySuccessCriteria: (_task, ledger) => ({
+          pass: ledger.filesChanged.includes("src/value.ts"),
+          satisfiedCriterionIds: ledger.filesChanged.includes("src/value.ts")
+            ? ["criterion-1"]
+            : [],
+        }),
+        independentVerifier: async () => ({
+          pass: true,
+          confidence: 1,
+          issues: [],
+        }),
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "EDIT",
+          signal: new AbortController().signal,
+          checkpoint,
+        }),
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.ledger.taskGraph?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "discover", status: "passed" }),
+        expect.objectContaining({ id: "analyze", status: "passed" }),
+        expect.objectContaining({
+          id: "mutate-src-value-ts",
+          status: "passed",
+        }),
+      ]),
+    );
+    expect(
+      result.ledger.taskGraph?.nodes.filter((node) =>
+        ["running", "verifying"].includes(node.status),
+      ),
+    ).toHaveLength(0);
+    db.close();
+  });
+
   test("allows a host-verified explicit greenfield file when repository evidence is otherwise insufficient", async () => {
     const root = await mkdtemp(
       path.join(os.tmpdir(), "localcode-greenfield-file-loop-"),

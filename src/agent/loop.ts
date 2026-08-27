@@ -1217,10 +1217,42 @@ export async function runAgent(
     status: Parameters<typeof setTaskNodeStatus>[2],
   ): void => {
     if (!ledger.taskGraph || !nodeId) return;
+    const target = ledger.taskGraph.nodes.find((node) => node.id === nodeId);
+    if (!target) return;
+    // Compatibility execution has a controller-authored graph too. Do not
+    // let a raw tool observation activate or pass a dependent node while an
+    // earlier node is still running; the model-planning path already uses the
+    // same scheduler through currentModelNode(). Failed/blocked transitions
+    // remain allowed so the controller can preserve the actual failure.
+    if (
+      planningMode !== "model" &&
+      ["running", "verifying", "passed"].includes(status) &&
+      !["running", "verifying"].includes(target.status)
+    ) {
+      const schedule = inspectTaskSchedule(ledger.taskGraph);
+      if (schedule.currentNodeId !== nodeId) return;
+    }
     if (!setTaskNodeStatus(ledger.taskGraph, nodeId, status)) return;
     if (ledger.plan?.source === "model") projectModelPlan();
     persistLedger();
     if (ledger.plan?.source === "model") emitPlan();
+  };
+  const reconcileCompatibilitySchedule = (): void => {
+    if (planningMode === "model" || !ledger.taskGraph) return;
+    inspectTaskSchedule(ledger.taskGraph);
+    const discover = ledger.taskGraph.nodes.find(
+      (node) => node.id === "discover",
+    );
+    const analyze = ledger.taskGraph.nodes.find(
+      (node) => node.id === "analyze",
+    );
+    // The compatibility controller owns repository framing and contract
+    // compilation. Once fresh discovery has passed, that bounded analysis
+    // step is complete and the scheduler may release the first real work
+    // node. Before that point, dependent work must remain pending.
+    if (discover?.status === "passed" && analyze?.status === "ready")
+      updateTaskNode("analyze", "passed");
+    inspectTaskSchedule(ledger.taskGraph);
   };
   const mutationNodeForPath = (
     target: string | undefined,
@@ -1706,8 +1738,9 @@ export async function runAgent(
         ? "passed"
         : "running",
   );
+  reconcileCompatibilitySchedule();
   transitionPhase(ledger, "analyze", loopOptions);
-  updateTaskNode("analyze", "running");
+  reconcileCompatibilitySchedule();
   persistLedger();
   if (
     planningMode === "compatibility" &&
@@ -2229,6 +2262,7 @@ export async function runAgent(
       lastErrorCode = undefined;
       repeatedErrorCount = 0;
     }
+    reconcileCompatibilitySchedule();
     persistLedger();
     options.trace?.record({
       taskId: task.id,
@@ -3167,6 +3201,7 @@ export async function runAgent(
       pendingRecoveryInstruction = undefined;
     }
     syncModelPlanScope();
+    reconcileCompatibilitySchedule();
     refreshStagedWorkUnitPrompt();
     const activeWorkUnitTarget = criteriaWritePaths[0] ?? objectivePaths[0];
     const activeTargetExists =
