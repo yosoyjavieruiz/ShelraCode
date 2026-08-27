@@ -114,6 +114,76 @@ test("rejects corrupt and future runtime snapshots with a typed result", () => {
   });
 });
 
+test("rejects a runtime whose task identity or graph references are inconsistent", () => {
+  const ledger = createTaskLedger({
+    id: "runtime-integrity",
+    objective: "Inspect the repository",
+    mode: "workspace_question",
+  });
+  ledger.taskGraph = {
+    rootObjective: ledger.objective,
+    globalConstraints: [],
+    currentNodeId: "missing-node",
+    nodes: [
+      {
+        id: "discover",
+        objective: "Discover",
+        dependencies: [],
+        status: "ready",
+        scope: { candidateFiles: [], allowedTools: ["ReadFile"] },
+        contextRequirements: ["repository"],
+        acceptance: ["evidence"],
+        attempts: 0,
+      },
+    ],
+  };
+  const snapshot = JSON.parse(
+    serializeTaskRuntime({
+      ledger,
+      repositoryRoot: "D:/fixture/repository",
+    }),
+  ) as Record<string, unknown>;
+
+  const invalidGraph = restoreTaskRuntime(snapshot);
+  expect(invalidGraph.ok).toBe(false);
+  if (!invalidGraph.ok)
+    expect(invalidGraph.error.reason).toContain("missing or invalid");
+
+  (snapshot.ledger as Record<string, unknown>).taskGraph = {
+    ...((snapshot.ledger as Record<string, unknown>).taskGraph as Record<
+      string,
+      unknown
+    >),
+    currentNodeId: "discover",
+  };
+  snapshot.taskId = "different-task";
+  const invalidIdentity = restoreTaskRuntime(snapshot);
+  expect(invalidIdentity.ok).toBe(false);
+  if (!invalidIdentity.ok)
+    expect(invalidIdentity.error.reason).toContain("ledger id");
+});
+
+test("rejects unbounded or malformed nested task state before resume", () => {
+  const ledger = createTaskLedger({
+    id: "runtime-nested-integrity",
+    objective: "Inspect the repository",
+    mode: "workspace_question",
+  });
+  const snapshot = JSON.parse(
+    serializeTaskRuntime({
+      ledger,
+      repositoryRoot: "D:/fixture/repository",
+    }),
+  ) as Record<string, unknown>;
+  const nestedLedger = snapshot.ledger as Record<string, unknown>;
+  nestedLedger.actions = Array.from({ length: 513 }, () => ({}));
+
+  const restored = restoreTaskRuntime(snapshot);
+  expect(restored.ok).toBe(false);
+  if (!restored.ok)
+    expect(restored.error.reason).toContain("missing or invalid");
+});
+
 test("does not persist raw model or tool output fields", () => {
   const ledger = createTaskLedger({
     id: "runtime-redaction",
