@@ -1279,6 +1279,9 @@ export function AppShell(
               signal,
               explicitPaths: contextFiles(),
               memoryFacts: semanticMemoryFacts,
+              memoryIds: resumeRuntime?.contextAnchor.memoryIds,
+              instructionSources:
+                resumeRuntime?.contextAnchor.instructionSources,
               logger: taskLogger,
             })
           : {
@@ -1307,6 +1310,14 @@ export function AppShell(
           )
             throw new Error(
               "Cannot resume this task because the repository revision changed.",
+            );
+          if (
+            resumeRuntime.repositoryWorkingTreeRevision &&
+            routingContext.snapshot?.workingTreeRevision !==
+              resumeRuntime.repositoryWorkingTreeRevision
+          )
+            throw new Error(
+              "Cannot resume this task because the working-tree state changed.",
             );
         }
         if (routingContext.snapshot) {
@@ -1643,6 +1654,9 @@ export function AppShell(
                 snapshot: routingContext.snapshot,
                 explicitPaths: contextFiles(),
                 memoryFacts: semanticMemoryFacts,
+                memoryIds: resumeRuntime?.contextAnchor.memoryIds,
+                instructionSources:
+                  resumeRuntime?.contextAnchor.instructionSources,
                 logger: taskLogger,
               })
             : routingContext;
@@ -1735,6 +1749,12 @@ export function AppShell(
               ]),
             ],
             proofGapIds: [...(resumeRuntime?.contextAnchor.proofGapIds ?? [])],
+            ...(agentContext.snapshot?.workingTreeRevision
+              ? {
+                  repositoryWorkingTreeRevision:
+                    agentContext.snapshot.workingTreeRevision,
+                }
+              : {}),
             ...(resumeRuntime?.contextAnchor.summary
               ? { summary: resumeRuntime.contextAnchor.summary }
               : {}),
@@ -1751,6 +1771,12 @@ export function AppShell(
                 sessionId,
                 ...(agentContext.snapshot?.revision
                   ? { repositoryRevision: agentContext.snapshot.revision }
+                  : {}),
+                ...(agentContext.snapshot?.workingTreeRevision
+                  ? {
+                      repositoryWorkingTreeRevision:
+                        agentContext.snapshot.workingTreeRevision,
+                    }
                   : {}),
                 route: runtimeRoute,
                 contextAnchor: runtimeContextAnchor,

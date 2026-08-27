@@ -484,7 +484,12 @@ async function buildRepositoryContextInternal(
     : undefined;
   const ordered = orderFiles(
     factQuestion ? rootFactFiles(files, snapshot) : files,
-    [...explicit, ...relevantMatches, ...(intelligenceSelection?.files ?? [])],
+    [
+      ...explicit,
+      ...relevantMatches,
+      ...(intelligenceSelection?.files ?? []),
+      ...(options.instructionSources ?? []),
+    ],
     options.objective,
   );
   const loadedInstructions = factQuestion
@@ -518,7 +523,9 @@ async function buildRepositoryContextInternal(
   const memoryFacts = selectRelevantMemory(
     options.memoryFacts ?? [],
     options.objective,
-    snapshot.revision,
+    snapshot.workingTreeRevision ?? snapshot.revision,
+    6,
+    options.memoryIds,
   );
   let usedChars = 0;
   let containsHighConfidenceSecret = false;

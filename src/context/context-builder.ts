@@ -51,6 +51,10 @@ export interface RepositoryContextOptions {
   snapshot?: RepositorySnapshot;
   /** Historical facts used only as bounded retrieval hints. */
   memoryFacts?: readonly MemoryFact[];
+  /** Memory IDs retained by a resumed task; still subject to freshness gates. */
+  memoryIds?: readonly string[];
+  /** Instruction paths retained by a resumed task. */
+  instructionSources?: readonly string[];
   /** Build bounded structural repository evidence for the current objective. */
   buildIntelligence?: boolean;
   /** Load project Skill metadata and only bodies matching the objective. */

@@ -76,6 +76,39 @@ test("does not treat unversioned or mixed-revision observed facts as current", (
   expect(selectRelevantMemory(facts, "parser", "current")).toEqual([]);
 });
 
+test("rehydrates pinned relevant memory before lexical ranking without bypassing freshness", () => {
+  const pinned = {
+    id: memoryFactId("repo", "episodic", "prior-task"),
+    repository: "repo",
+    kind: "episodic" as const,
+    fact: "The parser task previously confirmed the fixture convention.",
+    evidence: [{ source: "tests/parser.test.ts", revision: "old" }],
+    provenance: "observed" as const,
+    confidence: 1,
+    scope: ["parser"],
+    tags: ["fixture"],
+    createdAt: "2026-08-25T00:00:00.000Z",
+    lastValidatedAt: "2026-08-25T00:00:00.000Z",
+  };
+  const unrelated = {
+    ...pinned,
+    id: memoryFactId("repo", "episodic", "unrelated"),
+    fact: "The billing task uses a separate fixture convention.",
+    evidence: [{ source: "tests/billing.test.ts", revision: "current" }],
+    scope: ["billing"],
+    tags: ["billing"],
+  };
+
+  expect(
+    selectRelevantMemory([pinned, unrelated], "parser", "current", 1, [
+      pinned.id,
+    ]),
+  ).toEqual([unrelated]);
+  expect(
+    selectRelevantMemory([pinned, unrelated], "parser", "old", 1, [pinned.id]),
+  ).toEqual([pinned]);
+});
+
 test("episodic memory redacts sensitive-looking objective content", () => {
   const fact = createTaskEpisodeMemoryFact({
     repository: "repo",

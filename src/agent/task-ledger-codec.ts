@@ -624,6 +624,8 @@ function validAnchor(value: unknown): boolean {
       typeof anchor.activeNodeId === "string") &&
     (anchor.repositoryRevision === undefined ||
       typeof anchor.repositoryRevision === "string") &&
+    (anchor.repositoryWorkingTreeRevision === undefined ||
+      typeof anchor.repositoryWorkingTreeRevision === "string") &&
     (anchor.summary === undefined || typeof anchor.summary === "string"),
   );
 }
@@ -773,6 +775,11 @@ export function restoreTaskRuntime(
     typeof snapshot.repositoryRevision !== "string"
   )
     return invalid("snapshot repository revision is invalid");
+  if (
+    snapshot.repositoryWorkingTreeRevision !== undefined &&
+    typeof snapshot.repositoryWorkingTreeRevision !== "string"
+  )
+    return invalid("snapshot working-tree revision is invalid");
   if (
     snapshot.activeNodeId !== undefined &&
     typeof snapshot.activeNodeId !== "string"

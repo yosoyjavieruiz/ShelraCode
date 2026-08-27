@@ -79,10 +79,12 @@ export function selectRelevantMemory(
   objective: string,
   revision?: string,
   limit = 6,
+  pinnedIds: readonly string[] = [],
 ): MemoryFact[] {
   const objectiveTerms = terms(objective);
-  return facts
-    .filter((fact) => isFresh(fact, revision))
+  const freshFacts = facts.filter((fact) => isFresh(fact, revision));
+  const pinned = freshFacts.filter((fact) => pinnedIds.includes(fact.id));
+  const ranked = freshFacts
     .map((fact) => {
       const searchable = terms(
         `${fact.fact} ${fact.scope.join(" ")} ${fact.tags.join(" ")}`,
@@ -98,8 +100,12 @@ export function selectRelevantMemory(
     })
     .filter(({ relevance }) => relevance > 0)
     .sort((left, right) => right.relevance - left.relevance)
-    .slice(0, Math.max(0, limit))
     .map(({ fact }) => fact);
+  const selected = [
+    ...pinned,
+    ...ranked.filter((fact) => !pinned.some((item) => item.id === fact.id)),
+  ];
+  return selected.slice(0, Math.max(0, limit));
 }
 
 export function memoryFactId(

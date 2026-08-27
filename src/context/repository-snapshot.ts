@@ -1,4 +1,5 @@
-import { readdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { runCommand } from "../shared/process.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
@@ -25,6 +26,8 @@ export interface RepositorySnapshot {
   cwd: string;
   gitRoot?: string;
   revision?: string;
+  /** Hash of the checked-out branch and current working-tree state. */
+  workingTreeRevision?: string;
   branch?: string;
   topLevelEntries: string[];
   manifests: ProjectManifest[];
@@ -46,7 +49,7 @@ export function repositorySnapshotMemoryFacts(
   repository = snapshot.gitRoot ?? snapshot.cwd,
   now = new Date().toISOString(),
 ): MemoryFact[] {
-  const revision = snapshot.revision;
+  const revision = snapshot.workingTreeRevision ?? snapshot.revision;
   const evidence = (sources: readonly string[]) =>
     sources.slice(0, 12).map((source) => ({
       source,
@@ -225,6 +228,112 @@ async function gitValue(
   return value || undefined;
 }
 
+const MAX_WORKTREE_PATHS = 512;
+const MAX_WORKTREE_FILE_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Produce a content-aware identity for the current checkout. Git HEAD alone
+ * is insufficient for resume safety because staged, unstaged and untracked
+ * changes can exist without changing the commit. The digest contains only
+ * hashes and metadata, never file contents or secrets.
+ */
+async function gitWorkingTreeRevision(
+  root: string,
+  revision: string,
+  branch: string | undefined,
+  signal?: AbortSignal,
+  logger?: LocalCodeLogger,
+): Promise<string | undefined> {
+  const status = await runCommand(
+    "git",
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    {
+      intent: "read",
+      cwd: root,
+      timeoutMs: 5_000,
+      signal,
+      maxOutputChars: 1_000_000,
+      logger,
+    },
+  );
+  const changed = await runCommand(
+    "git",
+    ["diff", "--name-only", "HEAD", "-z"],
+    {
+      intent: "read",
+      cwd: root,
+      timeoutMs: 5_000,
+      signal,
+      maxOutputChars: 1_000_000,
+      logger,
+    },
+  );
+  const untracked = await runCommand(
+    "git",
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    {
+      intent: "read",
+      cwd: root,
+      timeoutMs: 5_000,
+      signal,
+      maxOutputChars: 1_000_000,
+      logger,
+    },
+  );
+  if (
+    status.exitCode !== 0 ||
+    changed.exitCode !== 0 ||
+    untracked.exitCode !== 0 ||
+    status.stdoutTruncated ||
+    changed.stdoutTruncated ||
+    untracked.stdoutTruncated
+  )
+    return undefined;
+  const paths = [
+    ...new Set(
+      `${changed.stdout}\0${untracked.stdout}`
+        .split("\0")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ].sort();
+  if (paths.length > MAX_WORKTREE_PATHS) return undefined;
+
+  const digest = createHash("sha256");
+  digest.update(`head:${revision}\nbranch:${branch ?? ""}\n`);
+  digest.update(status.stdout);
+  for (const relative of paths) {
+    if (signal?.aborted)
+      throw new DOMException("Working-tree fingerprint aborted", "AbortError");
+    const absolute = path.resolve(root, relative);
+    const relativeCheck = path.relative(path.resolve(root), absolute);
+    if (
+      path.isAbsolute(relative) ||
+      relativeCheck === ".." ||
+      relativeCheck.startsWith(`..${path.sep}`)
+    )
+      return undefined;
+    digest.update(`\npath:${relative}\n`);
+    try {
+      const information = await stat(absolute);
+      if (!information.isFile() || information.size > MAX_WORKTREE_FILE_BYTES)
+        return undefined;
+      digest.update(await readFile(absolute));
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+      ) {
+        digest.update("<missing>");
+        continue;
+      }
+      return undefined;
+    }
+  }
+  return digest.digest("hex");
+}
+
 export async function inspectRepositorySnapshot(
   root: string,
   signal?: AbortSignal,
@@ -320,10 +429,21 @@ export async function inspectRepositorySnapshot(
     logger,
   );
   const gitStatus = await gitValue(absoluteRoot, ["status", "--short"], logger);
+  const workingTreeRevision =
+    gitRoot && revision
+      ? await gitWorkingTreeRevision(
+          absoluteRoot,
+          revision,
+          branch,
+          signal,
+          logger,
+        )
+      : undefined;
   return {
     cwd: absoluteRoot,
     ...(gitRoot ? { gitRoot } : {}),
     ...(revision ? { revision } : {}),
+    ...(workingTreeRevision ? { workingTreeRevision } : {}),
     ...(branch ? { branch } : {}),
     topLevelEntries,
     manifests,

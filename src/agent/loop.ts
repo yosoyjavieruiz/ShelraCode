@@ -1136,7 +1136,11 @@ export async function runAgent(
   const currentRuntimeRehydration = (): TaskRuntimeRehydration => {
     const baseAnchor =
       restoredRuntime?.contextAnchor ??
-      deriveTaskContextAnchor(ledger, restoredRuntime?.repositoryRevision);
+      deriveTaskContextAnchor(
+        ledger,
+        restoredRuntime?.repositoryRevision,
+        restoredRuntime?.repositoryWorkingTreeRevision,
+      );
     return {
       contextAnchor: {
         ...baseAnchor,

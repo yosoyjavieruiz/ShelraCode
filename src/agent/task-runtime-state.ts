@@ -17,6 +17,7 @@ export interface TaskContextAnchor {
   proofGapIds: string[];
   activeNodeId?: string;
   repositoryRevision?: string;
+  repositoryWorkingTreeRevision?: string;
   summary?: string;
 }
 
@@ -46,6 +47,7 @@ export interface TaskRuntimeSnapshot {
   sessionId?: string;
   repositoryRoot: string;
   repositoryRevision?: string;
+  repositoryWorkingTreeRevision?: string;
   ledger: AgentTaskLedger;
   route?: TaskRuntimeRouteIdentity;
   contextAnchor: TaskContextAnchor;
@@ -61,6 +63,7 @@ export interface TaskRuntimeSnapshotInput {
   repositoryRoot: string;
   sessionId?: string;
   repositoryRevision?: string;
+  repositoryWorkingTreeRevision?: string;
   route?: TaskRuntimeRouteIdentity;
   contextAnchor?: Partial<TaskContextAnchor>;
   activeNodeId?: string;
@@ -77,6 +80,7 @@ function unique(values: readonly string[]): string[] {
 export function deriveTaskContextAnchor(
   ledger: AgentTaskLedger,
   repositoryRevision: string | undefined,
+  repositoryWorkingTreeRevision?: string,
 ): TaskContextAnchor {
   return {
     sourceIds: unique([
@@ -91,6 +95,7 @@ export function deriveTaskContextAnchor(
       ? { activeNodeId: ledger.taskGraph.currentNodeId }
       : {}),
     ...(repositoryRevision ? { repositoryRevision } : {}),
+    ...(repositoryWorkingTreeRevision ? { repositoryWorkingTreeRevision } : {}),
   };
 }
 
@@ -103,6 +108,7 @@ export function createTaskRuntimeSnapshot(
   const anchor = deriveTaskContextAnchor(
     input.ledger,
     input.repositoryRevision,
+    input.repositoryWorkingTreeRevision,
   );
   const contextAnchor: TaskContextAnchor = {
     ...anchor,
@@ -139,6 +145,9 @@ export function createTaskRuntimeSnapshot(
     repositoryRoot,
     ...(input.repositoryRevision
       ? { repositoryRevision: input.repositoryRevision }
+      : {}),
+    ...(input.repositoryWorkingTreeRevision
+      ? { repositoryWorkingTreeRevision: input.repositoryWorkingTreeRevision }
       : {}),
     ledger: structuredClone(input.ledger),
     ...(input.route ? { route: structuredClone(input.route) } : {}),
