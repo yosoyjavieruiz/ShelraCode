@@ -17,7 +17,7 @@ if (!logPath) {
       ([, left], [, right]) => right - left,
     );
 
-    console.log("LocalCode agent log report");
+    console.log("ShelraCode agent log report");
     console.log(`File: ${path.resolve(logPath)}`);
     console.log(`Records: ${summary.totalRecords}`);
     console.log(`Malformed lines: ${parsed.malformedLines}`);

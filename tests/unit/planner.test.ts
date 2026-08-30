@@ -4,6 +4,7 @@ import {
   createMonotonicPlan,
   normalizeAppendOnlyRecoveryPlanProposal,
   normalizeRecoveryPlanProposal,
+  parsePlanProposal,
   validatePlanProposal,
   type PlanProposal,
 } from "../../src/agent/planner.js";
@@ -482,11 +483,198 @@ test("keeps repository work out of semantic nodes and requires mutation for a fr
     ],
   });
 
-  const errors = validatePlanProposal(invalidSemantic, {
+  const result = validatePlanProposal(invalidSemantic, {
     ...context,
     requireWorkspaceMutation: true,
-  }).errors.join(" ");
+  });
 
-  expect(errors).toMatch(/semantic node.*workspace observation or mutation/i);
-  expect(errors).toMatch(/at least one workspace node.*mutation tool/i);
+  // The keyword-mention is a warning now (structural emptiness of a
+  // semantic node's tools/scope is the real safety guarantee), but an
+  // all-semantic plan with zero real workspace nodes still hard-fails the
+  // "must include a mutation path" requirement.
+  expect(result.warnings.join(" ")).toMatch(
+    /semantic node.*mentions a mutation-like word/i,
+  );
+  expect(result.errors.join(" ")).toMatch(
+    /at least one workspace node.*mutation tool/i,
+  );
+});
+
+test("keeps valid array entries instead of discarding the whole array when one entry has the wrong type", () => {
+  const parsed = parsePlanProposal({
+    schemaVersion: 1,
+    proposalId: "proposal-mixed-types",
+    objective: "Implement the counter app.",
+    nodes: [
+      {
+        id: "implement-counter-app",
+        objective: "Create the counter app entry point.",
+        // A small local model occasionally emits a stray non-string element
+        // (here an object instead of a plain path). That must not silently
+        // wipe out the otherwise-valid candidateFiles/dependencies arrays.
+        dependencies: ["scaffold", { not: "a string" }],
+        kind: "workspace",
+        scope: {
+          candidateFiles: ["index.html", 42],
+          allowedTools: ["CreateFile"],
+        },
+      },
+    ],
+  });
+
+  expect(parsed?.nodes[0]?.dependencies).toEqual(["scaffold"]);
+  expect(parsed?.nodes[0]?.scope?.candidateFiles).toEqual(["index.html"]);
+});
+
+test("coerces a bare string into a one-element array for candidateFiles/allowedTools", () => {
+  const parsed = parsePlanProposal({
+    schemaVersion: 1,
+    proposalId: "proposal-bare-string-scope",
+    objective: "Implement the counter app.",
+    nodes: [
+      {
+        id: "implement-counter-app",
+        objective: "Create the counter app entry point.",
+        dependencies: [],
+        kind: "workspace",
+        // A model not under strict grammar-constrained decoding sometimes
+        // emits a single-item list as a bare string instead of a
+        // one-element array.
+        scope: {
+          candidateFiles: "index.html",
+          allowedTools: "CreateFile",
+        },
+      },
+    ],
+  });
+
+  expect(parsed?.nodes[0]?.scope?.candidateFiles).toEqual(["index.html"]);
+  expect(parsed?.nodes[0]?.scope?.allowedTools).toEqual(["CreateFile"]);
+});
+
+test("accepts a semantic node that reasons about validation over already-supplied evidence, with only a warning", () => {
+  const validated = proposal({
+    nodes: [
+      {
+        id: "validate-app",
+        objective:
+          "Validate that the implementation satisfies the acceptance criteria already supplied as evidence.",
+        kind: "semantic",
+        dependencies: [],
+        scope: { candidateFiles: [], allowedTools: [] },
+      },
+    ],
+  });
+
+  const result = validatePlanProposal(validated, context);
+
+  expect(result.valid).toBe(true);
+  expect(result.errors).toEqual([]);
+  expect(result.warnings.join(" ")).toMatch(/validate-app.*observation-like/i);
+});
+
+test("accepts a semantic node that describes an unambiguous repository read, with only a warning", () => {
+  // Free-text keyword matching cannot distinguish a genuinely mislabeled
+  // node from one whose objective merely mentions what a LATER node will
+  // read (e.g. "based on what reading the entry point reveals, decide...").
+  // The structural guarantee (empty tools/scope) is what actually prevents
+  // a semantic node from touching the workspace, so this is a warning.
+  const proposalWithRead = proposal({
+    nodes: [
+      {
+        id: "read-and-summarize",
+        objective: "Read src/auth.ts and summarize the login flow.",
+        kind: "semantic",
+        dependencies: [],
+        scope: { candidateFiles: [], allowedTools: [] },
+      },
+    ],
+  });
+
+  const result = validatePlanProposal(proposalWithRead, context);
+
+  expect(result.valid).toBe(true);
+  expect(result.errors).toEqual([]);
+  expect(result.warnings.join(" ")).toMatch(
+    /read-and-summarize.*repository-observation word/i,
+  );
+});
+
+test("accepts an initial plan that only investigates first, deferring the mutation node to the next revision", () => {
+  // A model naturally wants to inspect the entry point before deciding what
+  // to change; the very first proposal for a coding task should not be
+  // forced to already commit to a mutation target before it has read
+  // anything.
+  const investigateFirst = proposal({
+    nodes: [
+      {
+        id: "inspect-entry-point",
+        objective:
+          "Inspect the entry point to determine how the counter feature should be added.",
+        kind: "workspace",
+        dependencies: [],
+        scope: { candidateFiles: ["index.html"], allowedTools: ["ReadFile"] },
+      },
+    ],
+  });
+
+  const result = validatePlanProposal(investigateFirst, {
+    ...context,
+    requireWorkspaceMutation: true,
+  });
+
+  expect(result.valid).toBe(true);
+  expect(result.errors).toEqual([]);
+  expect(result.warnings.join(" ")).toMatch(
+    /at least one workspace node.*mutation tool/i,
+  );
+});
+
+test("still hard-rejects a plan with no real workspace node at all when a mutation is required", () => {
+  const allSemantic = proposal({
+    nodes: [
+      {
+        id: "think-about-it",
+        objective: "Decide the best approach for the counter feature.",
+        kind: "semantic",
+        dependencies: [],
+        scope: { candidateFiles: [], allowedTools: [] },
+      },
+    ],
+  });
+
+  const result = validatePlanProposal(allSemantic, {
+    ...context,
+    requireWorkspaceMutation: true,
+  });
+
+  expect(result.valid).toBe(false);
+  expect(result.errors.join(" ")).toMatch(
+    /at least one workspace node.*mutation tool/i,
+  );
+});
+
+test("still hard-rejects a continuation plan (existing nodes present) that never adds a mutation node", () => {
+  const stillNoMutation = proposal({
+    nodes: [
+      {
+        id: "inspect-again",
+        objective: "Inspect another file before deciding.",
+        kind: "workspace",
+        dependencies: [],
+        scope: { candidateFiles: ["style.css"], allowedTools: ["ReadFile"] },
+      },
+    ],
+  });
+
+  const result = validatePlanProposal(stillNoMutation, {
+    ...context,
+    requireWorkspaceMutation: true,
+    existingNodes: [{ id: "inspect-entry-point", dependencies: [] }],
+  });
+
+  expect(result.valid).toBe(false);
+  expect(result.errors.join(" ")).toMatch(
+    /at least one workspace node.*mutation tool/i,
+  );
 });

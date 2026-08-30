@@ -5,6 +5,15 @@ import {
   type TaskRuntimeSnapshot,
   type TaskRuntimeSnapshotInput,
 } from "./task-runtime-state.js";
+import {
+  FAILURE_CLASSES,
+  RECOVERY_ACTIONS,
+  isRecoveryLoopSnapshot,
+  type FailureClass,
+  type RecoveryAction,
+} from "./recovery.js";
+import { normalizeEvidenceRecord } from "../evidence/acceptance.js";
+import type { EvidenceRecord } from "../evidence/acceptance.js";
 
 export interface RuntimeSnapshotFailure {
   code: "INVALID_RUNTIME_SNAPSHOT";
@@ -119,6 +128,18 @@ function boundedArray(value: unknown, max = 512): value is unknown[] {
 
 function optionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
+}
+
+function isFailureClass(value: unknown): value is FailureClass {
+  return (
+    typeof value === "string" && FAILURE_CLASSES.has(value as FailureClass)
+  );
+}
+
+function isRecoveryAction(value: unknown): value is RecoveryAction {
+  return (
+    typeof value === "string" && RECOVERY_ACTIONS.has(value as RecoveryAction)
+  );
 }
 
 function nonNegativeInteger(value: unknown): boolean {
@@ -596,6 +617,15 @@ function validLedger(value: unknown): value is AgentTaskLedger {
         optionalString(recovery.supersedeNodeId) &&
         typeof recovery.proposedRecovery === "string" &&
         recoveryStrategies.has(recovery.proposedRecovery) &&
+        (recovery.failureClass === undefined ||
+          isFailureClass(recovery.failureClass)) &&
+        (recovery.stateDigest === undefined ||
+          (typeof recovery.stateDigest === "string" &&
+            recovery.stateDigest.trim().length > 0)) &&
+        (recovery.strategy === undefined ||
+          isRecoveryAction(recovery.strategy)) &&
+        (recovery.changedStrategy === undefined ||
+          typeof recovery.changedStrategy === "boolean") &&
         typeof recovery.createdAt === "string",
       );
     })
@@ -604,6 +634,10 @@ function validLedger(value: unknown): value is AgentTaskLedger {
 
 function validRoute(value: unknown): boolean {
   const route = record(value);
+  const hasDriverReference =
+    route?.driverProfileId !== undefined ||
+    route?.driverIdentityDigest !== undefined ||
+    route?.configurationDigest !== undefined;
   return Boolean(
     route &&
     typeof route.candidateId === "string" &&
@@ -612,8 +646,37 @@ function validRoute(value: unknown): boolean {
     route.providerId.length > 0 &&
     (route.modelId === undefined || typeof route.modelId === "string") &&
     (route.runtimeId === undefined || typeof route.runtimeId === "string") &&
-    (route.capability === undefined || typeof route.capability === "string"),
+    (route.capability === undefined || typeof route.capability === "string") &&
+    (!hasDriverReference ||
+      (typeof route.driverProfileId === "string" &&
+        route.driverProfileId.length > 0 &&
+        typeof route.driverIdentityDigest === "string" &&
+        route.driverIdentityDigest.length > 0 &&
+        typeof route.configurationDigest === "string" &&
+        route.configurationDigest.length > 0)),
   );
+}
+
+function validAcceptanceEvidence(value: unknown): boolean {
+  if (!boundedArray(value, 512)) return false;
+  const byId = new Map<string, string>();
+  try {
+    for (const item of value) {
+      const normalized = normalizeEvidenceRecord(item);
+      const encoded = JSON.stringify(normalized);
+      const previous = byId.get(normalized.id);
+      if (previous !== undefined && previous !== encoded) return false;
+      byId.set(normalized.id, encoded);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeAcceptanceEvidence(value: unknown): EvidenceRecord[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => normalizeEvidenceRecord(item));
 }
 
 function validAnchor(value: unknown): boolean {
@@ -768,6 +831,22 @@ export function restoreTaskRuntime(
     return invalid("snapshot active node is not present in its task graph");
   if (snapshot.route !== undefined && !validRoute(snapshot.route))
     return invalid("snapshot route identity is invalid");
+  if (
+    snapshot.checkpointId !== undefined &&
+    (typeof snapshot.checkpointId !== "string" ||
+      snapshot.checkpointId.trim().length === 0)
+  )
+    return invalid("snapshot checkpoint identity is invalid");
+  if (
+    snapshot.recoveryHistory !== undefined &&
+    !isRecoveryLoopSnapshot(snapshot.recoveryHistory)
+  )
+    return invalid("snapshot recovery history is invalid");
+  if (
+    snapshot.acceptanceEvidence !== undefined &&
+    !validAcceptanceEvidence(snapshot.acceptanceEvidence)
+  )
+    return invalid("snapshot acceptance evidence is invalid");
   if (snapshot.inFlight !== undefined && !validInFlight(snapshot.inFlight))
     return invalid("snapshot in-flight marker is invalid");
   if (
@@ -796,5 +875,12 @@ export function restoreTaskRuntime(
     typeof snapshot.activeNodeId !== "string"
   )
     return invalid("snapshot active node is invalid");
-  return { ok: true, snapshot: snapshot as unknown as TaskRuntimeSnapshot };
+  const normalizedSnapshot = structuredClone(
+    snapshot,
+  ) as unknown as TaskRuntimeSnapshot;
+  if (snapshot.acceptanceEvidence !== undefined)
+    normalizedSnapshot.acceptanceEvidence = normalizeAcceptanceEvidence(
+      snapshot.acceptanceEvidence,
+    );
+  return { ok: true, snapshot: normalizedSnapshot };
 }

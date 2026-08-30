@@ -112,9 +112,23 @@ export type TranscriptItem =
       kind: "approval-request";
       description: string;
       risk: "external" | "write" | "destructive" | "unknown";
+      // Bounded before/after excerpt of what was approved — see
+      // ToolApprovalRequest.preview (tools/types.ts) — kept in the
+      // transcript's permanent record, not just the ephemeral modal, so
+      // "what did I actually approve?" stays answerable after the dialog
+      // closes.
+      preview?: string[];
     })
   | (TurnItem & {
       kind: "completion-notice";
       title: "Done";
       summary?: string;
+    })
+  | (TurnItem & {
+      // Surfaces every checkpoint.created event (agent/loop.ts) so a safe
+      // restore point never exists without the user seeing it — see
+      // presentAppEvent's checkpoint.created branch, adapter.ts.
+      kind: "checkpoint-notice";
+      checkpointId: string;
+      paths?: string[];
     });

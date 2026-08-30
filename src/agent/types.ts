@@ -26,6 +26,8 @@ import type { LocalCodeLogger } from "../shared/logging.js";
 import type { AdaptiveExecutionProfile } from "./execution-profile.js";
 import type { TaskContract } from "./task-contract.js";
 import type { ObjectiveProofAssessment } from "./objective-proof.js";
+import type { AcceptanceProofAssessment } from "../evidence/acceptance.js";
+import type { RecoveryPolicy } from "./recovery.js";
 import type {
   TaskInFlightMarker,
   TaskRuntimeRehydration,
@@ -60,6 +62,8 @@ export interface AgentTask {
   enforceTaskContract?: boolean;
   /** Versioned state restored by a durable resume operation. */
   runtimeSnapshot?: TaskRuntimeSnapshot;
+  /** Task-owned paths the host found changed on disk since runtimeSnapshot was persisted; invalidates their proof and evidence on reopen. */
+  resumeChangedPaths?: string[];
   successCriteria?: string[];
   /** Host-framed constraints retained in the authoritative task ledger. */
   constraints?: string[];
@@ -86,6 +90,11 @@ export interface AgentTask {
   maxOutputTokens?: number;
   /** Host-controlled sampling temperature; coding defaults to 0.2. */
   temperature?: number;
+  /**
+   * Best-effort reasoning-depth hint for backends that support it; coding
+   * defaults to "high". Ignored by adapters/models without support.
+   */
+  reasoningEffort?: "low" | "medium" | "high";
   contextBudgetChars?: number;
   /** Host-selected bounded work-unit targets; never a capability downgrade. */
   stagedPaths?: string[];
@@ -170,7 +179,11 @@ export type AgentEvent =
       exitCode: number;
       output: string;
     }
-  | { type: "checkpoint.created"; id: string }
+  // paths: which file(s) the checkpoint covers — lets the host surface a
+  // visible "checkpoint saved before editing X" notice instead of creating
+  // silent restore points the user has no way to know exist (see
+  // presentAppEvent's checkpoint.created handling, tui/presentation/adapter.ts).
+  | { type: "checkpoint.created"; id: string; paths?: string[] }
   | { type: "task.completed"; result: AgentRunResult }
   | { type: "task.blocked"; error: string }
   | { type: "task.cancelled"; error: string }
@@ -185,6 +198,8 @@ export interface AgentRunResult {
   completion: CompletionDecision;
   /** Host-owned objective proof used by the completion decision. */
   objectiveProof?: ObjectiveProofAssessment;
+  /** Canonical obligation/evidence proof used by the completion decision. */
+  acceptanceProof?: AcceptanceProofAssessment;
   evidenceCount: number;
   ledger: AgentTaskLedger;
   turns: number;
@@ -251,6 +266,8 @@ export interface AgentLoopOptions {
   trace?: AgentTraceRecorder;
   /** Structured lifecycle logging; prompts and raw tool output stay excluded. */
   logger?: LocalCodeLogger;
+  /** Optional bounded recovery policy; the default never retries forever. */
+  recoveryPolicy?: RecoveryPolicy;
   createExecutionContext(task: AgentTask): Promise<ToolExecutionContext>;
 }
 

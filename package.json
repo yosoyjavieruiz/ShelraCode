@@ -5,12 +5,10 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "shelra": "src/index.ts",
-    "localcode": "src/index.ts"
+    "shelra": "src/index.ts"
   },
   "scripts": {
     "shelra": "bun --conditions=browser run src/index.ts",
-    "localcode": "bun --conditions=browser run src/index.ts",
     "dev": "bun --conditions=browser run src/index.ts",
     "dev:tui": "bun --conditions=browser run src/index.ts --tui",
     "setup": "bun --conditions=browser run src/index.ts setup",

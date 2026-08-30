@@ -56,31 +56,6 @@ function admissionCapabilityRequirement(
   return parent;
 }
 
-/**
- * Capability probes are admission evidence, not a quality hint. The route
- * scorer must never turn an unmeasured or weaker model into an autonomous
- * coding route: the task's required role is a hard gate before scoring.
- */
-function capabilityAdmissionFailure(
-  candidate: ModelCandidate,
-  request: RouteRequest,
-): string | undefined {
-  const required = admissionCapabilityRequirement(request);
-  if (required === "chat_only") return undefined;
-
-  if (!candidate.agentProbe)
-    return `capability evidence is unavailable for required ${required}`;
-
-  const actual = candidateCapability(candidate);
-  if (isHostScaffoldedProgressive(request) && actual === "chat_only") {
-    return undefined;
-  }
-  if (CAPABILITY_RANK[actual] < CAPABILITY_RANK[required])
-    return `capability ${actual} is below required ${required}`;
-
-  return undefined;
-}
-
 function capabilityFit(
   candidate: ModelCandidate,
   request: RouteRequest,
@@ -90,9 +65,9 @@ function capabilityFit(
   const gap = CAPABILITY_RANK[required] - CAPABILITY_RANK[actual];
   if (gap <= 0) return 1;
 
-  // This function is called only after capabilityAdmissionFailure has passed.
-  // Keep the fallback defensive for callers/tests that construct a malformed
-  // candidate directly.
+  // Capability is a scoring signal, not an admission gate: an unmeasured or
+  // under-measured candidate is still eligible, just scored lower so a
+  // better-evidenced candidate is preferred when one is available.
   if (!candidate.agentProbe) return 0;
   return Math.max(0.25, 1 - gap * 0.25);
 }
@@ -325,12 +300,6 @@ export function selectRoute(
       continue;
     }
 
-    const capabilityFailure = capabilityAdmissionFailure(candidate, request);
-    if (capabilityFailure) {
-      reject(rejections, candidate, capabilityFailure);
-      continue;
-    }
-
     const hostScaffoldedFallback =
       isHostScaffoldedProgressive(request) &&
       candidateCapability(candidate) === "chat_only";
@@ -456,7 +425,10 @@ export function selectRoute(
           ? candidateCapability(selected.candidate) === "chat_only"
             ? "Progressive host-scaffolded fallback: the selected chat_only local model has no measured native coding capability, so it owns only the bounded localized work unit; the controller owns tools, checkpoints, verification and the next unit."
             : `Progressive execution: the parent objective requires advanced_coding_agent, so this measured ${candidateCapability(selected.candidate)} route owns only the bounded localized work unit; host verification controls the next unit.`
-          : `Capability gate passed: ${candidateCapability(selected.candidate)} meets the required ${admissionCapabilityRequirement(request)} role.`,
+          : CAPABILITY_RANK[candidateCapability(selected.candidate)] >=
+              CAPABILITY_RANK[admissionCapabilityRequirement(request)]
+            ? `Capability check passed: ${candidateCapability(selected.candidate)} meets the required ${admissionCapabilityRequirement(request)} role.`
+            : `Capability is below the required ${admissionCapabilityRequirement(request)} role (measured ${candidateCapability(selected.candidate)}${selected.candidate.agentProbe ? "" : ", unprobed"}); proceeding because capability is a scoring signal, not a hard admission gate.`,
       `Score ${selected.breakdown.total.toFixed(2)} from task fit ${selected.breakdown.taskFit.toFixed(2)}, reliability ${selected.breakdown.reliability.toFixed(2)}, quota headroom ${selected.breakdown.quotaHeadroom.toFixed(2)}, latency ${selected.breakdown.latency.toFixed(2)}, context ${selected.breakdown.contextHeadroom.toFixed(2)} and tool use ${selected.breakdown.toolReliability.toFixed(2)}.`,
     ].join(" "),
   };

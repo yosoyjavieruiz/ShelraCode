@@ -8,6 +8,7 @@ import type {
   RuntimeHealth,
 } from "./types.js";
 import { isGenerativeModelId } from "./model-filter.js";
+import { estimateModelQuality } from "../shared/model-quality.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -87,14 +88,47 @@ export class OpenAICompatibleLocalRuntime implements LocalRuntimeAdapter {
 
         const quantization = record(model?.quantization);
         const capabilities = record(model?.capabilities);
-        const loadedInstances = Array.isArray(model?.loaded_instances)
+        const rawLoadedInstances = Array.isArray(model?.loaded_instances)
           ? model.loaded_instances
           : [];
+        const loadedInstances = rawLoadedInstances.flatMap((value) => {
+          const instance = record(value);
+          const id = text(instance?.id);
+          if (!id) return [];
+          const config = record(instance?.config);
+          const contextLength = finiteNumber(config?.context_length);
+          const evalBatchSize = finiteNumber(config?.eval_batch_size);
+          const parallel = finiteNumber(config?.parallel);
+          const flashAttention = booleanValue(config?.flash_attention);
+          const numExperts = finiteNumber(config?.num_experts);
+          const offloadKvCacheToGpu = booleanValue(
+            config?.offload_kv_cache_to_gpu,
+          );
+          return [
+            {
+              id,
+              ...(contextLength === undefined ? {} : { contextLength }),
+              ...(evalBatchSize === undefined ? {} : { evalBatchSize }),
+              ...(parallel === undefined ? {} : { parallel }),
+              ...(flashAttention === undefined ? {} : { flashAttention }),
+              ...(numExperts === undefined ? {} : { numExperts }),
+              ...(offloadKvCacheToGpu === undefined
+                ? {}
+                : { offloadKvCacheToGpu }),
+            },
+          ];
+        });
         const sizeBytes = finiteNumber(model?.size_bytes);
         const maxContext = finiteNumber(model?.max_context_length);
         const quant = text(quantization?.name) ?? text(model?.quantization);
+        const quantizationBitsPerWeight = finiteNumber(
+          quantization?.bits_per_weight,
+        );
         const architecture = text(model?.architecture);
         const parameters = text(model?.params_string);
+        const artifactId = text(model?.selected_variant);
+        const publisher = text(model?.publisher);
+        const format = text(model?.format);
         const trainedForToolUse = booleanValue(
           capabilities?.trained_for_tool_use,
         );
@@ -119,16 +153,28 @@ export class OpenAICompatibleLocalRuntime implements LocalRuntimeAdapter {
               retentionKnown: true,
               trainsOnInputs: false,
             },
-            quality: { coding: 0.6, toolUse: 0.6, confidence: "unknown" },
+            quality: estimateModelQuality({
+              modelId,
+              displayName: text(model?.display_name),
+              parameters,
+              trainedForToolUse,
+            }),
             health: { state: "healthy", latencyMs: 0 },
             local: {
               runtime: this.id,
               loaded: loadedInstances.length > 0,
               ...(quant ? { quant } : {}),
+              ...(quantizationBitsPerWeight === undefined
+                ? {}
+                : { quantizationBitsPerWeight }),
+              ...(artifactId ? { artifactId } : {}),
+              ...(publisher ? { publisher } : {}),
+              ...(format ? { format } : {}),
               ...(architecture ? { architecture } : {}),
               ...(parameters ? { parameters } : {}),
               ...(sizeBytes === undefined ? {} : { sizeBytes }),
               ...(trainedForToolUse === undefined ? {} : { trainedForToolUse }),
+              ...(loadedInstances.length === 0 ? {} : { loadedInstances }),
               ...(sizeBytes === undefined
                 ? {}
                 : { memoryRequiredGb: sizeBytes / 1024 ** 3 }),
@@ -242,7 +288,7 @@ export class OpenAICompatibleLocalRuntime implements LocalRuntimeAdapter {
               retentionKnown: true,
               trainsOnInputs: false,
             },
-            quality: { coding: 0.6, toolUse: 0.6, confidence: "unknown" },
+            quality: estimateModelQuality({ modelId, displayName: modelId }),
             health: { state: "healthy", latencyMs: 0 },
             local: { runtime: this.id },
           },

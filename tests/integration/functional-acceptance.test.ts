@@ -1,4 +1,4 @@
-// LocalCode functional-MVP acceptance suite. Each test drives the same
+// ShelraCode functional-MVP acceptance suite. Each test drives the same
 // pipeline the real TUI drives (analyzeTask -> resolveTurnMode ->
 // resolveTurnPolicy -> runAgent) against a disposable fixture repository and
 // a deterministic scripted provider — no live model or network required.
@@ -564,7 +564,7 @@ test("small edit: reads then edits the right file and verifies", async () => {
         oldText: '"hello"',
         newText: '"hello world"',
       }),
-      // The turn right after a mutation is consumed by LocalCode's own
+      // The turn right after a mutation is consumed by ShelraCode's own
       // automatic post-mutation verification pass, not treated as final —
       // the model gets one more turn to report on the (now known) result.
       textTurn("Updated the greeting."),
@@ -735,7 +735,7 @@ test("fix a failing test: discovers the failure, edits the source, re-verifies g
         oldText: "return a - b;",
         newText: "return a + b;",
       }),
-      // Consumed by LocalCode's automatic post-mutation verification pass.
+      // Consumed by ShelraCode's automatic post-mutation verification pass.
       textTurn("Applied the fix."),
       textTurn("Fixed add() and the test suite is green."),
     ],

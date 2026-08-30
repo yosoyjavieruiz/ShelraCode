@@ -128,6 +128,35 @@ test("greenfield creation does not invent a domain-specific artifact without a m
   ).toEqual([]);
 });
 
+test("creation preparation recognizes Rioplatense/vos Spanish imperatives with accents", async () => {
+  // Regression test for a live, reported bug: "Creá una página web básica
+  // en index.html..." left creationRequested false because a plain
+  // `\bcrea\b`-style boundary never fires right after an accented vowel
+  // (á isn't `\w`), so the not-yet-existing index.html got dropped from
+  // the discovered scope and the whole task dead-ended on "no verified
+  // mutation scope was found" for an entirely ordinary creation request.
+  const progressivePlan = await import("../../src/agent/progressive-plan.js");
+  expect("verifiedPreparationTargets" in progressivePlan).toBe(true);
+  if (!("verifiedPreparationTargets" in progressivePlan)) return;
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "shelra-accent-scope-"));
+  expect(
+    await progressivePlan.verifiedPreparationTargets(
+      root,
+      'Creá una página web básica en index.html con un hero (título + subtítulo + botón), una sección de 3 features y un footer.',
+      ["index.html"],
+    ),
+  ).toEqual(["index.html"]);
+
+  expect(
+    await progressivePlan.verifiedPreparationTargets(
+      root,
+      "Agregá un formulario de contacto en contact.html.",
+      ["contact.html"],
+    ),
+  ).toEqual(["contact.html"]);
+});
+
 test("preparation evidence does not promote an unrelated project manifest into creation scope", async () => {
   const progressivePlan = await import("../../src/agent/progressive-plan.js");
   expect("verifiedPreparationTargets" in progressivePlan).toBe(true);

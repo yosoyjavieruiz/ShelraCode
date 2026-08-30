@@ -1,8 +1,6 @@
-import { readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import {
-  runCommand,
-  runShellCommand,
   ProcessPolicyError,
   ProcessIsolationError,
   type ProcessOptions,
@@ -11,6 +9,13 @@ import {
 import { assertWorkspacePath, resolveWorkspacePath } from "../shared/paths.js";
 import { isNeverRemotePath, scanSecrets } from "../privacy/policy.js";
 import { safeProcessEnvironment } from "../shared/process-policy.js";
+import { PRODUCT_NAME } from "../product/identity.js";
+import {
+  createExecutionBroker,
+  type ExecutionBroker,
+} from "../security/execution-broker.js";
+import { driverProfileCanWrite } from "../driver/profile.js";
+import { workspaceRootsMatch } from "../shared/workspace-paths.js";
 import {
   checkPermission,
   classifyShellCommand,
@@ -46,11 +51,11 @@ async function statForTool(
     if (isErrnoException(error) && error.code === "ENOENT") {
       throw new ToolError(
         "PATH_NOT_FOUND",
-        `No such file or directory: ${relativePath}. List the parent directory or search for the correct path instead of guessing.`,
+        `No such file or directory: ${relativePath}. If you intended to create it, use CreateFile (or WriteFile) now — do not read a file that does not exist yet. Otherwise list the parent directory or search for the correct path instead of guessing.`,
         {
           path: relativePath,
           suggestedAction:
-            "List the parent directory or search for the correct path before retrying.",
+            "If this file should be created, call CreateFile/WriteFile; otherwise list the parent directory or search for the correct path before retrying.",
         },
       );
     }
@@ -81,6 +86,7 @@ function changeDiff(
   before: string,
   after: string,
   operation: FileChangeSummary["operation"],
+  protectedPath = isNeverRemotePath(filePath),
 ): FileChangeSummary {
   const oldLines = contentLines(before);
   const newLines = contentLines(after);
@@ -138,7 +144,7 @@ function changeDiff(
     }
   }
   const redacted =
-    isNeverRemotePath(filePath) ||
+    protectedPath ||
     scanSecrets(before).length > 0 ||
     scanSecrets(after).length > 0;
   const maxLines = 80;
@@ -262,13 +268,86 @@ export function safeExecutionEnvironment(
   return safeProcessEnvironment(env);
 }
 
+function executionBrokerFor(ctx: ToolExecutionContext): ExecutionBroker {
+  const expectedNetworkMode =
+    ctx.network === true ? (ctx.networkMode ?? "allow") : "strict-zero";
+  const expectedWriteAuthority =
+    ctx.modelAuthority === "model"
+      ? driverProfileCanWrite(ctx.driverProfile)
+        ? "bounded"
+        : "none"
+      : "bounded";
+  const expectedUnverifiedProcessPolicy = ctx.modelAuthority !== "model";
+  if (ctx.executionBroker) {
+    if (!workspaceRootsMatch(ctx.executionBroker.root, ctx.root))
+      throw new ToolError(
+        "OUTSIDE_WORKSPACE",
+        "The execution broker is bound to a different workspace.",
+        {
+          recoverable: false,
+          suggestedAction:
+            "Create a broker for the current task workspace before executing the tool.",
+        },
+      );
+    if (
+      expectedNetworkMode === "strict-zero" &&
+      ctx.executionBroker.networkMode !== "strict-zero"
+    )
+      throw new ToolError(
+        "PERMISSION_DENIED",
+        "The execution broker does not enforce strict-zero network policy.",
+        {
+          recoverable: false,
+          suggestedAction:
+            "Use a strict-zero broker for this task instead of widening network authority.",
+        },
+      );
+    if (
+      expectedWriteAuthority === "none" &&
+      ctx.executionBroker.writeAuthority !== "none"
+    )
+      throw new ToolError(
+        "PERMISSION_DENIED",
+        "The execution broker grants mutation authority to an unverified model.",
+        {
+          recoverable: false,
+          suggestedAction:
+            "Use a broker with no write authority until the exact Driver profile is certified.",
+        },
+      );
+    if (
+      expectedNetworkMode === "strict-zero" &&
+      !expectedUnverifiedProcessPolicy &&
+      ctx.executionBroker.allowUnverifiedProcesses
+    )
+      throw new ToolError(
+        "PERMISSION_DENIED",
+        "The execution broker allows opaque processes for an unverified model.",
+        {
+          recoverable: false,
+          suggestedAction:
+            "Use the strict-zero local process allowlist or a native OS isolation adapter.",
+        },
+      );
+    return ctx.executionBroker;
+  }
+  return createExecutionBroker({
+    root: ctx.root,
+    networkMode: expectedNetworkMode,
+    writeAuthority: expectedWriteAuthority,
+    allowUnverifiedProcesses: expectedUnverifiedProcessPolicy,
+    defaultTestCommand: ctx.defaultTestCommand,
+  });
+}
+
 async function runToolCommand(
+  broker: ExecutionBroker,
   command: string,
   args: string[],
   options: ProcessOptions,
 ): Promise<ProcessResult> {
   return runToolProcess(() =>
-    runCommand(command, args, {
+    broker.runCommand(command, args, {
       ...options,
       env: safeExecutionEnvironment(options.env),
     }),
@@ -276,11 +355,12 @@ async function runToolCommand(
 }
 
 async function runToolShellCommand(
+  broker: ExecutionBroker,
   command: string,
   options: ProcessOptions,
 ): Promise<ProcessResult> {
   return runToolProcess(() =>
-    runShellCommand(command, {
+    broker.runShellCommand(command, {
       ...options,
       env: safeExecutionEnvironment(options.env),
     }),
@@ -357,10 +437,56 @@ function inputBoolean(input: Record<string, unknown>, key: string): boolean {
 }
 
 function isRuntimeStatePath(relative: string): boolean {
+  const normalized = relative.replaceAll("\\", "/");
   return (
-    relative.replaceAll("\\", "/") === "agent.jsonl" ||
-    relative.replaceAll("\\", "/").startsWith(".localcode/")
+    normalized === "agent.jsonl" ||
+    normalized.startsWith(".shelracode/") ||
+    normalized.startsWith(".localcode/")
   );
+}
+
+// Bounded excerpts of the exact content a write/edit is about to apply, so
+// requestApproval (below) shows what will change rather than only naming a
+// path — an approval must never be given blind to the actual content. Not a
+// real diff (that needs the LCS pass in tui/presentation/adapter.ts, which
+// this tools-layer module must not depend on); a short, honestly-labeled
+// before/after excerpt is enough for a human to sanity-check before
+// deciding, and the full diff still renders in the transcript afterward.
+const APPROVAL_PREVIEW_MAX_LINES = 4;
+
+function truncatedLines(
+  text: string,
+  prefix: "+" | "-",
+  max = APPROVAL_PREVIEW_MAX_LINES,
+): string[] {
+  if (text === "") return [];
+  // A trailing newline is a line *terminator*, not an extra blank line —
+  // without stripping it, content ending in "\n" (the common case) would
+  // show a spurious trailing "+ " row. Mirrors splitLines in
+  // tui/presentation/adapter.ts, duplicated rather than imported since this
+  // tools-layer module must not depend on the tui layer.
+  const normalized = text.replace(/\r\n/g, "\n");
+  const withoutTrailingNewline = normalized.endsWith("\n")
+    ? normalized.slice(0, -1)
+    : normalized;
+  const lines = withoutTrailingNewline === "" ? [] : withoutTrailingNewline.split("\n");
+  const shown = lines.slice(0, max).map((line) => `${prefix} ${line}`);
+  if (lines.length > max) {
+    const noun = prefix === "+" ? "added" : "removed";
+    shown.push(`  … ${lines.length - max} more ${noun} lines`);
+  }
+  return shown;
+}
+
+function editApprovalPreview(oldText: string, newText: string): string[] {
+  return [
+    ...truncatedLines(oldText, "-"),
+    ...truncatedLines(newText, "+"),
+  ];
+}
+
+function contentApprovalPreview(content: string): string[] {
+  return truncatedLines(content, "+", 8);
 }
 
 async function requirePermission(
@@ -369,6 +495,7 @@ async function requirePermission(
   description = `Run ${risk} workspace action`,
   command?: string,
   target: Pick<ToolApprovalRequest, "tool" | "path"> = {},
+  preview?: string[],
 ): Promise<boolean> {
   const decision = checkPermission({
     mode: ctx.permissionMode,
@@ -397,6 +524,7 @@ async function requirePermission(
       ...(target.tool ? { tool: target.tool } : {}),
       ...(target.path ? { path: target.path } : {}),
       ...(command ? { command } : {}),
+      ...(preview && preview.length > 0 ? { preview } : {}),
     });
     if (allowed) {
       ctx.logger?.info("tool.permission.approved", { risk });
@@ -432,28 +560,64 @@ async function requirePermission(
   );
 }
 
+// Bounds the fallback walk so a huge/non-project directory (e.g. the user's
+// home) cannot freeze the tool: cap total files and stop descending once hit.
+const LIST_FALLBACK_MAX_FILES = 2_000;
+
 async function listFallback(
   root: string,
   directory = ".",
   depth = 0,
+  budget: { count: number } = { count: 0 },
 ): Promise<string[]> {
-  if (depth > 6) return [];
+  if (depth > 6 || budget.count >= LIST_FALLBACK_MAX_FILES) return [];
   const absolute = resolveWorkspacePath(root, directory);
-  const entries = await readdir(absolute, { withFileTypes: true });
+  // A single unreadable directory must never fail the whole listing. On Windows
+  // the home tree contains protected system folders (e.g. WinSAT under
+  // AppData\Local\Temp) whose scandir raises EPERM/EACCES; POSIX has the same
+  // with restricted mounts. Skip it and keep walking (like ripgrep/find) rather
+  // than blocking the LIST tool entirely.
+  const entries = await readdir(absolute, { withFileTypes: true }).catch(
+    () => null,
+  );
+  if (!entries) return [];
   const result: string[] = [];
   for (const entry of entries) {
+    if (budget.count >= LIST_FALLBACK_MAX_FILES) break;
     if (
-      [".git", "node_modules", ".localcode", "dist", ".next"].includes(
-        entry.name,
-      )
+      [
+        ".git",
+        "node_modules",
+        ".shelracode",
+        ".localcode",
+        "dist",
+        ".next",
+      ].includes(entry.name)
     )
       continue;
     const relative = path.join(directory, entry.name).replaceAll("\\", "/");
     if (entry.isDirectory())
-      result.push(...(await listFallback(root, relative, depth + 1)));
-    else if (!isRuntimeStatePath(relative)) result.push(relative);
+      result.push(...(await listFallback(root, relative, depth + 1, budget)));
+    else if (!isRuntimeStatePath(relative)) {
+      result.push(relative);
+      budget.count += 1;
+    }
   }
   return result;
+}
+
+async function filterProtectedPaths(
+  broker: ExecutionBroker,
+  directory: string,
+  files: string[],
+): Promise<string[]> {
+  const visible = await Promise.all(
+    files.map(async (file) => {
+      const relative = path.join(directory, file).replaceAll("\\", "/");
+      return (await broker.isProtectedPath(relative)) ? undefined : file;
+    }),
+  );
+  return visible.filter((file): file is string => file !== undefined);
 }
 
 export interface FileReadResult {
@@ -552,6 +716,7 @@ export const readFileTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     await requirePermission(
       ctx,
       "read",
@@ -559,15 +724,15 @@ export const readFileTool: ToolDefinition<
       undefined,
       { tool: "ReadFile", path: input.path },
     );
-    const absolute = await assertWorkspacePath(ctx.root, input.path);
+    const absolute = await broker.resolvePath(input.path);
     const info = await statForTool(absolute, input.path);
     if (info.isDirectory)
       throw new ToolError(
         "PATH_IS_DIRECTORY",
         `${input.path} is a directory, not a file. Use ListFiles to see its contents, then ReadFile a specific file inside it.`,
       );
-    const content = await readFile(absolute, "utf8");
-    if (content.includes("\u0000"))
+    const rawContent = await readFile(absolute, "utf8");
+    if (rawContent.includes("\u0000"))
       throw new ToolError(
         "BINARY_FILE",
         `${input.path} appears to be a binary file and is not exposed as text.`,
@@ -578,6 +743,8 @@ export const readFileTool: ToolDefinition<
             "Use a text source file or an explicit binary-aware inspection step.",
         },
       );
+    const protectedPath = await broker.isProtectedPath(input.path);
+    const content = broker.redactText(rawContent, { protectedPath });
     const maxChars = input.maxChars ?? 20_000;
     const lines = content.split(/\r?\n/);
     const lineStart = input.startLine ?? 1;
@@ -597,7 +764,7 @@ export const readFileTool: ToolDefinition<
       path: input.path,
       kind: "file",
       content: selected.slice(0, maxChars),
-      sensitivePath: isNeverRemotePath(input.path),
+      sensitivePath: protectedPath,
       truncated,
       lineStart,
       lineEnd,
@@ -648,25 +815,28 @@ export const writeFileTool: ToolDefinition<
     return { path: inputString(value, "path"), content: value.content };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     await requirePermission(
       ctx,
       "write",
       `Write workspace file: ${input.path}`,
       undefined,
       { tool: "WriteFile", path: input.path },
+      contentApprovalPreview(input.content),
     );
+    broker.assertWriteAuthority();
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
         "CONFLICT",
-        "WriteFile requires an active LocalCode checkpoint.",
+        `WriteFile requires an active ${PRODUCT_NAME} checkpoint.`,
         {
           recoverable: true,
           suggestedAction:
             "Let the agent create a checkpoint before retrying the write.",
         },
       );
-    const absolute = await assertWorkspacePath(ctx.root, input.path);
-    await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
+    const absolute = await broker.resolvePath(input.path);
+    const protectedPath = await broker.isProtectedPath(input.path);
     await requireParentDirectory(ctx.root, input.path);
     const before = await readExistingFile(ctx.root, input.path);
     if (before.exists && ctx.allowExistingFileOverwrite === false)
@@ -680,7 +850,10 @@ export const writeFileTool: ToolDefinition<
             "Read the current file if needed, then use EditFile for a bounded change. Use WriteFile only for a new path.",
         },
       );
-    await writeFile(absolute, input.content, "utf8");
+    await broker.writeFile(input.path, input.content, {
+      checkpoint: ctx.checkpoint,
+      checkpointId: ctx.checkpointId,
+    });
     await verifyWrittenContent(absolute, input.path, input.content);
     await ctx.checkpoint.recordMutation(
       ctx.checkpointId,
@@ -696,6 +869,7 @@ export const writeFileTool: ToolDefinition<
         before.content,
         input.content,
         before.exists ? "overwritten" : "created",
+        protectedPath,
       ),
     };
   },
@@ -736,23 +910,27 @@ export const createFileTool: ToolDefinition<
     return { path: inputString(value, "path"), content: value.content };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     await requirePermission(
       ctx,
       "write",
       `Create workspace file: ${input.path}`,
       undefined,
       { tool: "CreateFile", path: input.path },
+      contentApprovalPreview(input.content),
     );
+    broker.assertWriteAuthority();
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
         "CONFLICT",
-        "CreateFile requires an active LocalCode checkpoint.",
+        `CreateFile requires an active ${PRODUCT_NAME} checkpoint.`,
         {
           recoverable: true,
           suggestedAction: "Create a checkpoint before creating the file.",
         },
       );
-    const absolute = await assertWorkspacePath(ctx.root, input.path);
+    const absolute = await broker.resolvePath(input.path);
+    const protectedPath = await broker.isProtectedPath(input.path);
     await requireParentDirectory(ctx.root, input.path);
     const before = await readExistingFile(ctx.root, input.path);
     if (before.exists)
@@ -761,11 +939,11 @@ export const createFileTool: ToolDefinition<
         `${input.path} already exists. Use EditFile or WriteFile only when replacing an existing file is intentional.`,
         { path: input.path, recoverable: false },
       );
-    await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
     try {
-      await writeFile(absolute, input.content, {
-        encoding: "utf8",
-        flag: "wx",
+      await broker.writeFile(input.path, input.content, {
+        checkpoint: ctx.checkpoint,
+        checkpointId: ctx.checkpointId,
+        exclusive: true,
       });
     } catch (error) {
       if (isErrnoException(error) && error.code === "EEXIST")
@@ -785,7 +963,13 @@ export const createFileTool: ToolDefinition<
       path: input.path,
       bytes: Buffer.byteLength(input.content, "utf8"),
       operation: "created",
-      change: changeDiff(input.path, "", input.content, "created"),
+      change: changeDiff(
+        input.path,
+        "",
+        input.content,
+        "created",
+        protectedPath,
+      ),
     };
   },
 };
@@ -853,25 +1037,28 @@ export const editFileTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     await requirePermission(
       ctx,
       "write",
       `Edit workspace file: ${input.path}`,
       undefined,
       { tool: "EditFile", path: input.path },
+      editApprovalPreview(input.oldText, input.newText),
     );
+    broker.assertWriteAuthority();
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
         "CONFLICT",
-        "EditFile requires an active LocalCode checkpoint.",
+        `EditFile requires an active ${PRODUCT_NAME} checkpoint.`,
         {
           recoverable: true,
           suggestedAction:
             "Let the agent create a checkpoint before retrying the edit.",
         },
       );
-    const absolute = await assertWorkspacePath(ctx.root, input.path);
-    await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
+    const absolute = await broker.resolvePath(input.path);
+    const protectedPath = await broker.isProtectedPath(input.path);
     const existing = await readExistingFile(ctx.root, input.path);
     if (!existing.exists)
       throw new ToolError(
@@ -890,7 +1077,7 @@ export const editFileTool: ToolDefinition<
         recoverable: true,
         suggestedAction:
           "Use the currentContentPreview from this error as the canonical file content, or read the file again, then retry with exact text.",
-        ...(isNeverRemotePath(input.path)
+        ...(protectedPath
           ? {}
           : {
               details: {
@@ -919,14 +1106,17 @@ export const editFileTool: ToolDefinition<
     const updated = input.replaceAll
       ? current.replaceAll(input.oldText, input.newText)
       : current.replace(input.oldText, input.newText);
-    await writeFile(absolute, updated, "utf8");
+    await broker.writeFile(input.path, updated, {
+      checkpoint: ctx.checkpoint,
+      checkpointId: ctx.checkpointId,
+    });
     await verifyWrittenContent(absolute, input.path, updated);
     await ctx.checkpoint.recordMutation(ctx.checkpointId, input.path, updated);
     return {
       path: input.path,
       replacements: input.replaceAll ? occurrences : 1,
       operation: "edited",
-      change: changeDiff(input.path, current, updated, "edited"),
+      change: changeDiff(input.path, current, updated, "edited", protectedPath),
     };
   },
 };
@@ -955,6 +1145,7 @@ export const deleteFileTool: ToolDefinition<
     return { path: inputString(value, "path") };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     await requirePermission(
       ctx,
       "destructive",
@@ -962,16 +1153,18 @@ export const deleteFileTool: ToolDefinition<
       undefined,
       { tool: "DeleteFile", path: input.path },
     );
+    broker.assertWriteAuthority();
     if (!ctx.checkpoint || !ctx.checkpointId)
       throw new ToolError(
         "CONFLICT",
-        "DeleteFile requires an active LocalCode checkpoint.",
+        `DeleteFile requires an active ${PRODUCT_NAME} checkpoint.`,
         {
           recoverable: true,
           suggestedAction: "Create a checkpoint before deleting the file.",
         },
       );
-    const absolute = await assertWorkspacePath(ctx.root, input.path);
+    const absolute = await broker.resolvePath(input.path);
+    const protectedPath = await broker.isProtectedPath(input.path);
     const before = await readExistingFile(ctx.root, input.path);
     if (!before.exists)
       throw new ToolError(
@@ -983,14 +1176,22 @@ export const deleteFileTool: ToolDefinition<
             "Confirm the exact existing file path before deleting.",
         },
       );
-    await ctx.checkpoint.assertNoExternalChange(ctx.checkpointId, input.path);
-    await unlink(absolute);
+    await broker.deleteFile(input.path, {
+      checkpoint: ctx.checkpoint,
+      checkpointId: ctx.checkpointId,
+    });
     await verifyDeleted(absolute, input.path);
     await ctx.checkpoint.recordMutation(ctx.checkpointId, input.path, "");
     return {
       path: input.path,
       operation: "deleted",
-      change: changeDiff(input.path, before.content, "", "deleted"),
+      change: changeDiff(
+        input.path,
+        before.content,
+        "",
+        "deleted",
+        protectedPath,
+      ),
     };
   },
 };
@@ -1024,6 +1225,7 @@ export const listFilesTool: ToolDefinition<
     // same way so returned paths read as "package.json", not "/package.json".
     const normalizedPath = (input.path ?? "").replace(/^[/\\]+/, "");
     const directory = normalizedPath || ".";
+    const broker = executionBrokerFor(ctx);
     await requirePermission(
       ctx,
       "read",
@@ -1031,14 +1233,15 @@ export const listFilesTool: ToolDefinition<
       undefined,
       { tool: "ListFiles", path: directory },
     );
-    const absoluteDirectory = await assertWorkspacePath(ctx.root, directory);
+    const absoluteDirectory = await broker.resolvePath(directory);
     const info = await statForTool(absoluteDirectory, directory);
     if (info.isFile)
       throw new ToolError(
         "PATH_IS_FILE",
         `${directory} is a file, not a directory. Use ReadFile to read it instead of ListFiles.`,
       );
-    const result = await runCommand(
+    const result = await runToolCommand(
+      broker,
       "rg",
       [
         "--files",
@@ -1049,6 +1252,8 @@ export const listFilesTool: ToolDefinition<
         "!node_modules/**",
         "-g",
         "!.localcode/**",
+        "-g",
+        "!.shelracode/**",
       ],
       {
         intent: "read",
@@ -1060,12 +1265,21 @@ export const listFilesTool: ToolDefinition<
     );
     let files: string[];
     if (result.exitCode === 0 || result.exitCode === 1) {
-      files = result.stdout
+      const rawFiles = result.stdout
         .split(/\r?\n/)
-        .filter((file) => Boolean(file) && !isRuntimeStatePath(file))
-        .slice(0, 1_000);
+        .filter((file) => Boolean(file) && !isRuntimeStatePath(file));
+      files = (await filterProtectedPaths(broker, directory, rawFiles)).slice(
+        0,
+        1_000,
+      );
     } else if (result.exitCode === 127) {
-      files = await listFallback(ctx.root, directory);
+      files = (
+        await filterProtectedPaths(
+          broker,
+          directory,
+          await listFallback(ctx.root, directory),
+        )
+      ).slice(0, 1_000);
     } else {
       throw new ToolError(
         "COMMAND_FAILED",
@@ -1138,6 +1352,7 @@ export const globFilesTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     const normalizedPath = (input.path ?? "").replace(/^[/\\]+/u, "");
     const directory = normalizedPath || ".";
     await requirePermission(
@@ -1147,7 +1362,7 @@ export const globFilesTool: ToolDefinition<
       undefined,
       { tool: "GlobFiles", path: directory },
     );
-    const absoluteDirectory = await assertWorkspacePath(ctx.root, directory);
+    const absoluteDirectory = await broker.resolvePath(directory);
     const info = await statForTool(absoluteDirectory, directory);
     if (info.isFile)
       throw new ToolError(
@@ -1158,7 +1373,8 @@ export const globFilesTool: ToolDefinition<
           suggestedAction: "Use the parent directory as the glob scope.",
         },
       );
-    const result = await runCommand(
+    const result = await runToolCommand(
+      broker,
       "rg",
       [
         "--files",
@@ -1169,6 +1385,8 @@ export const globFilesTool: ToolDefinition<
         "!node_modules/**",
         "-g",
         "!.localcode/**",
+        "-g",
+        "!.shelracode/**",
         "-g",
         input.pattern,
       ],
@@ -1182,14 +1400,21 @@ export const globFilesTool: ToolDefinition<
     );
     let files: string[];
     if (result.exitCode === 0 || result.exitCode === 1) {
-      files = result.stdout
+      const rawFiles = result.stdout
         .split(/\r?\n/)
-        .filter((file) => Boolean(file) && !isRuntimeStatePath(file))
-        .slice(0, 500);
+        .filter((file) => Boolean(file) && !isRuntimeStatePath(file));
+      files = (await filterProtectedPaths(broker, directory, rawFiles)).slice(
+        0,
+        500,
+      );
     } else if (result.exitCode === 127) {
-      files = (await listFallback(ctx.root, "."))
-        .filter((file) => globToRegExp(input.pattern).test(file))
-        .slice(0, 500);
+      const rawFiles = (await listFallback(ctx.root, directory)).filter(
+        (file) => globToRegExp(input.pattern).test(file),
+      );
+      files = (await filterProtectedPaths(broker, directory, rawFiles)).slice(
+        0,
+        500,
+      );
     } else {
       throw new ToolError(
         "COMMAND_FAILED",
@@ -1223,6 +1448,7 @@ export interface SearchMatch {
 }
 
 async function searchFallback(
+  broker: ExecutionBroker,
   cwd: string,
   query: string,
   glob?: string,
@@ -1240,10 +1466,13 @@ async function searchFallback(
   const globRegex = glob ? globToRegExp(glob) : undefined;
   const files = await listFallback(cwd, ".");
   const matches: SearchMatch[] = [];
+  const cwdRelative = path.relative(broker.root, cwd);
   for (const relative of files) {
     if (matches.length >= SEARCH_MAX_MATCHES) break;
     if (SEARCH_EXCLUDED_NAME_PATTERN.test(path.basename(relative))) continue;
     if (globRegex && !globRegex.test(relative.replaceAll("\\", "/"))) continue;
+    if (await broker.isProtectedPath(path.join(cwdRelative || ".", relative)))
+      continue;
     const absolute = path.join(cwd, relative);
     let content: string;
     try {
@@ -1341,6 +1570,7 @@ export const searchTextTool: ToolDefinition<
     };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     await requirePermission(
       ctx,
       "read",
@@ -1348,8 +1578,9 @@ export const searchTextTool: ToolDefinition<
       undefined,
       { tool: "SearchText" },
     );
-    const cwd = await assertWorkspacePath(ctx.root, input.path ?? ".");
-    const result = await runCommand(
+    const cwd = await broker.resolvePath(input.path ?? ".");
+    const result = await runToolCommand(
+      broker,
       "rg",
       [
         "--line-number",
@@ -1381,7 +1612,9 @@ export const searchTextTool: ToolDefinition<
     // fake match. Exit code 1 with no output is ripgrep's normal "no
     // matches" result and is left as an empty match list.
     if (result.exitCode === 127) {
-      return { matches: await searchFallback(cwd, input.query, input.glob) };
+      return {
+        matches: await searchFallback(broker, cwd, input.query, input.glob),
+      };
     }
     if (result.exitCode !== 0 && result.exitCode !== 1)
       throw new ToolError(
@@ -1393,8 +1626,19 @@ export const searchTextTool: ToolDefinition<
             "Retry with a simpler query or use ListFiles/ReadFile while the search backend is unavailable.",
         },
       );
+    const cwdRelative = path.relative(broker.root, cwd);
+    const matches = await Promise.all(
+      parseSearchMatches(result.stdout).map(async (match) => {
+        const protectedPath = await broker.isProtectedPath(
+          path.join(cwdRelative || ".", match.path),
+        );
+        return protectedPath
+          ? undefined
+          : { ...match, preview: broker.redactText(match.preview) };
+      }),
+    );
     return {
-      matches: parseSearchMatches(result.stdout),
+      matches: matches.filter((match): match is SearchMatch => !!match),
     };
   },
 };
@@ -1433,6 +1677,7 @@ export const shellTool: ToolDefinition<
     return { command: inputString(value, "command") };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     if (ctx.network === false && commandRequiresNetwork(input.command))
       throw new ToolError(
         "PERMISSION_DENIED",
@@ -1462,7 +1707,7 @@ export const shellTool: ToolDefinition<
       { tool: "Shell" },
     );
     const started = performance.now();
-    const result = await runToolShellCommand(input.command, {
+    const result = await runToolShellCommand(broker, input.command, {
       intent:
         classification === "destructive"
           ? "destructive"
@@ -1483,7 +1728,7 @@ export const shellTool: ToolDefinition<
       logger: ctx.logger,
     });
     return {
-      command: input.command,
+      command: broker.redactText(input.command),
       cwd: ctx.root,
       exitCode: result.exitCode,
       stdout: result.stdout,
@@ -1506,18 +1751,24 @@ export const gitStatusTool: ToolDefinition<
     return {};
   },
   async execute(_input, ctx) {
+    const broker = executionBrokerFor(ctx);
     await requirePermission(ctx, "read", "Read Git status", undefined, {
       tool: "GitStatus",
     });
-    const result = await runCommand("git", ["status", "--short", "--branch"], {
-      intent: "read",
-      cwd: ctx.root,
-      signal: ctx.signal,
-      timeoutMs: 10_000,
-      network: ctx.network === false ? "deny" : "allow",
-      policyCommand: "git status --short --branch",
-      logger: ctx.logger,
-    });
+    const result = await runToolCommand(
+      broker,
+      "git",
+      ["status", "--short", "--branch"],
+      {
+        intent: "read",
+        cwd: ctx.root,
+        signal: ctx.signal,
+        timeoutMs: 10_000,
+        network: ctx.network === false ? "deny" : "allow",
+        policyCommand: "git status --short --branch",
+        logger: ctx.logger,
+      },
+    );
     if (result.exitCode !== 0)
       throw new ToolError(
         "COMMAND_FAILED",
@@ -1528,7 +1779,7 @@ export const gitStatusTool: ToolDefinition<
             "Confirm the workspace is a Git repository before retrying GitStatus.",
         },
       );
-    return { output: result.stdout || result.stderr };
+    return { output: broker.redactText(result.stdout || result.stderr) };
   },
 };
 
@@ -1555,6 +1806,7 @@ export const gitDiffTool: ToolDefinition<
     return { staged: inputBoolean(value, "staged") };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     await requirePermission(
       ctx,
       "read",
@@ -1562,7 +1814,8 @@ export const gitDiffTool: ToolDefinition<
       undefined,
       { tool: "GitDiff" },
     );
-    const result = await runCommand(
+    const result = await runToolCommand(
+      broker,
       "git",
       input.staged ? ["diff", "--cached", "--"] : ["diff", "--"],
       {
@@ -1585,7 +1838,11 @@ export const gitDiffTool: ToolDefinition<
             "Confirm the workspace is a Git repository before retrying GitDiff.",
         },
       );
-    return { output: (result.stdout || result.stderr).slice(0, 50_000) };
+    return {
+      output: broker
+        .redactText(result.stdout || result.stderr)
+        .slice(0, 50_000),
+    };
   },
 };
 
@@ -1647,6 +1904,7 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
       : { command: inputString(value, "command") };
   },
   async execute(input, ctx) {
+    const broker = executionBrokerFor(ctx);
     const command = input.command ?? ctx.defaultTestCommand ?? "bun test";
     if (ctx.network === false && commandRequiresNetwork(command))
       throw new ToolError(
@@ -1658,13 +1916,9 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
             "Use a local test command or a turn policy that explicitly permits network access.",
         },
       );
-    await requirePermission(
-      ctx,
-      "execute",
-      `Run tests: ${command}`,
-      command,
-      { tool: "RunTests" },
-    );
+    await requirePermission(ctx, "execute", `Run tests: ${command}`, command, {
+      tool: "RunTests",
+    });
     const classification = classifyShellCommand(command);
     if (classification === "destructive")
       throw new ToolError(
@@ -1677,7 +1931,7 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
         },
       );
     const started = performance.now();
-    const result = await runToolShellCommand(command, {
+    const result = await runToolShellCommand(broker, command, {
       intent: "test",
       cwd: ctx.root,
       signal: ctx.signal,
@@ -1693,7 +1947,7 @@ export const runTestsTool: ToolDefinition<{ command?: string }, TestRun> = {
     });
     const output = `${result.stdout}${result.stderr}`.slice(0, 50_000);
     return {
-      command,
+      command: broker.redactText(command),
       exitCode: result.exitCode,
       ...(countTestStatus(output, "pass") === undefined
         ? {}

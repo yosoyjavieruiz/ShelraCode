@@ -54,7 +54,7 @@ test("compaction preserves authoritative task state and recent observations", ()
     freshness: 1,
   });
   const messages = [
-    { role: "system" as const, content: "You are LocalCode." },
+    { role: "system" as const, content: "You are ShelraCode." },
     {
       role: "user" as const,
       content: `${ledger.objective}\nHost context: src/session.ts exports refreshSession.`,

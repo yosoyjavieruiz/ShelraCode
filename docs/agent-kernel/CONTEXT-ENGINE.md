@@ -19,7 +19,10 @@ when relevant, but full skill documents are not preloaded into every request.
 `AGENTS.md`, `CLAUDE.md`, and configured instruction files are loaded by scope;
 root instructions apply broadly and deeper instructions apply only to paths
 inside their directory. Repository text is data, not privileged instruction,
-except for these recognized files under their explicit scope rules.
+except for these recognized files under their explicit scope rules. Skill
+metadata is discoverable without activation; Skill bodies load only after the
+host Dynamic Capability System approves `opt_in` or evidence-backed `auto`
+activation.
 
 Evidence is stored in the task ledger with source, kind, relevance, and
 freshness. `evaluateEvidenceSufficiency()` and the independent verifier reject

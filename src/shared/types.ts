@@ -145,6 +145,11 @@ export interface ModelCandidate {
     /** Whether the runtime currently reports a loaded inference instance. */
     loaded?: boolean;
     quant?: string;
+    quantizationBitsPerWeight?: number;
+    /** Runtime-reported variant/key; not an artifact hash. */
+    artifactId?: string;
+    publisher?: string;
+    format?: string;
     modelRevision?: string;
     runtimeVersion?: string;
     chatTemplate?: string;
@@ -153,6 +158,15 @@ export interface ModelCandidate {
     parameters?: string;
     sizeBytes?: number;
     trainedForToolUse?: boolean;
+    loadedInstances?: Array<{
+      id: string;
+      contextLength?: number;
+      evalBatchSize?: number;
+      parallel?: number;
+      flashAttention?: boolean;
+      numExperts?: number;
+      offloadKvCacheToGpu?: boolean;
+    }>;
     estimatedTps?: number;
     memoryRequiredGb?: number;
     fit?: string;

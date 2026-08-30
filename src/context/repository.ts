@@ -25,8 +25,14 @@ import {
 } from "./repository-intelligence.js";
 import {
   buildSkillContext,
+  loadSkillBodies,
   type LoadedSkill,
 } from "../instructions/skill-loader.js";
+import {
+  CapabilityRegistry,
+  type CapabilityActivationDecision,
+  type CapabilityActivationMode,
+} from "../agent/dynamic-capabilities.js";
 
 const priorityNames = new Set([
   "README",
@@ -44,11 +50,12 @@ function isIgnoredContextFile(relative: string): boolean {
   const normalized = relative.replaceAll("\\", "/");
   return (
     // The CLI may be configured to write its JSONL trace at the workspace
-    // root. That is LocalCode runtime state, not project evidence. Counting
+    // root. That is ShelraCode runtime state, not project evidence. Counting
     // it as a project file makes a genuinely empty workspace look non-empty
     // and deadlocks the first user-approved creation.
     normalized === "agent.jsonl" ||
     normalized.startsWith(".agents/") ||
+    normalized.startsWith(".shelracode/") ||
     normalized.startsWith(".localcode/")
   );
 }
@@ -86,6 +93,8 @@ async function filesFromRg(
       "!node_modules/**",
       "-g",
       "!.localcode/**",
+      "-g",
+      "!.shelracode/**",
     ],
     { intent: "read", cwd: root, timeoutMs: 5_000, signal, logger },
   );
@@ -99,6 +108,7 @@ async function filesFromRg(
 const WALK_EXCLUDED_DIRS = new Set([
   ".git",
   "node_modules",
+  ".shelracode",
   ".localcode",
   "dist",
   ".next",
@@ -110,23 +120,33 @@ const WALK_EXCLUDED_DIRS = new Set([
  * `rg` on PATH. Pure Node `readdir`, no external process — always
  * available, just slower/less gitignore-aware than the two paths above.
  */
+// Cap the fallback walk so a huge/non-project directory (e.g. the user's home)
+// cannot freeze context discovery for tens of seconds. `.catch(() => [])` above
+// already prevents an EPERM on a protected subdir from failing the walk.
+const WALK_MAX_FILES = 5_000;
+
 async function filesFromWalk(
   root: string,
   directory = ".",
   depth = 0,
+  budget: { count: number } = { count: 0 },
 ): Promise<string[]> {
-  if (depth > 8) return [];
+  if (depth > 8 || budget.count >= WALK_MAX_FILES) return [];
   const absolute = path.join(root, directory);
   const entries = await readdir(absolute, { withFileTypes: true }).catch(
     () => [],
   );
   const files: string[] = [];
   for (const entry of entries) {
+    if (budget.count >= WALK_MAX_FILES) break;
     if (WALK_EXCLUDED_DIRS.has(entry.name)) continue;
     const relative = path.join(directory, entry.name).replaceAll("\\", "/");
     if (entry.isDirectory())
-      files.push(...(await filesFromWalk(root, relative, depth + 1)));
-    else files.push(relative);
+      files.push(...(await filesFromWalk(root, relative, depth + 1, budget)));
+    else {
+      files.push(relative);
+      budget.count += 1;
+    }
   }
   return files;
 }
@@ -260,6 +280,8 @@ async function objectiveSearchMatches(
     "!node_modules/**",
     "-g",
     "!.localcode/**",
+    "-g",
+    "!.shelracode/**",
     "-g",
     "!dist/**",
     ...terms.flatMap((term) => ["-e", term]),
@@ -500,17 +522,60 @@ async function buildRepositoryContextInternal(
         ordered,
         options.signal,
       );
-  const skillContext =
-    factQuestion || options.loadSkills === false
-      ? { metadata: [], selected: [], loaded: [] as LoadedSkill[] }
-      : await buildSkillContext(options.root, options.objective, {
+  const skillContext = factQuestion
+    ? { metadata: [], selected: [], loaded: [] as LoadedSkill[] }
+    : await buildSkillContext(options.root, options.objective, {
+        signal: options.signal,
+        maxSkills: 64,
+        loadBodies: false,
+      });
+  const skillActivation: CapabilityActivationMode =
+    options.skillActivation ??
+    (options.loadSkills === true ? "opt_in" : "disabled");
+  const skillRegistry = new CapabilityRegistry();
+  for (const skill of skillContext.metadata) {
+    try {
+      skillRegistry.registerSkill(skill);
+    } catch {
+      // Malformed optional Skill metadata must not block repository context.
+    }
+  }
+  for (const report of options.skillEvaluations ?? []) {
+    try {
+      // Reports are supplied by the host evaluation service. Repository
+      // frontmatter never reaches this path and cannot manufacture evidence.
+      skillRegistry.recordPairedEvaluation(report);
+    } catch (error) {
+      logger?.warn("context.skill_evaluation.rejected", {
+        reason: error instanceof Error ? error.message : "invalid report",
+      });
+    }
+  }
+  const skillActivationDecisions: CapabilityActivationDecision[] =
+    skillRegistry.resolveAll({
+      mode: skillActivation,
+      profile: options.skillProfile,
+      configurationDigest: options.skillConfigurationDigest,
+      task: options.skillTask,
+    });
+  const activeSkillIds = new Set(
+    skillActivationDecisions
+      .filter((decision) => decision.active)
+      .map((decision) => decision.capabilityId),
+  );
+  const selectedSkillMetadata = skillContext.selected.filter((skill) =>
+    activeSkillIds.has(skill.id),
+  );
+  const loadedSkills =
+    selectedSkillMetadata.length === 0
+      ? []
+      : await loadSkillBodies(options.root, selectedSkillMetadata, {
           signal: options.signal,
-          maxSkills: 64,
         });
   const trustedInstructions = composeTrustedInstructions({
     project: [
       ...loadedInstructions,
-      ...skillContext.loaded.map((skill) => ({
+      ...loadedSkills.map((skill) => ({
         source: skill.sourceId,
         text: skill.body,
         trust: skill.trust,
@@ -545,7 +610,7 @@ async function buildRepositoryContextInternal(
     const clippedMetadata = metadataLines.slice(0, remaining);
     if (clippedMetadata)
       sections.push(
-        `Available Skill metadata (bodies loaded only for objective matches):\n${clippedMetadata}`,
+        `Available Skill metadata (bodies load only after host activation):\n${clippedMetadata}`,
       );
     usedChars += clippedMetadata.length;
   }
@@ -663,7 +728,8 @@ async function buildRepositoryContextInternal(
     intelligenceSelection,
     trustedInstructions,
     skillMetadata: skillContext.metadata,
-    selectedSkills: skillContext.loaded,
+    selectedSkills: loadedSkills,
+    skillActivationDecisions,
     instructionSources: trustedInstructions.map(
       (instruction) => instruction.sourceId,
     ),

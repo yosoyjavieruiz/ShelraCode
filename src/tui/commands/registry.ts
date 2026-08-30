@@ -153,7 +153,7 @@ export function createUICommands(execute: (id: string) => void): UICommand[] {
     }),
     command("rollback", "Rollback checkpoint", "Changes", {
       slash: "/rollback",
-      description: "Restore Shelra Code-owned changes",
+      description: "Restore ShelraCode-owned changes",
       icon: "↶",
     }),
     command("explain-route", "Explain route", "Routing", {
@@ -195,7 +195,7 @@ export function createUICommands(execute: (id: string) => void): UICommand[] {
       description: "Inspect local readiness",
       icon: "✚",
     }),
-    command("setup", "Setup Shelra Code", "System", {
+    command("setup", "Setup ShelraCode", "System", {
       slash: "/setup",
       description: "Run the guided workspace setup",
       icon: "◆",
@@ -235,7 +235,7 @@ export function createUICommands(execute: (id: string) => void): UICommand[] {
       description: "Clear the visible transcript",
       icon: "×",
     }),
-    command("exit", "Exit Shelra Code", "System", {
+    command("exit", "Exit ShelraCode", "System", {
       slash: "/exit",
       description: "Leave the terminal application",
       icon: "↗",

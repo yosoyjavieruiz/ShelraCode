@@ -7,7 +7,7 @@ let renderer: { destroy: () => void } | undefined;
 afterEach(() => {
   renderer?.destroy();
   renderer = undefined;
-  delete process.env.LOCALCODE_UI_FIXTURE;
+  delete process.env.SHELRACODE_UI_FIXTURE;
 });
 
 type RenderTreeNode = {
@@ -40,7 +40,7 @@ for (const [width, height] of [
   [200, 60],
 ] as const) {
   test(`transcript and composer share one column at ${width}x${height}`, async () => {
-    process.env.LOCALCODE_UI_FIXTURE = "conversation";
+    process.env.SHELRACODE_UI_FIXTURE = "conversation";
     const setup = await testRender(() => <AppShell fixture="conversation" />, {
       width,
       height,

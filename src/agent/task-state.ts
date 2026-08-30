@@ -1,3 +1,4 @@
+import { workspacePathComparisonKey } from "../shared/workspace-paths.js";
 import type { TurnMode } from "./turn-policy.js";
 import type { VerificationCommand } from "./verification-plan.js";
 import type { TaskGraph } from "./task-graph.js";
@@ -232,15 +233,45 @@ export function canTransitionTaskPhase(
 }
 
 /**
+ * The working tree changed in task-owned paths between the crash and this
+ * resume (resume-policy.ts's "task_changes_detected"). Nothing in the ledger
+ * links a successCriterion or verificationRun to the specific path(s) it
+ * depended on, so proof recorded before this point cannot be trusted to
+ * still hold for content that changed underneath it: reset it and drop
+ * evidence for the changed paths so the next turn re-reads them, instead of
+ * resuming on stale completion state.
+ */
+function invalidateStaleResumeProof(
+  ledger: AgentTaskLedger,
+  changedPaths: readonly string[],
+): void {
+  const changedKeys = new Set(changedPaths.map(workspacePathComparisonKey));
+  ledger.filesRead = ledger.filesRead.filter(
+    (path) => !changedKeys.has(workspacePathComparisonKey(path)),
+  );
+  ledger.evidence = ledger.evidence.filter(
+    (item) => !changedKeys.has(workspacePathComparisonKey(item.source)),
+  );
+  for (const criterion of ledger.successCriteria) criterion.satisfied = false;
+  ledger.verificationRuns = [];
+}
+
+/**
  * Reopen a persisted non-complete task for a new user-controlled resume.
  * Completed work is intentionally immutable; blocked/failed/cancelled work
  * resumes through the reflective recovery phase instead of replaying an
- * in-flight mutation.
+ * in-flight mutation. `changedPaths` are task-owned paths the host found
+ * changed on disk since the persisted snapshot; any completion proof or
+ * evidence recorded before this point is invalidated for them.
  */
-export function reopenTaskForResume(ledger: AgentTaskLedger): void {
+export function reopenTaskForResume(
+  ledger: AgentTaskLedger,
+  changedPaths: readonly string[] = [],
+): void {
   if (ledger.phase === "complete")
     throw new Error("A completed task cannot be resumed as active work.");
   if (terminalPhases.has(ledger.phase)) ledger.phase = "reflect";
+  if (changedPaths.length > 0) invalidateStaleResumeProof(ledger, changedPaths);
   ledger.updatedAt = now();
 }
 
@@ -385,6 +416,24 @@ export function recordTaskAction(
   ledger.updatedAt = now();
 }
 
+/**
+ * Attribute paths the host observed as newly changed on disk around a
+ * successful Shell/RunTests call. Those tools have risk "execute", not
+ * "write", so recordTaskAction's target (the tool name, since execute
+ * actions have no single file path) never reaches filesChanged; without
+ * this, a task's own side-effecting shell command (formatter, lockfile
+ * regeneration, install) is invisible to the resume-ownership check and a
+ * safe resume is wrongly blocked as "changes outside the task scope".
+ */
+export function recordTaskMutatedPaths(
+  ledger: AgentTaskLedger,
+  paths: readonly string[],
+): void {
+  if (paths.length === 0) return;
+  for (const path of paths) addUnique(ledger.filesChanged, path);
+  ledger.updatedAt = now();
+}
+
 export function recordVerificationRun(
   ledger: AgentTaskLedger,
   run: VerificationRun,
@@ -396,5 +445,7 @@ export function recordVerificationRun(
 }
 
 function addUnique(values: string[], value: string): void {
-  if (!values.includes(value)) values.push(value);
+  const key = workspacePathComparisonKey(value);
+  if (!values.some((existing) => workspacePathComparisonKey(existing) === key))
+    values.push(value);
 }

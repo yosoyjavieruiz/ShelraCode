@@ -16,6 +16,13 @@ import type {
   ModelCandidate,
 } from "../shared/types.js";
 import { CheckpointService } from "../checkpoint/checkpoint.js";
+import { createExecutionBroker } from "../security/execution-broker.js";
+import {
+  createExactModelIdentity,
+  createUncalibratedDriverProfile,
+  type ExactModelIdentity,
+  type ModelDriverProfile,
+} from "../driver/profile.js";
 import { LocalCodeDatabase } from "../storage/database.js";
 import { ToolError } from "../tools/errors.js";
 import { runTestsTool, workspaceTools } from "../tools/workspace.js";
@@ -49,6 +56,167 @@ export interface AgentCapabilityProbeResult {
 }
 
 export const AGENT_CAPABILITY_PROBE_VERSION = 14;
+
+/**
+ * Turns a passing capability probe into a real, persistable, deliberately
+ * conservative `ModelDriverProfile`.
+ *
+ * This closes a gap that made write authority permanently unreachable for
+ * every real local model: `driverProfileCanWrite` requires
+ * `status === "certified"`, but nothing in the codebase ever produced a
+ * certified profile -- `saveModelDriverProfile` existed and worked, it was
+ * simply never called. Every `EditFile`/`WriteFile`/`CreateFile` request
+ * failed with "Workspace mutation requires a current certified Driver
+ * profile" unconditionally, for every model, forever; the executable probe
+ * evidence this function reads (a real EditFile applied, a real RunTests
+ * iteration observed, real tool-error recovery) already existed and was
+ * already being computed -- it just never reached the one place that
+ * gates mutation.
+ *
+ * Only returns a profile for `advanced_coding_agent`: the class that
+ * specifically requires `execution.editApplied`/`execution.testIteration`/
+ * error-recovery to all be true, not just the protocol-level tool-call
+ * checks. `writeAuthority` is `"bounded"` -- certification grants a
+ * verified model the ABILITY to write at all, it does not bypass
+ * checkpoints, permission mode, or any other host-owned control.
+ */
+/**
+ * The identity a certified profile is keyed under for a given candidate.
+ * Exported so a lookup site (deciding whether an EXISTING certification
+ * applies to the model selected for a fresh task) computes exactly the
+ * same digest `driverProfileFromCapabilityProbe` certified under --
+ * `getModelDriverProfileForIdentity` matches by exact digest equality, so
+ * any drift between how the two sides build this object is a silent
+ * "never matches" bug, not a type error.
+ */
+export function exactModelIdentityFromCandidate(
+  candidate: ModelCandidate,
+  now: Date = new Date(),
+): ExactModelIdentity {
+  return createExactModelIdentity({
+    providerFamily: candidate.providerId,
+    modelId: candidate.modelId ?? candidate.displayName,
+    runtime: candidate.local?.runtime ?? candidate.providerId,
+    endpointProtocol: "openai_compatible",
+    artifactId: candidate.local?.artifactId ?? null,
+    quantization: candidate.local?.quant ?? null,
+    parameterClass: null,
+    runtimeVersion: candidate.local?.runtimeVersion ?? null,
+    contextConfiguration: candidate.capabilities.maxContext
+      ? { catalogMaxTokens: candidate.capabilities.maxContext }
+      : {},
+    samplingConfiguration: {},
+    operatingSystem: process.platform,
+    createdAt: now.toISOString(),
+  });
+}
+
+/**
+ * Every write-authority tier driverProfileFromCapabilityProbe can certify
+ * (below) needs this exact set of capability classes to have gone through
+ * the disposable executable probe (the only source of execution.editApplied
+ * evidence). Keep this in sync with the classes driverProfileFromCapabilityProbe
+ * accepts -- a caller that only triggers the executable probe for a
+ * narrower set than this leaves every task outside that narrower set
+ * permanently uncertified, regardless of how permissive certification below
+ * is. Confirmed live: a caller that only probed for "advanced_coding_agent"
+ * left every ordinary "coding_agent"-routed task (the common case) with the
+ * probe never run at all, so certification could never fire no matter how
+ * the tier logic below was widened.
+ */
+export function capabilityClassNeedsExecutableProbe(
+  requiredCapability: AgentCapabilityClass,
+): boolean {
+  return (
+    requiredCapability === "advanced_coding_agent" ||
+    requiredCapability === "coding_agent"
+  );
+}
+
+export function driverProfileFromCapabilityProbe(
+  candidate: ModelCandidate,
+  probe: NonNullable<ModelCandidate["agentProbe"]>,
+  now: Date = new Date(),
+): ModelDriverProfile | undefined {
+  // A model that has proven it can actually apply a real edit
+  // (execution.editApplied, measured by the disposable executable probe,
+  // never self-reported) has earned bounded write authority, even when it
+  // has not separately proven the fail -> inspect/edit -> retest -> pass
+  // recovery loop that "advanced_coding_agent" additionally requires.
+  // Certifying only the advanced tier left every coding_agent-tier model --
+  // including ones the router itself already admits for direct/greenfield
+  // execution (src/tui/app.tsx's directCodingExecution/
+  // emptyGreenfieldExecution) -- permanently unable to write anything: the
+  // task would route, plan, and then hard-block on its very first CreateFile
+  // or EditFile with "Workspace mutation requires a current certified
+  // Driver profile", regardless of demonstrated edit capability. Confirmed
+  // live against a real local model: agentCapabilityClass "coding_agent"
+  // with execution.editApplied === true, blocked on every write before this
+  // widening.
+  const isAdvanced = probe.agentCapabilityClass === "advanced_coding_agent";
+  const isProvenEditor =
+    probe.agentCapabilityClass === "coding_agent" &&
+    probe.execution?.editApplied === true;
+  if (!isAdvanced && !isProvenEditor) return undefined;
+  const identity = exactModelIdentityFromCandidate(candidate, now);
+  const base = createUncalibratedDriverProfile(identity);
+  const contextCeiling = candidate.capabilities.maxContext
+    ? Math.max(4_000, Math.floor(candidate.capabilities.maxContext * 4 * 0.6))
+    : 14_000;
+  return {
+    ...base,
+    status: "certified",
+    // Matches the existing "mayExecute requires capabilityLevel >= C3"
+    // threshold in src/agent/dynamic-capabilities.ts: this is the lowest
+    // level that grants execution/write-adjacent authority at all, for
+    // either tier below -- a coding_agent-tier certification at a lower
+    // level would just move this exact block to that separate gate instead
+    // of fixing it. The tiers differ in action horizon and recovery
+    // confidence, not in whether execution is admitted.
+    capabilityLevel: "C3",
+    protocol: "native_function",
+    // EditFile's actual contract (src/tools/workspace.ts): exact old/new
+    // text replacement, not a unified diff or whole-file rewrite.
+    editCodec: "search_replace",
+    maxCertifiedToolSurface: 5,
+    preferredToolStages: [["ReadFile"], ["EditFile", "WriteFile"], ["RunTests"]],
+    contextBudget: {
+      minimum: 4_000,
+      preferred: Math.min(14_000, contextCeiling),
+      maximum: contextCeiling,
+    },
+    outputBudget: 2_048,
+    // The probe measures tool selection/continuation, not visible
+    // reasoning output; claiming a specific reasoning mode here would be
+    // asserting something this evidence doesn't show.
+    reasoning: { mode: "off", budget: null },
+    // The proven-editor tier has not demonstrated recovering from a failing
+    // verification loop, so it gets a shorter leash before the host must
+    // re-check progress, and a shorter certification life before the next
+    // probe re-measures it.
+    maxCertifiedActionHorizon: isAdvanced ? 16 : 8,
+    recoveryPolicyId: isAdvanced
+      ? "capability-probe-verified-recovery"
+      : "capability-probe-partial-evidence-recovery",
+    writeAuthority: "bounded",
+    networkAuthority: "none",
+    benchmarkEvidence: [
+      {
+        id: `capability-probe-v${AGENT_CAPABILITY_PROBE_VERSION}${
+          isAdvanced ? "" : "-coding-agent-tier"
+        }`,
+      },
+    ],
+    // Real local-model behavior is inexpensive to re-verify, and a short
+    // expiry means a regression in a later probe run naturally supersedes a
+    // stale certification instead of it lingering unbounded. The
+    // proven-editor tier gets an even shorter window since its evidence is
+    // thinner.
+    expiresAt: new Date(
+      now.getTime() + (isAdvanced ? 24 : 6) * 60 * 60 * 1000,
+    ).toISOString(),
+  };
+}
 
 const PROBE_TEMPERATURE = 0;
 const PROBE_MAX_OUTPUT_TOKENS = 512;
@@ -457,6 +625,21 @@ async function runExecutableCapabilityProbe(
               network: false,
               checkpoint,
               env: process.env,
+              // Write authority is intentionally bounded (not gated behind
+              // Driver certification) here: the whole point of this probe
+              // is to test whether an as-yet-uncertified candidate model
+              // can perform edits, inside a disposable mkdtemp root that
+              // absorbs the risk. Process execution has no such
+              // containment (a spawned process isn't confined to `root`),
+              // so that stays fail-closed to the strict-zero local
+              // allowlist rather than trusting an unverified model's
+              // command choices.
+              executionBroker: createExecutionBroker({
+                root,
+                networkMode: "strict-zero",
+                writeAuthority: "bounded",
+                allowUnverifiedProcesses: false,
+              }),
             };
           },
         },
@@ -464,23 +647,53 @@ async function runExecutableCapabilityProbe(
       );
     };
 
-    const editResult = await runProbeTask(
-      "capability-probe-edit",
-      "CAPABILITY EDIT: Read src/message.ts, change the exact greeting value from hello to hello world, then confirm the change.",
-      ["ReadFile", "EditFile"],
-      [],
-    );
-    const editedContent = await readFile(
-      path.join(root, "src", "message.ts"),
-      "utf8",
-    );
-    const editApplied =
-      editResult.status === "completed" &&
-      editResult.ledger.filesChanged.length > 0 &&
-      editedContent.includes('greeting = "hello world"');
+    // The executable edit exercise is the single gate that grants a real
+    // local model any write authority (see driverProfileFromCapabilityProbe).
+    // A capable model's tool-call output is stochastic: it may miss the exact
+    // edit on one probe run (wrong wording, off-by-a-token oldText, or it
+    // stops one turn short) and nail it on the next. Measuring it exactly once
+    // turned that variance into a hard, unrecoverable brick -- reproduced live
+    // against Qwen3-4B, LM Studio: the same model that edits perfectly failed
+    // this single probe some runs, leaving every EditFile/WriteFile/CreateFile
+    // denied for the whole session. Give a capable model a few bounded
+    // attempts, resetting the disposable fixture between them, so certification
+    // reflects capability rather than a single lucky/unlucky draw. This does
+    // not weaken the gate: authority is still granted only on a *demonstrated*
+    // verified edit.
+    const EDIT_PROBE_MAX_ATTEMPTS = 3;
+    let editApplied = false;
+    let editAttempts = 0;
+    for (
+      let attempt = 1;
+      attempt <= EDIT_PROBE_MAX_ATTEMPTS && !editApplied;
+      attempt += 1
+    ) {
+      if (attempt > 1)
+        // Reset the disposable fixture so each attempt targets clean input.
+        await writeFile(
+          path.join(root, "src", "message.ts"),
+          'export const greeting = "hello";\n',
+          "utf8",
+        );
+      const editResult = await runProbeTask(
+        "capability-probe-edit",
+        "CAPABILITY EDIT: Read src/message.ts, change the exact greeting value from hello to hello world, then confirm the change.",
+        ["ReadFile", "EditFile"],
+        [],
+      );
+      const editedContent = await readFile(
+        path.join(root, "src", "message.ts"),
+        "utf8",
+      );
+      editAttempts = attempt;
+      editApplied =
+        editResult.status === "completed" &&
+        editResult.ledger.filesChanged.length > 0 &&
+        editedContent.includes('greeting = "hello world"');
+    }
     if (!editApplied)
       notes.push(
-        "The executable edit probe did not produce the requested verified file change.",
+        `The executable edit probe did not produce the requested verified file change after ${editAttempts} attempt(s).`,
       );
 
     const testResult = await runProbeTask(
@@ -553,6 +766,8 @@ export interface AgentCapabilityProbeEnvironmentInput {
 export interface AgentCapabilityProbeOptions {
   /** Disposable repository root for executable edit/test probes. */
   root?: string;
+  /** Measure the typed tool-error recovery protocol without enabling writes. */
+  probeErrorRecovery?: boolean;
   /** Optional runtime and hardware facts captured with the result. */
   environment?: AgentCapabilityProbeEnvironmentInput;
   logger?: LocalCodeLogger;
@@ -802,7 +1017,7 @@ export async function probeAgentCapability(
     notes.push("Model did not continue after a failing test observation.");
 
   let errorRecovery: boolean | undefined;
-  if (options.root) {
+  if (options.root || options.probeErrorRecovery) {
     errorRecovery = await probeToolErrorRecovery(
       provider,
       modelId,

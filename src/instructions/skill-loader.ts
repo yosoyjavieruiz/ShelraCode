@@ -4,12 +4,12 @@ import {
   instructionPrecedence,
   type InstructionTrust,
 } from "./trust-policy.js";
+import type { ActionProtocol, CapabilityLevel } from "../driver/profile.js";
 
-const DEFAULT_SKILL_ROOTS = [
-  ".agents/skills",
-  ".claude/skills",
-  ".codex/skills",
-];
+// Product Skills live only under `.agents/skills`. `.claude/` is reserved for
+// the Claude Code harness (agents, skills, hooks, commands) and must never be
+// loaded into the ShelraCode product runtime, or the two would be coupled.
+const DEFAULT_SKILL_ROOTS = [".agents/skills"];
 const DEFAULT_METADATA_CHARS = 8_192;
 const DEFAULT_BODY_CHARS = 12_000;
 
@@ -17,12 +17,37 @@ export interface SkillMetadata {
   id: string;
   name: string;
   description: string;
+  /** Explicit version; legacy project Skills are represented as version 0. */
+  version: string;
   path: string;
   sourceId: string;
   scope: ".";
   trust: Extract<InstructionTrust, "project">;
   precedence: number;
   keywords: string[];
+  activation: {
+    taskTags: string[];
+    languages: string[];
+    frameworks: string[];
+    requiredCapabilities: string[];
+  };
+  compatibility: {
+    minCapabilityLevel: CapabilityLevel;
+    driverProtocols: Exclude<ActionProtocol, "unselected">[];
+  };
+  evidence: {
+    pairedEvaluationId: string | null;
+    decision: "auto_enable" | "opt_in_only" | "revise" | "remove" | null;
+    driverProfileId: string | null;
+    driverIdentityDigest: string | null;
+    configurationDigest: string | null;
+    evaluatedAt: string | null;
+  };
+  authority: {
+    mayWrite: boolean;
+    mayExecute: boolean;
+    mayNetwork: boolean;
+  };
 }
 
 export interface LoadedSkill extends SkillMetadata {
@@ -33,6 +58,8 @@ export interface SkillCatalogOptions {
   roots?: readonly string[];
   maxSkills?: number;
   metadataChars?: number;
+  /** Keep metadata-only discovery separate from body activation. */
+  loadBodies?: boolean;
   signal?: AbortSignal;
 }
 
@@ -82,12 +109,80 @@ function frontMatterValue(
   return match?.[1]?.trim().replace(/^['"]|['"]$/gu, "");
 }
 
+function frontMatterList(frontMatter: string, key: string): string[] {
+  const raw = frontMatterValue(frontMatter, key);
+  if (!raw) return [];
+  const unwrapped = raw.replace(/^\[|\]$/gu, "");
+  return [
+    ...new Set(
+      unwrapped
+        .split(/[\s,]+/u)
+        .map((value) => value.trim().toLowerCase())
+        .filter((value) => value.length > 0),
+    ),
+  ].sort();
+}
+
+function frontMatterBoolean(frontMatter: string, key: string): boolean {
+  return frontMatterValue(frontMatter, key)?.toLowerCase() === "true";
+}
+
+const CAPABILITY_LEVELS: readonly CapabilityLevel[] = [
+  "C0",
+  "C1",
+  "C2",
+  "C3",
+  "C4",
+  "C5",
+  "C6",
+];
+
+const DRIVER_PROTOCOLS: readonly Exclude<ActionProtocol, "unselected">[] = [
+  "native_function",
+  "constrained_json",
+  "xml_system_tools",
+  "text_action_grammar",
+];
+
+const PAIRED_DECISIONS = [
+  "auto_enable",
+  "opt_in_only",
+  "revise",
+  "remove",
+] as const;
+
+function frontMatterCapabilityLevel(frontMatter: string): CapabilityLevel {
+  const value = frontMatterValue(frontMatter, "minCapabilityLevel");
+  return CAPABILITY_LEVELS.includes(value as CapabilityLevel)
+    ? (value as CapabilityLevel)
+    : "C0";
+}
+
+function frontMatterProtocols(
+  frontMatter: string,
+): Exclude<ActionProtocol, "unselected">[] {
+  return frontMatterList(frontMatter, "driverProtocols").filter(
+    (value): value is Exclude<ActionProtocol, "unselected"> =>
+      DRIVER_PROTOCOLS.includes(value as Exclude<ActionProtocol, "unselected">),
+  );
+}
+
+function frontMatterNullable(frontMatter: string, key: string): string | null {
+  const value = frontMatterValue(frontMatter, key)?.trim();
+  return value ? value : null;
+}
+
 function parseMetadata(
   prefix: string,
   directoryName: string,
 ): {
   name: string;
   description: string;
+  version: string;
+  activation: SkillMetadata["activation"];
+  compatibility: SkillMetadata["compatibility"];
+  evidence: SkillMetadata["evidence"];
+  authority: SkillMetadata["authority"];
 } {
   const match = prefix.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/u);
   const frontMatter = match?.[1] ?? "";
@@ -97,6 +192,52 @@ function parseMetadata(
     description:
       frontMatterValue(frontMatter, "description") ||
       `Project skill ${directoryName}`,
+    version: frontMatterValue(frontMatter, "version") || "0",
+    activation: {
+      taskTags: frontMatterList(frontMatter, "taskTags"),
+      languages: frontMatterList(frontMatter, "languages"),
+      frameworks: frontMatterList(frontMatter, "frameworks"),
+      requiredCapabilities: frontMatterList(
+        frontMatter,
+        "requiredCapabilities",
+      ),
+    },
+    compatibility: {
+      minCapabilityLevel: frontMatterCapabilityLevel(frontMatter),
+      driverProtocols: frontMatterProtocols(frontMatter),
+    },
+    evidence: {
+      pairedEvaluationId: frontMatterNullable(
+        frontMatter,
+        "pairedEvaluationId",
+      ),
+      decision: PAIRED_DECISIONS.includes(
+        frontMatterValue(
+          frontMatter,
+          "pairedDecision",
+        ) as (typeof PAIRED_DECISIONS)[number],
+      )
+        ? (frontMatterValue(
+            frontMatter,
+            "pairedDecision",
+          ) as (typeof PAIRED_DECISIONS)[number])
+        : null,
+      driverProfileId: frontMatterNullable(frontMatter, "driverProfileId"),
+      driverIdentityDigest: frontMatterNullable(
+        frontMatter,
+        "driverIdentityDigest",
+      ),
+      configurationDigest: frontMatterNullable(
+        frontMatter,
+        "configurationDigest",
+      ),
+      evaluatedAt: frontMatterNullable(frontMatter, "evaluatedAt"),
+    },
+    authority: {
+      mayWrite: frontMatterBoolean(frontMatter, "mayWrite"),
+      mayExecute: frontMatterBoolean(frontMatter, "mayExecute"),
+      mayNetwork: frontMatterBoolean(frontMatter, "mayNetwork"),
+    },
   };
 }
 
@@ -164,12 +305,17 @@ export async function discoverSkillMetadata(
           id: skillId(normalizedPath),
           name: parsed.name.slice(0, 160),
           description: parsed.description.slice(0, 500),
+          version: parsed.version.slice(0, 64),
           path: normalizedPath,
           sourceId: normalizedPath,
           scope: ".",
           trust: "project",
           precedence: instructionPrecedence("project", 0, 20),
           keywords: terms(`${parsed.name} ${parsed.description}`).slice(0, 32),
+          activation: parsed.activation,
+          compatibility: parsed.compatibility,
+          evidence: parsed.evidence,
+          authority: parsed.authority,
         });
       } catch {
         // Missing or unreadable skills are omitted from the model catalog.
@@ -250,6 +396,9 @@ export async function buildSkillContext(
 }> {
   const metadata = await discoverSkillMetadata(root, options);
   const selected = selectRelevantSkills(metadata, objective, 2);
-  const loaded = await loadSkillBodies(root, selected, options);
+  const loaded =
+    options.loadBodies === true
+      ? await loadSkillBodies(root, selected, options)
+      : [];
   return { metadata, selected, loaded };
 }

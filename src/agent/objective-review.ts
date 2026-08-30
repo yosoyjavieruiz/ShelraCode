@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { runCommand } from "../shared/process.js";
+import { normalizeWorkspacePath } from "../shared/workspace-paths.js";
+import { describesMutation } from "./mutation-intent.js";
 import type { AgentTask } from "./types.js";
 import type { AgentTaskLedger } from "./task-state.js";
 
@@ -96,18 +98,20 @@ function isExplicitFileReference(
     Math.max(0, candidateStart - 72),
     candidateStart,
   );
-  return /(?:file|path|route|document|archivo|ruta|fichero|documento)\s*(?:named|called|de|del|:)?\s*[`"']?\s*$/iu.test(
+  return /(?:file|path|route|document|archivo|ruta|fichero|documento)\s*(?:named|called|llamado|llamada|de|del|:)?\s*[`"']?\s*$/iu.test(
     before,
   );
 }
 
-const CHANGE_PATTERN =
-  /\b(?:add|added|change|changed|correct|corrected|fix|fixed|implement|implemented|modify|modified|refactor|rename|remove|update|write|create|agrega|anade|arregla|cambia|corrige|crea|implementa|modifica|renombra|elimina|actualiza)\b/iu;
-
-const TEST_PATTERN = /\b(?:test|tests|testing|test(s)?|prueba|pruebas)\b/iu;
+// A path-prefixed occurrence ("docs/testing.md") or a hyphenated/dotted
+// filename continuation ("test-helpers.ts") is a filename mention, not a
+// request that tests be written or run — exclude both instead of matching
+// "test"/"testing" as a bare word anywhere in the objective.
+const TEST_PATTERN =
+  /(?<![/\\])\b(?:test|tests|testing|prueba|pruebas)\b(?![-\w]*\.[a-z]{1,4}\b)/iu;
 const EXPORT_PATTERN = /\b(?:export|exports|exportar|exporta)\b/iu;
 const UNRESOLVED_PLACEHOLDER_PATTERN =
-  /\[(?:add|insert|replace|todo|your|required|project[- ]?directory|tooling|license|if\s+applicable|fill\s+in|describe|enter)[^\]\r\n]{0,160}\]|<(?:your[- ]?[^>\r\n]*|project[- ]?(?:directory|name|path)|repository[- ]?(?:url|name|path)|repo[- ]?(?:url|name|path)|required[- ]?[^>\r\n]*)>|\b(?:project|repository|repo)[-_ ]?(?:name|url|directory|path)\b|\b(?:adjust|fill in|replace this|your default command)\b|(?:\/path\/to\/|\\path\\to\\)|\b(?:TODO|TBD|FIXME)\b|\b(?:placeholder|template)\b/iu;
+  /\[(?:add|insert|replace|todo|your|required|project[- ]?directory|tooling|license|if\s+applicable|fill\s+in|describe|enter)[^\]\r\n]{0,160}\]|<(?:your[- ]?[^>\r\n]*|project[- ]?(?:directory|name|path)|repository[- ]?(?:url|name|path)|repo[- ]?(?:url|name|path)|required[- ]?[^>\r\n]*)>|\b(?:project|repository|repo)[-_](?:name|url|directory|path)\b|\b(?:adjust|fill in|replace this|your default command)\b|(?:\/path\/to\/|\\path\\to\\)|\b(?:TODO|TBD|FIXME)\b|\b(?:placeholder|template)\b/iu;
 
 const HTML_SCRIPT_SOURCE_PATTERN =
   /<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/giu;
@@ -121,12 +125,6 @@ const JAVASCRIPT_CLASS_LOOKUP_PATTERN =
   /\bgetElementsByClassName\s*\(\s*["']([^"']+)["']/giu;
 const HTML_ID_PATTERN = /\bid\s*=\s*["']([^"']+)["']/giu;
 const HTML_CLASS_PATTERN = /\bclass\s*=\s*["']([^"']+)["']/giu;
-
-function normalizeWorkspacePath(value: string): string {
-  return path.posix
-    .normalize(value.replaceAll("\\", "/").replace(/^\.\//u, ""))
-    .replace(/^\.\//u, "");
-}
 
 export function extractObjectivePaths(objective: string): string[] {
   const paths = new Set<string>();
@@ -426,7 +424,7 @@ export async function reviewCodingObjective(
   const namedPaths = [...new Set([...explicitPaths, ...stagedPaths])];
   const readPaths = ledger.filesRead.map(normalizeWorkspacePath);
   const changedPaths = ledger.filesChanged.map(normalizeWorkspacePath);
-  const mutationRequested = CHANGE_PATTERN.test(objective);
+  const mutationRequested = describesMutation(objective);
   const modelPlan =
     ledger.taskGraph?.planSource === "model" ? ledger.taskGraph : undefined;
   // For an LLM-authored plan, semantic relevance is established by the

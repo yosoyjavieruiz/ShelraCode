@@ -15,7 +15,6 @@ export interface ShelraInstallPaths {
   binDir: string;
   executablePath: string;
   manifestPath: string;
-  compatibilityShimPath: string;
 }
 
 export interface ActiveInstallationManifest {
@@ -85,14 +84,11 @@ export function installPaths(
     installDir ?? defaultInstallDirectory(platform, environment),
   );
   const executable = platform === "win32" ? `${CLI_NAME}.exe` : CLI_NAME;
-  const compatibilityShim =
-    platform === "win32" ? "localcode.cmd" : "localcode";
   return {
     stateDir: path.dirname(binDir),
     binDir,
     executablePath: path.join(binDir, executable),
     manifestPath: path.join(path.dirname(binDir), "active.json"),
-    compatibilityShimPath: path.join(binDir, compatibilityShim),
   };
 }
 
@@ -195,6 +191,48 @@ async function persistWindowsUserPath(
   }
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function unlinkWithRetry(
+  targetPath: string,
+  attempts = 5,
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await unlink(targetPath);
+      return;
+    } catch (error) {
+      if (isMissing(error)) return;
+      const code = errorCode(error);
+      const locked =
+        code === "EPERM" || code === "EBUSY" || code === "EACCES";
+      if (!locked || attempt === attempts - 1) throw error;
+      await sleep(120 * (attempt + 1));
+    }
+  }
+}
+
+async function renameWithRetry(
+  from: string,
+  to: string,
+  attempts = 5,
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = errorCode(error);
+      const locked =
+        code === "EPERM" || code === "EBUSY" || code === "EACCES";
+      if (!locked || attempt === attempts - 1) throw error;
+      await sleep(150 * (attempt + 1));
+    }
+  }
+}
+
 async function replaceActiveExecutable(
   stagedPath: string,
   executablePath: string,
@@ -202,18 +240,36 @@ async function replaceActiveExecutable(
   const previousPath = `${executablePath}.previous`;
   let previousVersionBackedUp = false;
   try {
-    await unlink(previousPath);
+    await unlinkWithRetry(previousPath, 3);
   } catch (error) {
-    if (!isMissing(error)) throw error;
+    if (!isMissing(error)) {
+      // On Windows the previous backup may be locked by antivirus or a
+      // still-running shelra.exe. The active install can still proceed by
+      // leaving the old backup in place; the next successful build will
+      // replace it. Do not fail the entire build for a stale backup lock.
+      const code = errorCode(error);
+      if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw error;
+    }
   }
   try {
-    await rename(executablePath, previousPath);
+    await renameWithRetry(executablePath, previousPath, 4);
     previousVersionBackedUp = true;
   } catch (error) {
-    if (!isMissing(error)) throw error;
+    if (isMissing(error)) {
+      // No active executable to back up yet — first install.
+    } else {
+      const code = errorCode(error);
+      const locked = code === "EPERM" || code === "EBUSY" || code === "EACCES";
+      if (locked) {
+        throw new Error(
+          `Cannot replace the active executable — it is still running or locked by another process (${executablePath}). Close any running shelra terminals and try again, or run with SHELRA_BUILD_SKIP_INSTALL=1 to only build dist without installing. Original error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      throw error;
+    }
   }
   try {
-    await rename(stagedPath, executablePath);
+    await renameWithRetry(stagedPath, executablePath, 4);
   } catch (error) {
     if (previousVersionBackedUp) {
       await rename(previousPath, executablePath).catch(() => undefined);
@@ -221,24 +277,6 @@ async function replaceActiveExecutable(
     throw error;
   }
   return previousVersionBackedUp;
-}
-
-async function writeCompatibilityShim(
-  paths: ShelraInstallPaths,
-): Promise<void> {
-  if (path.extname(paths.compatibilityShimPath).toLowerCase() === ".cmd") {
-    await writeFile(
-      paths.compatibilityShimPath,
-      `@echo off\r\n"%~dp0${CLI_NAME}.exe" %*\r\n`,
-      "utf8",
-    );
-    return;
-  }
-  await writeFile(
-    paths.compatibilityShimPath,
-    `#!/bin/sh\nexec "$(dirname "$0")/${CLI_NAME}" "$@"\n`,
-    { encoding: "utf8", mode: 0o755 },
-  );
 }
 
 export async function installExecutable(
@@ -281,8 +319,6 @@ export async function installExecutable(
       `${JSON.stringify(manifest, null, 2)}\n`,
       "utf8",
     );
-    await writeCompatibilityShim(paths);
-
     const shouldPersistPath = options.persistUserPath ?? platform === "win32";
     let pathPersisted = false;
     if (shouldPersistPath && platform === "win32") {

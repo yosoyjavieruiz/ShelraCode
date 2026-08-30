@@ -97,6 +97,38 @@ test("a read-a-file request resolves to workspace_question mode", () => {
   expect(mode).toBe("workspace_question");
 });
 
+// Regression: a bare filename mention with no generic repository vocabulary
+// ("project", "repo", "codebase"...) fell through resolveTurnMode's EXPLAIN
+// branch into "knowledge" mode, which grants zero tools. The model then had
+// no way to read the named file and falsely told the user it could not
+// access local files at all -- confirmed against a live run asking to
+// summarize a named file. referencesRepository() must recognize an explicit
+// file mention on its own, not only generic project vocabulary.
+test("naming a specific file without repository vocabulary still exposes read tools", () => {
+  const { mode, policy } = policyFor(
+    "Read the document called CATALOG.md and summarize what it contains.",
+  );
+  expect(mode).not.toBe("knowledge");
+  expect(mode).toBe("workspace_question");
+  expect(policy.allowedTools).toContain("ReadFile");
+  expect(policy.toolChoice).toBe("auto");
+});
+
+test("a Spanish file-summary request naming a file exposes read tools", () => {
+  const { mode, policy } = policyFor(
+    "Lee el documento llamado CATALOG.md en la raiz y hazme un resumen de lo que contiene.",
+  );
+  expect(mode).not.toBe("knowledge");
+  expect(mode).toBe("workspace_question");
+  expect(policy.allowedTools).toContain("ReadFile");
+});
+
+test("a general knowledge question with no file mention still resolves to knowledge mode", () => {
+  // Guard against over-widening: this must stay zero-tool for a real
+  // general-knowledge question that never names a workspace file.
+  expect(policyFor("What is GGUF?").mode).toBe("knowledge");
+});
+
 test("an explicit no-edit constraint keeps a repository question read-only", () => {
   const objective =
     "Lee el proyecto actual y dime que archivos existen. No edites nada.";

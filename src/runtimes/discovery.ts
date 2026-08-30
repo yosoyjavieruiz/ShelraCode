@@ -1,4 +1,5 @@
 import type { FetchLike } from "../providers/types.js";
+import { readProductEnv } from "../product/identity.js";
 import { OllamaRuntime } from "./ollama.js";
 import { OpenAICompatibleLocalRuntime } from "./http.js";
 import type { LocalRuntimeAdapter, RuntimeDetection } from "./types.js";
@@ -15,19 +16,22 @@ export function createLocalRuntimeAdapters(
   fetchImpl: FetchLike = (input, init) => fetch(input, init),
   logger?: LocalCodeLogger,
 ): LocalRuntimeAdapter[] {
+  const ollamaUrl =
+    readProductEnv(env, "OLLAMA_URL") ?? "http://127.0.0.1:11434";
+  const openAiBaseUrl = readProductEnv(env, "OPENAI_BASE_URL");
+  const lmStudioUrl =
+    readProductEnv(env, "LM_STUDIO_URL") ?? "http://127.0.0.1:1234/v1";
+  const llamaCppUrl =
+    readProductEnv(env, "LLAMA_CPP_URL") ?? "http://127.0.0.1:8080/v1";
   const adapters: LocalRuntimeAdapter[] = [
-    new OllamaRuntime(
-      env.LOCALCODE_OLLAMA_URL ?? "http://127.0.0.1:11434",
-      fetchImpl,
-      logger,
-    ),
+    new OllamaRuntime(ollamaUrl, fetchImpl, logger),
   ];
-  if (env.LOCALCODE_OPENAI_BASE_URL) {
+  if (openAiBaseUrl) {
     adapters.push(
       new OpenAICompatibleLocalRuntime(
         "local-openai",
         "OpenAI-compatible local endpoint",
-        env.LOCALCODE_OPENAI_BASE_URL,
+        openAiBaseUrl,
         fetchImpl,
         logger,
       ),
@@ -37,7 +41,7 @@ export function createLocalRuntimeAdapters(
     new OpenAICompatibleLocalRuntime(
       "lm-studio",
       "LM Studio",
-      env.LOCALCODE_LM_STUDIO_URL ?? "http://127.0.0.1:1234/v1",
+      lmStudioUrl,
       fetchImpl,
       logger,
     ),
@@ -46,7 +50,7 @@ export function createLocalRuntimeAdapters(
     new OpenAICompatibleLocalRuntime(
       "llama.cpp",
       "llama.cpp server",
-      env.LOCALCODE_LLAMA_CPP_URL ?? "http://127.0.0.1:8080/v1",
+      llamaCppUrl,
       fetchImpl,
       logger,
     ),

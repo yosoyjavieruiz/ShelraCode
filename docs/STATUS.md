@@ -49,7 +49,7 @@ as `BLOCKED` activity with a typed recovery explanation.
 The ASK permission flow now has explicit `Approve once`, `Allow for this
 session`, `Always allow in this project`, `Deny`, and `Cancel turn` decisions.
 Session grants stay in memory; project grants are validated and persisted in
-`.localcode/config.json`. Shell and RunTests grants retain an exact normalized
+`.shelracode/config.json`. Shell and RunTests grants retain an exact normalized
 command, while file grants are explicit tool/risk rules. Secret-shaped command
 grants are refused for persistence, and saved approval rules do not bypass
 workspace, network, or process policy.
@@ -66,8 +66,7 @@ source TUI PTY (Windows)
 
 `bun run build` now also compiles `dist/shelra.exe`, installs the active Windows
 user version under `%USERPROFILE%\.shelra\bin`, writes
-`%USERPROFILE%\.shelra\active.json`, creates the `localcode.cmd`
-compatibility shim, and updates the user PATH. A fresh shell can therefore run
+`%USERPROFILE%\.shelra\active.json`, and updates the user PATH. A fresh shell can therefore run
 `shelra` from another project directory without LM Studio or a repository-local
 script path.
 
@@ -86,10 +85,10 @@ script path.
 - Models, Providers, Usage, Routing, Privacy, Changes, Settings, Context, Plan,
   Doctor, Sessions, Checkpoints and Help have V2 presentation adapters over
   existing domain services.
-- `localcode setup` now opens a staged V2 onboarding surface for hardware,
+- `shelra setup` now opens a staged V2 onboarding surface for hardware,
   LM Studio/local models, configured providers, privacy and routing, and saves
   through the existing settings services.
-- Every no-argument `shelra`/`localcode`/`--tui` launch now enters the same
+- Every no-argument `shelra`/`--tui` launch now enters the same
   conversation surface from any workspace. The onboarding surface remains an
   explicit `setup` command, so changing projects cannot change the main CLI.
 - Slash commands, command palette entries and default help metadata share one

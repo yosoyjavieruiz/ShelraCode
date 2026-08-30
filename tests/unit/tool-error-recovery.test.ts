@@ -16,7 +16,7 @@ import type { ToolExecutionContext } from "../../src/tools/types.js";
 import { CheckpointService } from "../../src/checkpoint/checkpoint.js";
 import { LocalCodeDatabase } from "../../src/storage/database.js";
 
-// Regression coverage for the exact failures reported against LocalCode's
+// Regression coverage for the exact failures reported against ShelraCode's
 // agent loop: `ListFiles` called on a SKILL.md file path (raw ENOTDIR) and
 // `ReadFile` called with an invalid `maxChars`. Both must now surface a
 // typed, model-correctable ToolError instead of an opaque filesystem

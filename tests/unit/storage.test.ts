@@ -17,7 +17,7 @@ test("storage migrations are idempotent and preserve settings", () => {
 
   expect(storage.getSetting("routing.mode")).toBe("strict-zero");
   expect(storage.getSetting("privacy.policy")).toBe("private");
-  expect(storage.schemaVersion()).toBe(4);
+  expect(storage.schemaVersion()).toBe(5);
 
   storage.close();
 });

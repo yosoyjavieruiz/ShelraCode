@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { prepareInteractiveTerminal } from "../../src/tui/terminal.js";
+import {
+  prepareInteractiveTerminal,
+  shouldCancelOnSignal,
+} from "../../src/tui/terminal.js";
 
 describe("interactive terminal preparation", () => {
   test("normalizes dumb Windows terminals for OpenTUI", () => {
@@ -60,5 +63,10 @@ describe("interactive terminal preparation", () => {
         isInteractive: false,
       }),
     ).toThrow("requires an interactive terminal");
+  });
+
+  test("only routes Ctrl+C to cancellation while a task is active", () => {
+    expect(shouldCancelOnSignal(false)).toBe(false);
+    expect(shouldCancelOnSignal(true)).toBe(true);
   });
 });

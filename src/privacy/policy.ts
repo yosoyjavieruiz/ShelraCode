@@ -14,12 +14,12 @@ export interface SecretFinding {
 }
 
 const neverRemotePatterns: RegExp[] = [
-  /(^|\/)\.env(?:\.|$)/i,
-  /(^|\/)credentials?(?:\.|$)/i,
-  /(^|\/)secrets?(?:\.|$)/i,
-  /(^|\/)passwords?(?:\.|$)/i,
-  /(^|\/)tokens?(?:\.|$)/i,
-  /(^|\/)id_rsa[^/]*$/i,
+  /(^|\/)\.env(?:[./]|$)/i,
+  /(^|\/)credentials?(?:[./]|$)/i,
+  /(^|\/)secrets?(?:[./]|$)/i,
+  /(^|\/)passwords?(?:[./]|$)/i,
+  /(^|\/)tokens?(?:[./]|$)/i,
+  /(^|\/)id_rsa[^/]*(?:\/|$)/i,
   /\.(?:pem|key|p12|pfx)$/i,
   /(^|\/)\.aws\//i,
   /(^|\/)\.ssh\//i,

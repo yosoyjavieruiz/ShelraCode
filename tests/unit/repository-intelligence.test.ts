@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "bun:test";
@@ -188,4 +188,82 @@ test("extracts Python and Go declarations without executing repository code", as
       }),
     ]),
   );
+});
+
+test("excludes generated, vendor, and runtime paths while indexing PowerShell facts", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-intelligence-exclusions-"),
+  );
+  roots.push(root);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await mkdir(path.join(root, "vendor"), { recursive: true });
+  await mkdir(path.join(root, "generated"), { recursive: true });
+  await mkdir(path.join(root, ".shelracode"), { recursive: true });
+  await writeFile(
+    path.join(root, "src", "build.ps1"),
+    "function Invoke-Parser { return $true }\n",
+  );
+  await writeFile(
+    path.join(root, "vendor", "parser.ts"),
+    "export function parseVendor() { return true; }\n",
+  );
+  await writeFile(
+    path.join(root, "generated", "parser.generated.ts"),
+    "export function parseGenerated() { return true; }\n",
+  );
+  await writeFile(
+    path.join(root, ".shelracode", "runtime.ts"),
+    "export const runtime = true;\n",
+  );
+
+  const index = await buildRepositoryIntelligence({
+    root,
+    files: [
+      "src/build.ps1",
+      "vendor/parser.ts",
+      "generated/parser.generated.ts",
+      ".shelracode/runtime.ts",
+    ],
+  });
+
+  expect(index.indexedFiles).toEqual(["src/build.ps1"]);
+  expect(index.symbols).toEqual([
+    expect.objectContaining({
+      name: "Invoke-Parser",
+      path: "src/build.ps1",
+      kind: "function",
+    }),
+  ]);
+  expect(index.excludedFiles).toEqual([
+    { path: ".shelracode/runtime.ts", reason: "runtime" },
+    { path: "generated/parser.generated.ts", reason: "generated" },
+    { path: "vendor/parser.ts", reason: "vendor" },
+  ]);
+});
+
+test("reapplies privacy and exclusion policy after resolving an in-workspace symlink", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-intelligence-symlink-policy-"),
+  );
+  roots.push(root);
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await mkdir(path.join(root, "vendor"), { recursive: true });
+  const vendorFile = path.join(root, "vendor", "parser.ts");
+  await writeFile(
+    vendorFile,
+    "export function parseVendor() { return true; }\n",
+  );
+  const alias = path.join(root, "src", "parser-alias.ts");
+  try {
+    await symlink(vendorFile, alias, "file");
+  } catch {
+    // Symlink creation can be unavailable on restricted Windows hosts.
+    return;
+  }
+  const index = await buildRepositoryIntelligence({
+    root,
+    files: ["src/parser-alias.ts"],
+  });
+  expect(index.indexedFiles).toEqual([]);
+  expect(index.symbols).toEqual([]);
 });

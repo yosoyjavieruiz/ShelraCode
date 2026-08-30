@@ -1,8 +1,8 @@
-# LocalCode Architecture
+# ShelraCode Architecture
 
 ## Shape
 
-LocalCode is one Bun package with a typed application core and adapter boundaries:
+ShelraCode is one Bun package with a typed application core and adapter boundaries:
 
 ```text
 CLI / TUI

@@ -7,6 +7,7 @@ import {
 } from "./process-policy.js";
 import {
   enforceProcessIsolation,
+  statusFromIsolatedSpawn,
   type ProcessIsolationMode,
   type ProcessIsolationStatus,
 } from "./process-isolation.js";
@@ -176,6 +177,110 @@ function spawnProcess(
   });
 }
 
+/**
+ * Attempts the real Windows OS boundary (Job Object + AppContainer, see
+ * `src/shared/win32/isolated-process.ts`) for this call. Returns `null`
+ * when unavailable for this specific call (non-Windows, or the adapter
+ * failed to initialize) so the caller falls back to the plain `Bun.spawn`
+ * path unchanged.
+ */
+async function tryRunCommandIsolatedWindows(
+  command: string,
+  args: string[],
+  options: ProcessOptions,
+  policyCommand: string,
+  maxOutputChars: number,
+  started: number,
+): Promise<ProcessResult | null> {
+  if (process.platform !== "win32") return null;
+  const { spawnIsolatedWindows } = await import("./win32/isolated-process.js");
+  options.logger?.debug("process.started", {
+    command,
+    argumentCount: args.length,
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(options.timeoutMs === undefined
+      ? {}
+      : { timeoutMs: options.timeoutMs }),
+  });
+  let isolated;
+  try {
+    isolated = await spawnIsolatedWindows(command, args, {
+      cwd: options.cwd ?? process.cwd(),
+      env: safeProcessEnvironment(options.env),
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
+      maxOutputChars,
+      onOutput: options.onOutput,
+      // TODO(phase-12): AppContainer network denial is implemented and
+      // independently verified for ordinary commands (ping/curl genuinely
+      // blocked; workspace ACL grant makes file reads work; the
+      // ERROR_ENVVAR_NOT_FOUND CreateProcessW failure this had was fixed by
+      // widening ESSENTIAL_WINDOWS_ENV_NAMES in isolated-process.ts). But
+      // `git` still fails inside it -- "unable to get current working
+      // directory: Permission denied" from git itself in a fresh empty
+      // directory, or CreateProcessW itself failing with ERROR_DIRECTORY
+      // (267) intermittently for a large real repository -- and neither
+      // reproduces with cmd.exe/type/dir against the same paths, so it
+      // isn't a plain ACL gap the workspace grant could close. Root cause
+      // not yet isolated; disabled by default until it is. Job Object
+      // containment (always on, no ACL side effects) still applies
+      // unconditionally regardless of this flag.
+      denyNetwork: false,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError")
+      options.logger?.warn("process.timed_out", {
+        command,
+        durationMs: Math.round(performance.now() - started),
+        timedOut: true,
+      });
+    else if (
+      error instanceof DOMException &&
+      (error.name === "AbortError" || options.signal?.aborted)
+    )
+      options.logger?.info("process.cancelled", {
+        command,
+        durationMs: Math.round(performance.now() - started),
+      });
+    else
+      options.logger?.error("process.failed", {
+        command,
+        durationMs: Math.round(performance.now() - started),
+        errorType: error instanceof Error ? error.name : "unknown",
+      });
+    throw error;
+  }
+  if (!isolated) return null;
+  const isolation = statusFromIsolatedSpawn(isolated.mechanism);
+  const result: ProcessResult = {
+    exitCode: isolated.exitCode,
+    stdout: isolated.stdout,
+    stderr: isolated.stderr,
+    durationMs: Math.round(performance.now() - started),
+    timedOut: false,
+    stdoutTruncated: isolated.stdoutTruncated,
+    stderrTruncated: isolated.stderrTruncated,
+    isolation,
+  };
+  const data = {
+    command,
+    exitCode: result.exitCode,
+    durationMs: result.durationMs,
+    timedOut: false,
+    stdoutLength: result.stdout.length,
+    stderrLength: result.stderr.length,
+    stdoutTruncated: result.stdoutTruncated,
+    stderrTruncated: result.stderrTruncated,
+    processIntent: options.intent,
+    osIsolation: result.isolation.osEnforced,
+    isolationMechanism: result.isolation.mechanism,
+  };
+  if (result.exitCode === 0 || result.exitCode === 127)
+    options.logger?.info("process.finished", data);
+  else options.logger?.warn("process.finished", data);
+  return result;
+}
+
 export async function runCommand(
   command: string,
   args: string[] = [],
@@ -189,7 +294,7 @@ export async function runCommand(
     network: options.network,
     allowDestructive: options.allowDestructive,
   });
-  const isolation = enforceProcessIsolation({
+  let isolation = enforceProcessIsolation({
     mode: options.isolation,
     allowWeak: options.allowWeakIsolation,
   });
@@ -202,6 +307,20 @@ export async function runCommand(
     : DEFAULT_PROCESS_OUTPUT_CHARS;
 
   const started = performance.now();
+  const isolatedResult = await tryRunCommandIsolatedWindows(
+    command,
+    args,
+    options,
+    policyCommand,
+    maxOutputChars,
+    started,
+  );
+  if (isolatedResult) return isolatedResult;
+  // The win32 adapter was attempted and declined this call (rare -- see
+  // tryRunCommandIsolatedWindows); the pre-check `isolation` above was
+  // optimistic about Job Object availability and must not be reported for
+  // the plain Bun.spawn fallback that actually ran.
+  if (process.platform === "win32") isolation = statusFromIsolatedSpawn("none");
   options.logger?.debug("process.started", {
     command,
     argumentCount: args.length,

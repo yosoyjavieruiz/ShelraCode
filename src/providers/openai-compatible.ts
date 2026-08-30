@@ -1,4 +1,5 @@
 import { parseQuotaHeaders } from "../quota/headers.js";
+import { estimateModelQuality } from "../shared/model-quality.js";
 import type { ModelCandidate } from "../shared/types.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
 import type {
@@ -31,6 +32,45 @@ function numberValue(value: unknown): number | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * `reasoning_effort` is an OpenAI o1/o3-style convention; a backend that
+ * doesn't recognize it silently ignores it (harmless), but that also means
+ * it does nothing for a model whose actual reasoning toggle is a different,
+ * model-family-specific field. Qwen3's own chat template controls thinking
+ * via `enable_thinking` (the convention vLLM/SGLang expose as
+ * `chat_template_kwargs.enable_thinking`), not `reasoning_effort` --
+ * sending only the generic field means "high effort" silently does nothing
+ * for a Qwen3 model on a backend that doesn't translate one into the other.
+ * Qwen3's thinking is a binary switch, not a graduated scale, so "low" maps
+ * to off and "medium"/"high" both map to on. Both fields are sent
+ * together: unrecognized JSON fields are conventionally ignored, so this
+ * is strictly additive for backends that only understand one of the two.
+ *
+ * Verified directly against a live LM Studio Qwen3 endpoint: with
+ * `chat_template_kwargs: { enable_thinking: true }` sent, the response's
+ * `usage.completion_tokens_details.reasoning_tokens` was still 0 and
+ * `message.reasoning_content` was empty -- for that specific model/build,
+ * neither mechanism produces a reasoning trace, which reads as that
+ * particular fine-tune not having thinking-mode training at all, not as
+ * this translation being wrong for models that do.
+ */
+function isQwen3Family(modelId: string): boolean {
+  return /qwen[-_]?3\b/iu.test(modelId);
+}
+
+function reasoningRequestExtras(
+  modelId: string,
+  reasoningEffort: NormalizedModelRequest["reasoningEffort"],
+): JsonRecord {
+  if (reasoningEffort === undefined) return {};
+  const extras: JsonRecord = { reasoning_effort: reasoningEffort };
+  if (isQwen3Family(modelId))
+    extras.chat_template_kwargs = {
+      enable_thinking: reasoningEffort !== "low",
+    };
+  return extras;
 }
 
 function toolArgumentsFragment(value: unknown): string {
@@ -163,7 +203,7 @@ export class GenericOpenAICompatibleProvider implements ProviderAdapter {
           },
           free: { ...freeStatus },
           privacy: { ...this.profile.privacy },
-          quality: { confidence: "unknown" },
+          quality: estimateModelQuality({ modelId, displayName: modelId }),
           health: { state: "unknown" },
         },
       ];
@@ -279,6 +319,7 @@ export class GenericOpenAICompatibleProvider implements ProviderAdapter {
           ...(request.temperature === undefined
             ? {}
             : { temperature: request.temperature }),
+          ...reasoningRequestExtras(request.modelId, request.reasoningEffort),
           stream: request.stream,
         }),
         signal,

@@ -16,8 +16,7 @@
 ShelraCode routes repository work through local runtimes first and can use
 verified-free cloud capacity when the active privacy and cost policy allows
 it. It never silently upgrades to a paid route. The package and primary CLI are
-named `shelra`; `localcode` remains a compatibility command while
-**ShelraCode** is the product name shown by the terminal UI.
+named `shelra`; **ShelraCode** is the product name shown by the terminal UI.
 
 The central idea is simple:
 
@@ -81,9 +80,8 @@ complex repository work.
 The verified Windows artifacts are `dist/index.js` and `dist/shelra.exe`.
 `bun run build` copies the standalone executable to
 `%USERPROFILE%\.shelra\bin\shelra.exe`, writes the active installation
-manifest, creates the `localcode.cmd` compatibility shim, and adds that bin
-directory to the user PATH. Open a new terminal after the build so the new PATH
-is inherited.
+manifest, and adds that bin directory to the user PATH. Open a new terminal
+after the build so the new PATH is inherited.
 
 ## Product contract
 
@@ -129,9 +127,7 @@ shelra
 shelra --version
 ```
 
-The no-argument command uses the current directory as the workspace. Existing
-`localcode` command invocations remain supported through the compatibility
-shim.
+The no-argument command uses the current directory as the workspace.
 
 Every no-argument launch opens the same main conversation TUI, regardless of
 the current project or whether that project has local configuration. Setup is
@@ -169,12 +165,12 @@ keys or place them in tests, fixtures, screenshots, traces, or issue reports.
 GROQ_API_KEY=
 OPENROUTER_API_KEY=
 
-LOCALCODE_LM_STUDIO_URL=http://127.0.0.1:1234/v1
-LOCALCODE_OLLAMA_URL=http://127.0.0.1:11434
-LOCALCODE_LLAMA_CPP_URL=http://127.0.0.1:8080/v1
+SHELRACODE_LM_STUDIO_URL=http://127.0.0.1:1234/v1
+SHELRACODE_OLLAMA_URL=http://127.0.0.1:11434
+SHELRACODE_LLAMA_CPP_URL=http://127.0.0.1:8080/v1
 
-LOCALCODE_PRIVACY=private
-LOCALCODE_ROUTING_MODE=strict-zero
+SHELRACODE_PRIVACY=private
+SHELRACODE_ROUTING_MODE=strict-zero
 ```
 
 The supported free paths do not require a paid subscription:

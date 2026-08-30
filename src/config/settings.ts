@@ -1,6 +1,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { classifyRepositoryPrivacy } from "../privacy/policy.js";
+import {
+  LEGACY_PRODUCT_STATE_DIR_NAME,
+  PRODUCT_STATE_DIR_NAME,
+  readProductEnv,
+} from "../product/identity.js";
 import type {
   PermissionMode,
   RepositoryPrivacy,
@@ -28,19 +33,22 @@ export type PersistedRepositorySettings = Partial<
 export function readSettings(
   env: Record<string, string | undefined> = process.env,
 ): LocalCodeSettings {
+  const routingSetting = readProductEnv(env, "ROUTING_MODE");
+  const permissionSetting = readProductEnv(env, "PERMISSION");
+  const privacySetting = readProductEnv(env, "PRIVACY");
   const routingMode: RoutingMode =
-    env.LOCALCODE_ROUTING_MODE === "ask-before-paid"
+    routingSetting === "ask-before-paid"
       ? "ask-before-paid"
       : "strict-zero";
   const permissionMode: PermissionMode =
-    env.LOCALCODE_PERMISSION === "ASK" ||
-    env.LOCALCODE_PERMISSION === "PLAN" ||
-    env.LOCALCODE_PERMISSION === "EDIT" ||
-    env.LOCALCODE_PERMISSION === "AUTO"
-      ? env.LOCALCODE_PERMISSION
+    permissionSetting === "ASK" ||
+    permissionSetting === "PLAN" ||
+    permissionSetting === "EDIT" ||
+    permissionSetting === "AUTO"
+      ? permissionSetting
       : "ASK";
   return {
-    privacy: classifyRepositoryPrivacy(env.LOCALCODE_PRIVACY),
+    privacy: classifyRepositoryPrivacy(privacySetting),
     routingMode,
     permissionMode,
     permissionRules: [],
@@ -81,18 +89,30 @@ function validSettings(value: unknown): PersistedRepositorySettings {
   return result;
 }
 
+async function readSettingsFile(
+  filePath: string,
+): Promise<PersistedRepositorySettings | undefined> {
+  try {
+    const content = await readFile(filePath, "utf8");
+    return validSettings(JSON.parse(content) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function readRepositorySettings(
   root: string,
 ): Promise<PersistedRepositorySettings> {
-  try {
-    const content = await readFile(
-      path.join(root, ".localcode", "config.json"),
-      "utf8",
+  for (const directoryName of [
+    PRODUCT_STATE_DIR_NAME,
+    LEGACY_PRODUCT_STATE_DIR_NAME,
+  ]) {
+    const settings = await readSettingsFile(
+      path.join(root, directoryName, "config.json"),
     );
-    return validSettings(JSON.parse(content) as unknown);
-  } catch {
-    return {};
+    if (settings !== undefined) return settings;
   }
+  return {};
 }
 
 /**
@@ -109,7 +129,7 @@ export async function persistRepositorySettings(
   root: string,
   settings: PersistedRepositorySettings,
 ): Promise<void> {
-  const directory = path.join(root, ".localcode");
+  const directory = path.join(root, PRODUCT_STATE_DIR_NAME);
   await mkdir(directory, { recursive: true });
   const existing = await readRepositorySettings(root);
   await writeFile(

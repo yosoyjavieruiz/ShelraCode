@@ -38,8 +38,8 @@ operations now return bounded diff evidence and typed path errors.
       package command supplies `--conditions=browser`, required by the OpenTUI /
       Solid test runtime.
 - [x] Source and bundle `--help`, `--version` and `doctor` smoke passed.
-- [x] `localcode setup --non-interactive` reported hardware, runtimes, model fit, policy and routing state; repository settings persisted under `.localcode/config.json`.
-- [x] `bun run catalog:refresh` completed and wrote 437 normalized models to the ignored `.localcode/model-catalog.json`; the snapshot contained no credential-like fields.
+- [x] `shelra setup --non-interactive` reported hardware, runtimes, model fit, policy and routing state; repository settings persisted under `.shelracode/config.json`.
+- [x] `bun run catalog:refresh` completed and wrote 437 normalized models to the ignored `.shelracode/model-catalog.json`; the snapshot contained no credential-like fields.
 - [x] Current-source and bundled OpenTUI TUI launched through a real PTY; the command palette rendered, the bundled 80-column shell drew through the default `TERM=dumb` environment after the Windows bootstrap repair, and `/exit` restored the terminal. The isolated OpenTUI renderer lifecycle smoke exited with code 0.
 - [x] Agent fixture read, edited, ran a deterministic test and returned a verified result.
 - [x] Rebuilt bundle completed a real local LM Studio/Qwen read-only task through `ListFiles`; no cloud request or file mutation occurred.
@@ -48,7 +48,7 @@ operations now return bounded diff evidence and typed path errors.
 - [x] Provider contract tests covered normalized discovery, streaming/tool-call aggregation, usage, authentication, quota, billing, capacity, timeout and malformed responses.
 - [x] Routing integration exercised local failure, free-provider circuit
       opening, compliant free fallback, and per-task pre-mutation route retry.
-- [x] Checkpoint tests restored LocalCode-owned content and refused to overwrite an external edit.
+- [x] Checkpoint tests restored ShelraCode-owned content and refused to overwrite an external edit.
 - [x] TUI renderer tests covered 80, 100, 120 and 160 columns.
 
 ## Production packaging update — 2026-08-26
@@ -62,7 +62,7 @@ operations now return bounded diff evidence and typed path errors.
 - [x] The installed executable returned the expected `--help`, `--version`,
       and `doctor` output; standalone smoke passed.
 - [x] Installer unit coverage passed for atomic activation, previous-version
-      backup, the `localcode.cmd` compatibility shim, and idempotent PATH
+      backup, the canonical `shelra.exe` activation, and idempotent PATH
       handling.
 - [x] The post-packaging canonical suite passed: `593 pass`, `1 skip`, `0 fail`
       across 594 tests in 104 files.

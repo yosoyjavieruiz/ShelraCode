@@ -5,6 +5,14 @@ import type { AgentTaskLedger } from "../agent/task-state.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
 import type { MemoryFact, MemoryKind } from "../shared/memory.js";
 import {
+  assertModelDriverProfile,
+  exactModelIdentityDigest,
+  invalidateModelDriverProfile,
+  parseModelDriverProfile,
+  type ExactModelIdentity,
+  type ModelDriverProfile,
+} from "../driver/profile.js";
+import {
   restoreTaskRuntime,
   serializeTaskRuntime,
   type RuntimeRestoreResult,
@@ -14,7 +22,7 @@ import type {
   TaskRuntimeSnapshotInput,
 } from "../agent/task-runtime-state.js";
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 type StoredAgentProbe = NonNullable<ModelCandidate["agentProbe"]>;
 
 export class RuntimePersistenceConflictError extends Error {
@@ -164,6 +172,19 @@ export class LocalCodeDatabase {
     );
 
     const version = this.schemaVersion();
+    if (version < 5) {
+      this.db.run(
+        `CREATE TABLE IF NOT EXISTS model_driver_profiles (
+          profile_id TEXT PRIMARY KEY,
+          identity_digest TEXT NOT NULL,
+          profile_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_driver_profiles_identity
+          ON model_driver_profiles (identity_digest);`,
+      );
+    }
     if (version < CURRENT_SCHEMA_VERSION) {
       this.db
         .query(
@@ -549,6 +570,106 @@ export class LocalCodeDatabase {
     return parsed ? { ...parsed, observedAt: row.observed_at } : undefined;
   }
 
+  saveModelDriverProfile(profile: ModelDriverProfile): void {
+    const valid = assertModelDriverProfile(profile);
+    this.db
+      .query(
+        `INSERT INTO model_driver_profiles
+          (profile_id, identity_digest, profile_json, status, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(profile_id) DO UPDATE SET
+           identity_digest = excluded.identity_digest,
+           profile_json = excluded.profile_json,
+           status = excluded.status,
+           created_at = excluded.created_at`,
+      )
+      .run(
+        valid.id,
+        valid.identityDigest,
+        JSON.stringify(valid),
+        valid.status,
+        valid.createdAt,
+      );
+    this.logger?.info("storage.driver_profile.persisted", {
+      profileId: valid.id,
+      identityDigest: valid.identityDigest,
+      status: valid.status,
+      capabilityLevel: valid.capabilityLevel,
+    });
+  }
+
+  getModelDriverProfile(profileId: string): ModelDriverProfile | undefined {
+    const row = this.db
+      .query<{ profile_json: string }, [string]>(
+        "SELECT profile_json FROM model_driver_profiles WHERE profile_id = ?",
+      )
+      .get(profileId);
+    if (!row) return undefined;
+    try {
+      const parsed = parseModelDriverProfile(JSON.parse(row.profile_json));
+      return parsed.ok ? parsed.value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  getModelDriverProfileForIdentity(
+    identity: ExactModelIdentity,
+  ): ModelDriverProfile | undefined {
+    const identityDigest = exactModelIdentityDigest(identity);
+    const rows = this.db
+      .query<{ profile_id: string; profile_json: string }, []>(
+        "SELECT profile_id, profile_json FROM model_driver_profiles",
+      )
+      .all();
+    let exact: ModelDriverProfile | undefined;
+    for (const row of rows) {
+      let parsed: ReturnType<typeof parseModelDriverProfile>;
+      try {
+        parsed = parseModelDriverProfile(JSON.parse(row.profile_json));
+      } catch {
+        continue;
+      }
+      if (!parsed.ok) continue;
+      const profile = parsed.value;
+      if (profile.identityDigest === identityDigest) {
+        exact = profile;
+        continue;
+      }
+      if (
+        profile.identity.providerFamily === identity.providerFamily &&
+        profile.identity.modelId === identity.modelId &&
+        profile.status !== "invalidated"
+      ) {
+        const invalidated = invalidateModelDriverProfile(profile);
+        this.db
+          .query(
+            `UPDATE model_driver_profiles
+             SET profile_json = ?, status = ?
+             WHERE profile_id = ?`,
+          )
+          .run(JSON.stringify(invalidated), invalidated.status, profile.id);
+      }
+    }
+    return exact;
+  }
+
+  listModelDriverProfiles(limit = 100): ModelDriverProfile[] {
+    const rows = this.db
+      .query<{ profile_json: string }, [number]>(
+        "SELECT profile_json FROM model_driver_profiles ORDER BY created_at DESC LIMIT ?",
+      )
+      .all(limit);
+    return rows.flatMap((row) => {
+      try {
+        const parsed = parseModelDriverProfile(JSON.parse(row.profile_json));
+        return parsed.ok ? [parsed.value] : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+
   saveMemoryFact(fact: MemoryFact): void {
     this.db
       .query(
@@ -635,6 +756,24 @@ export class LocalCodeDatabase {
       checkpointId: id,
       taskId,
     });
+  }
+
+  checkpointExists(checkpointId: string, taskId?: string): boolean {
+    if (taskId === undefined)
+      return Boolean(
+        this.db
+          .query<{ id: string }, [string]>(
+            "SELECT id FROM checkpoints WHERE id = ? LIMIT 1",
+          )
+          .get(checkpointId),
+      );
+    return Boolean(
+      this.db
+        .query<{ id: string }, [string, string]>(
+          "SELECT id FROM checkpoints WHERE id = ? AND task_id = ? LIMIT 1",
+        )
+        .get(checkpointId, taskId),
+    );
   }
 
   addCheckpointFile(

@@ -81,3 +81,25 @@ test("resume treats an interrupted target as task-owned", () => {
 
   expect(result.status).toBe("task_changes_detected");
 });
+
+test("resume treats a fingerprint change with zero enumerated paths as compatible (e.g. a branch-only switch)", () => {
+  const result = assessResumeWorkspace({
+    ...baseInput,
+    currentWorkingTreePaths: [],
+  });
+
+  expect(result.status).toBe("compatible");
+  expect(result.changedPaths).toEqual([]);
+  expect(result.unexpectedPaths).toEqual([]);
+});
+
+test("resume names the unexpected paths in the blocked reason", () => {
+  const result = assessResumeWorkspace({
+    ...baseInput,
+    currentWorkingTreePaths: ["src/parser.ts", "README.md"],
+    taskPaths: ["src/parser.ts"],
+  });
+
+  expect(result.status).toBe("blocked");
+  expect(result.reason).toMatch(/readme\.md/i);
+});

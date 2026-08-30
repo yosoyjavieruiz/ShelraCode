@@ -153,7 +153,7 @@ export function HomeView(props: {
   // hint line is pinned just above the composer when there's room for it.
   const tall = () => (props.height ?? 24) > 30;
   // Claude Code's welcome screen always names the working directory and
-  // model up front — LocalCode's status line named the model but never the
+  // model up front — ShelraCode's status line named the model but never the
   // project, so a fresh session gave no confirmation of *which* repo you're
   // about to point an agent at. Kept to one quiet line, matching the
   // existing restraint: no new block, no border, no second line.

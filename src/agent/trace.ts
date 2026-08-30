@@ -1,3 +1,5 @@
+import { readProductEnv } from "../product/identity.js";
+
 export interface AgentTraceEvent {
   timestamp: string;
   taskId: string;
@@ -46,7 +48,7 @@ export interface AgentTraceRecorder {
 
 /** Developer-only trace; raw prompts and hidden model reasoning are excluded. */
 export function createAgentTraceRecorder(
-  enabled = process.env.LOCALCODE_AGENT_TRACE === "1",
+  enabled = readProductEnv(process.env, "AGENT_TRACE") === "1",
   sink: AgentTraceSink = (event) => console.error(JSON.stringify(event)),
 ): AgentTraceRecorder {
   return {

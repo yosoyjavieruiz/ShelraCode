@@ -25,6 +25,12 @@ Repeated identical calls or repeated same-code failures trigger the
 non-progress watchdog. This protects the task lifecycle; it is not a local
 inference usage quota.
 
+The Phase 9 recovery boundary additionally normalizes failures into the shared
+`FailureClass` taxonomy in `src/agent/recovery.ts`, hashes action/state/failure
+signatures, and evaluates a bounded `RecoveryPolicy`. A repeated failure must
+change strategy (relocalize, re-encode, rollback, escalate, or stop); security
+and cancellation failures remain terminal.
+
 Execution results are normalized at the agent-loop boundary: a non-zero
 `RunTests` exit becomes recoverable `TEST_FAILED` evidence and a non-zero
 `Shell` exit becomes recoverable `COMMAND_FAILED` evidence. The structured

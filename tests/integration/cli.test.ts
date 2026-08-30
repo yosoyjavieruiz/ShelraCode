@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { parseCliArgs } from "../../src/cli/args.js";
+import { cliUsage, parseCliArgs } from "../../src/cli/args.js";
 import { defaultTuiScreen } from "../../src/cli/startup.js";
 
-describe("LocalCode CLI", () => {
+describe("ShelraCode CLI", () => {
   test("parses the default interactive command", () => {
     expect(parseCliArgs([])).toEqual({ command: "tui", args: [] });
     expect(defaultTuiScreen()).toBe("conversation");
@@ -17,6 +17,8 @@ describe("LocalCode CLI", () => {
   test("returns help and version as explicit commands", () => {
     expect(parseCliArgs(["--help"])).toEqual({ command: "help", args: [] });
     expect(parseCliArgs(["-v"])).toEqual({ command: "version", args: [] });
+    expect(cliUsage).toContain("ShelraCode");
+    expect(cliUsage).not.toContain("LocalCode");
   });
 
   test("rejects unknown commands with a stable error", () => {

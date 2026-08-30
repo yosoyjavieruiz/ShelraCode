@@ -81,6 +81,25 @@ test("classifies generic greenfield intent without naming a domain", () => {
   expect(isGreenfieldObjective("Update src/auth.ts")).toBe(false);
 });
 
+test("still classifies a from-scratch objective as greenfield when it also mentions a secondary fix", () => {
+  expect(
+    isGreenfieldObjective(
+      "Scaffold a new CLI subcommand and correct the command registration order",
+    ),
+  ).toBe(true);
+});
+
+test("classifies a fix-primary objective as not greenfield even when it mentions a secondary creation word", () => {
+  expect(isGreenfieldObjective("Fix the bug and add a regression test")).toBe(
+    false,
+  );
+  expect(
+    isGreenfieldObjective(
+      "Fix the auth bug and make sure existing tests still pass",
+    ),
+  ).toBe(false);
+});
+
 test("compiles explicit artifact content expectations without guessing a plan", () => {
   const contract = compileTaskContract({
     originalRequest:

@@ -671,3 +671,113 @@ test("errors keep the human problem separate from recovery detail", () => {
     }),
   );
 });
+
+test("GlobFiles shows the searched pattern and matched files, not a bare tool name", () => {
+  let state = beginTranscriptTurn(createTranscriptPresentation(), {
+    turnId: "turn-glob",
+    text: "Find every test file for the auth module.",
+  });
+  state = presentAppEvent(state, {
+    type: "tool.started",
+    callId: "glob-1",
+    tool: "GlobFiles",
+    input: { pattern: "src/**/*auth*.test.ts" },
+    risk: "read",
+  });
+  state = presentAppEvent(state, {
+    type: "tool.finished",
+    callId: "glob-1",
+    tool: "GlobFiles",
+    result: {
+      tool: "GlobFiles",
+      ok: true,
+      output: { files: ["src/auth/login.test.ts", "src/auth/session.test.ts"] },
+      durationMs: 12,
+    },
+  });
+  const group = state.items.find((item) => item.kind === "activity-group");
+  const activity =
+    group?.kind === "activity-group" ? group.activities[0] : undefined;
+  expect(activity).toEqual(
+    expect.objectContaining({
+      kind: "search",
+      target: "src/**/*auth*.test.ts",
+      state: "success",
+      summary: "2 matches",
+      details: ["src/auth/login.test.ts", "src/auth/session.test.ts"],
+    }),
+  );
+});
+
+test("DelegateSubagent shows what was delegated and what the child found", () => {
+  let state = beginTranscriptTurn(createTranscriptPresentation(), {
+    turnId: "turn-delegate",
+    text: "Investigate how sessions expire, then fix the bug.",
+  });
+  state = presentAppEvent(state, {
+    type: "tool.started",
+    callId: "delegate-1",
+    tool: "DelegateSubagent",
+    input: {
+      objective: "Explain how session expiry is triggered.",
+      allowedTools: ["SearchText"],
+      sourceIds: ["src/auth/session.ts"],
+    },
+    risk: "read",
+  });
+  state = presentAppEvent(state, {
+    type: "tool.finished",
+    callId: "delegate-1",
+    tool: "DelegateSubagent",
+    result: {
+      tool: "DelegateSubagent",
+      ok: true,
+      output: {
+        id: "task-1:subagent:child-1",
+        objective: "Explain how session expiry is triggered.",
+        status: "completed",
+        text: "Sessions expire via a TTL check in session.ts:42.",
+        evidence: [{ sourceId: "src/auth/session.ts", kind: "context", summary: "" }],
+        sourceIds: ["src/auth/session.ts"],
+        toolRuns: 2,
+      },
+      durationMs: 900,
+    },
+  });
+  const group = state.items.find((item) => item.kind === "activity-group");
+  const activity =
+    group?.kind === "activity-group" ? group.activities[0] : undefined;
+  expect(activity).toEqual(
+    expect.objectContaining({
+      kind: "tool",
+      target: "Explain how session expiry is triggered.",
+      state: "success",
+      summary: "completed · 1 evidence · 2 child calls",
+    }),
+  );
+  expect(activity?.details).toEqual(
+    expect.arrayContaining([
+      "Findings: Sessions expire via a TTL check in session.ts:42.",
+      "Sources read: src/auth/session.ts",
+    ]),
+  );
+});
+
+test("checkpoint.created is never silent — it surfaces as a visible restore-point notice", () => {
+  let state = beginTranscriptTurn(createTranscriptPresentation(), {
+    turnId: "turn-checkpoint",
+    text: "Fix the off-by-one in the paginator.",
+  });
+  state = presentAppEvent(state, {
+    type: "checkpoint.created",
+    id: "checkpoint-abc123",
+    paths: ["src/paginator.ts"],
+  });
+  expect(state.items.at(-1)).toEqual(
+    expect.objectContaining({
+      kind: "checkpoint-notice",
+      checkpointId: "checkpoint-abc123",
+      paths: ["src/paginator.ts"],
+    }),
+  );
+});

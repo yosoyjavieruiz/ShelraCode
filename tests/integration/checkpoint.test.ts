@@ -8,7 +8,7 @@ import { ToolError } from "../../src/tools/errors.js";
 import { createLogger, type LogRecord } from "../../src/shared/logging.js";
 
 describe("checkpoint rollback", () => {
-  test("restores only LocalCode-owned content", async () => {
+  test("restores only ShelraCode-owned content", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "localcode-checkpoint-"));
     await writeFile(path.join(root, "file.ts"), "before\n", "utf8");
     const db = new LocalCodeDatabase(":memory:");
@@ -77,6 +77,33 @@ test("reports whether checkpointed work is still preserved", async () => {
   expect(await service.isPreserved(id)).toBe(true);
   await writeFile(path.join(root, "file.ts"), "external\n", "utf8");
   expect(await service.isPreserved(id)).toBe(false);
+  db.close();
+});
+
+test("does not treat an unknown checkpoint id as preserved", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-checkpoint-unknown-"),
+  );
+  const db = new LocalCodeDatabase(":memory:");
+  const service = new CheckpointService(db, root);
+
+  expect(service.hasCheckpoint("missing-checkpoint")).toBe(false);
+  expect(await service.isPreserved("missing-checkpoint")).toBe(false);
+  db.close();
+});
+
+test("does not let one task resume against another task's checkpoint", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-checkpoint-ownership-"),
+  );
+  await writeFile(path.join(root, "file.ts"), "before\n", "utf8");
+  const db = new LocalCodeDatabase(":memory:");
+  const service = new CheckpointService(db, root);
+  const id = await service.create("task-a", ["file.ts"]);
+
+  expect(service.hasCheckpoint(id, "task-a")).toBe(true);
+  expect(service.hasCheckpoint(id, "task-b")).toBe(false);
+  expect(await service.isPreserved(id, "task-b")).toBe(false);
   db.close();
 });
 

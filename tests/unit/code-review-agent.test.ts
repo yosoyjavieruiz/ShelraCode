@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { runCodeReview } from "../../src/agent/code-review-agent.js";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -31,6 +31,7 @@ test("read-only code review passes an evidence-backed verified task", async () =
     target: "src/value.ts",
     status: "succeeded",
   });
+  ledger.filesChanged.push("src/value.ts");
   recordVerificationRun(ledger, {
     id: "test",
     stage: "test",
@@ -40,8 +41,11 @@ test("read-only code review passes an evidence-backed verified task", async () =
     startedAt: new Date().toISOString(),
   });
 
+  const isolatedRoot = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-code-review-pass-"),
+  );
   const report = await runCodeReview({
-    root: process.cwd(),
+    root: isolatedRoot,
     objective: ledger.objective,
     mode: "coding",
     ledger,
@@ -50,7 +54,7 @@ test("read-only code review passes an evidence-backed verified task", async () =
     verificationState: "available",
     finalReviewPerformed: true,
     userWorkPreserved: true,
-  });
+  }).finally(() => rm(isolatedRoot, { recursive: true, force: true }));
 
   expect(report.role).toBe("code-review");
   expect(report.verdict).toBe("PASS");

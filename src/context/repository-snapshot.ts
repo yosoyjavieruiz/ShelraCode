@@ -160,6 +160,7 @@ const extensionLanguages: Record<string, string> = {
 const ignoredDirectories = new Set([
   ".git",
   "node_modules",
+  ".shelracode",
   ".localcode",
   "dist",
   ".next",
@@ -168,26 +169,33 @@ const ignoredDirectories = new Set([
   ".venv",
 ]);
 
+const WALK_MAX_FILES = 5_000;
+
 async function walkFiles(
   root: string,
   directory = ".",
   depth = 0,
+  budget: { count: number } = { count: 0 },
 ): Promise<string[]> {
-  if (depth > 6) return [];
+  if (depth > 6 || budget.count >= WALK_MAX_FILES) return [];
   const absolute = path.join(root, directory);
   const entries = await readdir(absolute, { withFileTypes: true }).catch(
     () => [],
   );
   const files: string[] = [];
   for (const entry of entries) {
+    if (budget.count >= WALK_MAX_FILES) break;
     if (ignoredDirectories.has(entry.name)) continue;
     const relative = path
       .join(directory, entry.name)
       .replaceAll("\\", "/")
       .replace(/^\.\//, "");
     if (entry.isDirectory())
-      files.push(...(await walkFiles(root, relative, depth + 1)));
-    else files.push(relative);
+      files.push(...(await walkFiles(root, relative, depth + 1, budget)));
+    else {
+      files.push(relative);
+      budget.count += 1;
+    }
   }
   return files;
 }
@@ -230,22 +238,21 @@ async function gitValue(
   return value || undefined;
 }
 
-const MAX_WORKTREE_PATHS = 512;
+export const MAX_WORKTREE_PATHS = 512;
 const MAX_WORKTREE_FILE_BYTES = 16 * 1024 * 1024;
 
 /**
- * Produce a content-aware identity for the current checkout. Git HEAD alone
- * is insufficient for resume safety because staged, unstaged and untracked
- * changes can exist without changing the commit. The digest contains only
- * hashes and metadata, never file contents or secrets.
+ * Collect the working-tree changed/untracked paths and the raw `git status`
+ * output backing them, without touching file content. Shared by the
+ * content-aware revision fingerprint below and by callers that only need to
+ * know which paths changed (for example, attributing a Shell/RunTests
+ * mutation without hashing every file it might have touched).
  */
-async function gitWorkingTreeRevision(
+async function collectWorkingTreeStatus(
   root: string,
-  revision: string,
-  branch: string | undefined,
   signal?: AbortSignal,
   logger?: LocalCodeLogger,
-): Promise<{ revision: string; paths: string[] } | undefined> {
+): Promise<{ statusStdout: string; paths: string[] } | undefined> {
   const status = await runCommand(
     "git",
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -300,10 +307,44 @@ async function gitWorkingTreeRevision(
     ),
   ].sort();
   if (paths.length > MAX_WORKTREE_PATHS) return undefined;
+  return { statusStdout: status.stdout, paths };
+}
+
+/**
+ * List paths that differ from HEAD or are untracked, without hashing file
+ * content. Cheap enough to call before and after a Shell/RunTests execution
+ * to attribute the paths it touched, unlike gitWorkingTreeRevision's
+ * content-aware fingerprint below.
+ */
+export async function listWorkingTreeChangedPaths(
+  root: string,
+  signal?: AbortSignal,
+  logger?: LocalCodeLogger,
+): Promise<string[] | undefined> {
+  const collected = await collectWorkingTreeStatus(root, signal, logger);
+  return collected?.paths;
+}
+
+/**
+ * Produce a content-aware identity for the current checkout. Git HEAD alone
+ * is insufficient for resume safety because staged, unstaged and untracked
+ * changes can exist without changing the commit. The digest contains only
+ * hashes and metadata, never file contents or secrets.
+ */
+async function gitWorkingTreeRevision(
+  root: string,
+  revision: string,
+  branch: string | undefined,
+  signal?: AbortSignal,
+  logger?: LocalCodeLogger,
+): Promise<{ revision: string; paths: string[] } | undefined> {
+  const collected = await collectWorkingTreeStatus(root, signal, logger);
+  if (!collected) return undefined;
+  const { statusStdout, paths } = collected;
 
   const digest = createHash("sha256");
   digest.update(`head:${revision}\nbranch:${branch ?? ""}\n`);
-  digest.update(status.stdout);
+  digest.update(statusStdout);
   for (const relative of paths) {
     if (signal?.aborted)
       throw new DOMException("Working-tree fingerprint aborted", "AbortError");

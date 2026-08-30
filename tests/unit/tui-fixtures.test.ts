@@ -6,7 +6,6 @@ import {
 
 afterEach(() => {
   delete process.env.SHELRACODE_UI_FIXTURE;
-  delete process.env.LOCALCODE_UI_FIXTURE;
 });
 
 test("ShelraCode fixture environment variable is the canonical visual-test entry", () => {

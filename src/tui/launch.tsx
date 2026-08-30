@@ -6,7 +6,10 @@ import { render } from "@opentui/solid";
 import { AppShell } from "./app.js";
 import { HOME_SHORTCUTS, LEADER_SHORTCUTS } from "./commands/keybindings.js";
 import { readUIFixture } from "./state/fixtures.js";
-import { prepareInteractiveTerminal } from "./terminal.js";
+import {
+  prepareInteractiveTerminal,
+  shouldCancelOnSignal,
+} from "./terminal.js";
 
 export async function launchTui(
   initialScreen: "conversation" | "setup" = "conversation",
@@ -27,6 +30,7 @@ export async function launchTui(
   });
   const keymap = createDefaultOpenTuiKeymap(renderer);
   let runAction: ((id: string) => void) | undefined;
+  let taskActive = false;
   registerTimedLeader(keymap, {
     trigger: { key: { name: "x", ctrl: true } },
     timeoutMs: 1_500,
@@ -35,29 +39,29 @@ export async function launchTui(
     priority: 100,
     commands: [
       {
-        name: "localcode.palette",
+        name: "shelracode.palette",
         run: () => runAction?.("palette"),
       },
       ...LEADER_SHORTCUTS.map(([key, id]) => ({
-        name: `localcode.${id}`,
+        name: `shelracode.${id}`,
         run: () => runAction?.(id),
         keybinding: `<leader>${key}`,
       })),
       ...HOME_SHORTCUTS.map(([key, id]) => ({
-        name: `localcode.${id}`,
+        name: `shelracode.${id}`,
         run: () => runAction?.(id),
         keybinding: key,
       })),
     ],
     bindings: [
-      { key: "ctrl+p", cmd: "localcode.palette" },
+      { key: "ctrl+p", cmd: "shelracode.palette" },
       ...LEADER_SHORTCUTS.map(([key, id]) => ({
         key: `<leader>${key}`,
-        cmd: `localcode.${id}`,
+        cmd: `shelracode.${id}`,
       })),
       ...HOME_SHORTCUTS.map(([key, id]) => ({
         key,
-        cmd: `localcode.${id}`,
+        cmd: `shelracode.${id}`,
       })),
     ],
   });
@@ -72,8 +76,8 @@ export async function launchTui(
     // Ctrl+C is a task cancellation while the app is mounted. Only exit when
     // there is no active task to cancel; this prevents SIGINT from tearing
     // down the renderer before runAgent can persist `cancelled`.
-    if (runAction) {
-      runAction("cancel-task");
+    if (shouldCancelOnSignal(taskActive)) {
+      runAction?.("cancel-task");
       return;
     }
     teardown();
@@ -93,6 +97,9 @@ export async function launchTui(
               }}
               onActionReady={(run) => {
                 runAction = run;
+              }}
+              onTaskStateChange={(active) => {
+                taskActive = active;
               }}
             />
           </KeymapProvider>

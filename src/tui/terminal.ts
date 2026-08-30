@@ -4,20 +4,24 @@ export interface InteractiveTerminalOptions {
   isInteractive: boolean;
 }
 
+export function shouldCancelOnSignal(activeTask: boolean): boolean {
+  return activeTask;
+}
+
 /**
  * Prepare the host terminal before OpenTUI starts its capability negotiation.
  *
  * Some Windows terminal hosts expose TERM=dumb even though they support ANSI
  * and alternate-screen control sequences. OpenTUI treats that value as a
  * non-interactive capability and can wait indefinitely before its first draw.
- * Modern Windows consoles support the xterm capability set used by LocalCode.
+ * Modern Windows consoles support the xterm capability set used by ShelraCode.
  */
 export function prepareInteractiveTerminal(
   options: InteractiveTerminalOptions,
 ): void {
   if (!options.isInteractive) {
     throw new Error(
-      "LocalCode TUI requires an interactive terminal. Run it from a real terminal or PTY.",
+      "ShelraCode TUI requires an interactive terminal. Run it from a real terminal or PTY.",
     );
   }
 

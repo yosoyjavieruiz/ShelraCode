@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { isNeverRemotePath, normalizePath } from "../privacy/policy.js";
 
@@ -44,12 +44,20 @@ export interface RelatedRepositoryTest {
 
 export interface RepositoryIntelligence {
   indexedFiles: string[];
+  excludedFiles: RepositoryExcludedFile[];
   symbols: RepositorySymbol[];
   imports: RepositoryImport[];
   references: RepositoryReference[];
   relatedTests: RelatedRepositoryTest[];
   indexedAt: string;
   truncated: boolean;
+}
+
+export type RepositoryExclusionReason = "generated" | "vendor" | "runtime";
+
+export interface RepositoryExcludedFile {
+  path: string;
+  reason: RepositoryExclusionReason;
 }
 
 export interface RepositoryIntelligenceOptions {
@@ -94,6 +102,7 @@ const INDEXABLE_EXTENSIONS = new Set([
   ".py",
   ".rb",
   ".rs",
+  ".ps1",
   ".swift",
   ".ts",
   ".tsx",
@@ -103,7 +112,54 @@ const DEFAULT_MAX_FILES = 256;
 const DEFAULT_MAX_SYMBOLS = 2_000;
 const DEFAULT_MAX_IMPORTS = 1_000;
 const DEFAULT_MAX_REFERENCES = 2_000;
+const MAX_INDEX_FILES = 4_096;
+const MAX_INDEX_SYMBOLS = 10_000;
+const MAX_INDEX_IMPORTS = 20_000;
+const MAX_INDEX_REFERENCES = 20_000;
 const MAX_SOURCE_CHARS = 256_000;
+
+const EXCLUDED_DIRECTORY_NAMES = new Set([
+  ".git",
+  ".localcode",
+  ".shelracode",
+  "build",
+  "coverage",
+  "dist",
+  "generated",
+  "gen",
+  "node_modules",
+  "out",
+  "target",
+  "third-party",
+  "third_party",
+  "vendor",
+  "vendors",
+]);
+
+function exclusionReason(
+  relativePath: string,
+): RepositoryExclusionReason | undefined {
+  const segments = relativePath.toLowerCase().split("/");
+  if (segments.some((segment) => EXCLUDED_DIRECTORY_NAMES.has(segment))) {
+    if (
+      segments.some((segment) =>
+        [".git", ".localcode", ".shelracode", "node_modules"].includes(segment),
+      )
+    )
+      return "runtime";
+    if (
+      segments.some((segment) =>
+        ["vendor", "vendors", "third-party", "third_party"].includes(segment),
+      )
+    )
+      return "vendor";
+    return "generated";
+  }
+  const basename = segments.at(-1) ?? "";
+  return /(?:^|[._-])(?:generated|gen)(?:[._-]|$)/u.test(basename)
+    ? "generated"
+    : undefined;
+}
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted)
@@ -347,6 +403,19 @@ function parseDeclaration(
   const extension = extensionOf(relativePath);
   if ([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].includes(extension))
     return parseTypeScriptDeclarations(line, relativePath, lineNumber);
+  if (extension === ".ps1") {
+    const functionMatch = line.match(/^\s*function\s+([A-Za-z_][\w-]*)/u);
+    return functionMatch?.[1]
+      ? declaration(
+          functionMatch[1],
+          relativePath,
+          "function",
+          lineNumber,
+          line,
+          true,
+        )
+      : undefined;
+  }
   if ([".py", ".rb", ".php"].includes(extension))
     return parsePythonDeclarations(line, relativePath, lineNumber);
   if (extension === ".go")
@@ -568,32 +637,102 @@ function fileScore(
   return terms.filter((term) => haystack.includes(term)).length * 100;
 }
 
+function boundedIndexLimit(
+  value: number | undefined,
+  fallback: number,
+  maximum: number,
+  label: string,
+): number {
+  const result = value ?? fallback;
+  if (!Number.isInteger(result) || result <= 0 || result > maximum)
+    throw new Error(
+      `${label} must be a positive integer no greater than ${maximum}`,
+    );
+  return result;
+}
+
 export async function buildRepositoryIntelligence(
   options: RepositoryIntelligenceOptions,
 ): Promise<RepositoryIntelligence> {
-  const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
-  const maxSymbols = options.maxSymbols ?? DEFAULT_MAX_SYMBOLS;
-  const maxImports = options.maxImports ?? DEFAULT_MAX_IMPORTS;
-  const maxReferences = options.maxReferences ?? DEFAULT_MAX_REFERENCES;
-  if (maxFiles <= 0 || maxSymbols <= 0 || maxImports <= 0 || maxReferences <= 0)
-    throw new Error("repository intelligence limits must be positive");
+  const maxFiles = boundedIndexLimit(
+    options.maxFiles,
+    DEFAULT_MAX_FILES,
+    MAX_INDEX_FILES,
+    "maxFiles",
+  );
+  const maxSymbols = boundedIndexLimit(
+    options.maxSymbols,
+    DEFAULT_MAX_SYMBOLS,
+    MAX_INDEX_SYMBOLS,
+    "maxSymbols",
+  );
+  const maxImports = boundedIndexLimit(
+    options.maxImports,
+    DEFAULT_MAX_IMPORTS,
+    MAX_INDEX_IMPORTS,
+    "maxImports",
+  );
+  const maxReferences = boundedIndexLimit(
+    options.maxReferences,
+    DEFAULT_MAX_REFERENCES,
+    MAX_INDEX_REFERENCES,
+    "maxReferences",
+  );
 
+  const safePaths = options.files
+    .map((file) => safeRelativePath(options.root, file))
+    .filter((file): file is string => Boolean(file));
+  const excludedFiles = [
+    ...new Map(
+      safePaths
+        .map((file) => [file, exclusionReason(file)] as const)
+        .filter(
+          (entry): entry is readonly [string, RepositoryExclusionReason] =>
+            Boolean(entry[1]),
+        ),
+    ).entries(),
+  ]
+    .map(([file, reason]) => ({ path: file, reason }))
+    .sort((left, right) => left.path.localeCompare(right.path));
   const candidatePaths = [
     ...new Set(
-      options.files
-        .map((file) => safeRelativePath(options.root, file))
-        .filter((file): file is string => Boolean(file))
+      safePaths
+        .filter((file) => !exclusionReason(file))
         .filter(isIndexablePath),
     ),
   ].sort((left, right) => left.localeCompare(right));
   const selectedPaths = candidatePaths.slice(0, maxFiles);
   const indexedFiles: IndexedFile[] = [];
+  let rootRealPath: string | undefined;
+  try {
+    rootRealPath = await realpath(path.resolve(options.root));
+  } catch {
+    rootRealPath = undefined;
+  }
   for (const relativePath of selectedPaths) {
     throwIfAborted(options.signal);
+    if (!rootRealPath) continue;
     try {
-      const content = (
-        await readFile(path.join(options.root, relativePath), "utf8")
-      ).slice(0, MAX_SOURCE_CHARS);
+      const candidateAbsolute = path.resolve(options.root, relativePath);
+      const candidateRealPath = await realpath(candidateAbsolute);
+      const relativeRealPath = path.relative(rootRealPath, candidateRealPath);
+      if (
+        !relativeRealPath ||
+        relativeRealPath === ".." ||
+        relativeRealPath.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relativeRealPath)
+      )
+        continue;
+      const normalizedRealPath = normalizePath(relativeRealPath);
+      if (
+        isNeverRemotePath(normalizedRealPath) ||
+        exclusionReason(normalizedRealPath)
+      )
+        continue;
+      const content = (await readFile(candidateRealPath, "utf8")).slice(
+        0,
+        MAX_SOURCE_CHARS,
+      );
       indexedFiles.push({ path: relativePath, content });
     } catch {
       // Files can disappear or be binary between discovery and indexing.
@@ -602,18 +741,22 @@ export async function buildRepositoryIntelligence(
 
   const symbols: RepositorySymbol[] = [];
   const imports: RepositoryImport[] = [];
+  let symbolsTruncated = false;
+  let importsTruncated = false;
   for (const file of indexedFiles) {
     throwIfAborted(options.signal);
     const lines = file.content.split(/\r?\n/u);
     for (const [index, line] of lines.entries()) {
       if (isCommentOnly(line, extensionOf(file.path))) continue;
-      if (symbols.length < maxSymbols) {
-        const parsed = parseDeclaration(line, file.path, index + 1);
-        if (parsed) symbols.push(parsed);
+      const parsed = parseDeclaration(line, file.path, index + 1);
+      if (parsed) {
+        if (symbols.length < maxSymbols) symbols.push(parsed);
+        else symbolsTruncated = true;
       }
-      if (imports.length < maxImports) {
-        const parsedImport = parseImports(line, file.path, index + 1);
-        if (parsedImport) imports.push(parsedImport);
+      const parsedImport = parseImports(line, file.path, index + 1);
+      if (parsedImport) {
+        if (imports.length < maxImports) imports.push(parsedImport);
+        else importsTruncated = true;
       }
     }
   }
@@ -628,25 +771,43 @@ export async function buildRepositoryIntelligence(
   for (const symbol of symbols)
     symbolsByPathAndName.set(`${symbol.path}\0${symbol.name}`, symbol);
   const references: RepositoryReference[] = [];
+  let referencesTruncated = false;
+  const pushReference = (reference: RepositoryReference): boolean => {
+    if (references.length >= maxReferences) {
+      referencesTruncated = true;
+      return false;
+    }
+    references.push(reference);
+    return true;
+  };
   for (const item of imports) {
-    if (references.length >= maxReferences) break;
+    if (references.length >= maxReferences) {
+      referencesTruncated = true;
+      break;
+    }
     for (const name of item.names) {
-      if (references.length >= maxReferences) break;
+      if (references.length >= maxReferences) {
+        referencesTruncated = true;
+        break;
+      }
       const target = item.resolvedPath
         ? symbolsByPathAndName.get(`${item.resolvedPath}\0${name}`)
         : undefined;
-      references.push({
-        name,
-        path: item.path,
-        line: item.line,
-        kind: "import",
-        ...(target
-          ? { targetPath: target.path }
-          : item.resolvedPath
-            ? { targetPath: item.resolvedPath }
-            : {}),
-      });
-      if (!target || references.length >= maxReferences) continue;
+      if (
+        !pushReference({
+          name,
+          path: item.path,
+          line: item.line,
+          kind: "import",
+          ...(target
+            ? { targetPath: target.path }
+            : item.resolvedPath
+              ? { targetPath: item.resolvedPath }
+              : {}),
+        })
+      )
+        break;
+      if (!target) continue;
       const importer = indexedFiles.find((file) => file.path === item.path);
       if (!importer) continue;
       const usagePattern = new RegExp(
@@ -654,18 +815,24 @@ export async function buildRepositoryIntelligence(
         "gu",
       );
       for (const match of importer.content.matchAll(usagePattern)) {
-        if (references.length >= maxReferences) break;
+        if (references.length >= maxReferences) {
+          referencesTruncated = true;
+          break;
+        }
         const line = importer.content
           .slice(0, match.index ?? 0)
           .split("\n").length;
         if (line === item.line) continue;
-        references.push({
-          name,
-          path: item.path,
-          line,
-          kind: "usage",
-          targetPath: target.path,
-        });
+        if (
+          !pushReference({
+            name,
+            path: item.path,
+            line,
+            kind: "usage",
+            targetPath: target.path,
+          })
+        )
+          break;
       }
     }
   }
@@ -674,12 +841,17 @@ export async function buildRepositoryIntelligence(
   const relatedTests = relatedTestPairs(indexedFiles, resolvedImports);
   return {
     indexedFiles: indexedFiles.map((file) => file.path),
+    excludedFiles,
     symbols,
     imports: resolvedImports,
     references,
     relatedTests,
     indexedAt: new Date().toISOString(),
-    truncated: candidatePaths.length > selectedPaths.length,
+    truncated:
+      candidatePaths.length > selectedPaths.length ||
+      symbolsTruncated ||
+      importsTruncated ||
+      referencesTruncated,
   };
 }
 

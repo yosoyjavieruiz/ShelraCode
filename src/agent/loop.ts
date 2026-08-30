@@ -1,4 +1,5 @@
 import path from "node:path";
+import { PRODUCT_NAME } from "../product/identity.js";
 import type {
   NormalizedMessage,
   ProviderFailure,
@@ -8,8 +9,14 @@ import type {
 import type { FileMutationSnapshot } from "../checkpoint/checkpoint.js";
 import { runTestsTool } from "../tools/workspace.js";
 import { ToolError, toolErrorDetails } from "../tools/errors.js";
+import { classifyShellCommand } from "../tools/permissions.js";
 import type { ToolDefinition, ToolResult, ToolRisk } from "../tools/types.js";
 import { evaluateCompletionGate } from "./completion-gate.js";
+import {
+  compileAcceptanceObligations,
+  deriveEvidenceRecordsFromTaskState,
+  evaluateProofBackedCompletion,
+} from "../evidence/acceptance.js";
 import { independentlyVerifyTask } from "./verifier.js";
 import {
   assessObjectiveProof,
@@ -53,7 +60,20 @@ import {
   type PlanModelResult,
   type PlanProposal,
 } from "./planner.js";
-import { createRecoveryContract, type RecoveryContract } from "./recovery.js";
+import {
+  classifyFailure,
+  createRecoveryContract,
+  createRecoveryPolicy,
+  digestRecoveryValue,
+  evaluateRecovery,
+  RecoveryLoopDetector,
+  toLegacyRecoveryStrategy,
+  type FailureClass,
+  type RecoveryAction,
+  type RecoveryContract,
+  type RecoveryLoopDecision,
+  type RecoveryStrategy,
+} from "./recovery.js";
 import {
   addTaskEvidence,
   addTaskBlocker,
@@ -61,6 +81,7 @@ import {
   recordPlanRevision,
   recordRecoveryContract,
   recordTaskAction,
+  recordTaskMutatedPaths,
   recordVerificationRun,
   reopenTaskForResume,
   setTaskCriterion,
@@ -71,6 +92,8 @@ import {
 } from "./task-state.js";
 import type { AgentPhase, AgentTaskLedger, PlanStep } from "./task-state.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
+import { normalizeWorkspacePath } from "../shared/workspace-paths.js";
+import { listWorkingTreeChangedPaths } from "../context/repository-snapshot.js";
 import {
   deriveTaskContextAnchor,
   type TaskInFlightMarker,
@@ -129,6 +152,23 @@ function summarizeToolResult(result: ToolResult): Record<string, unknown> {
   };
 }
 
+/**
+ * A completion declaration is an assertion, not evidence. The controller
+ * records only clear positive completion language so false-success metrics do
+ * not count ordinary refusal/error prose as a claim.
+ */
+function assistantClaimsCompletion(text: string): boolean {
+  if (
+    !/\b(?:done|complete|completed|finished|implemented|fixed|created|verified|ready|listo|terminad[oa]|hecho)\b/iu.test(
+      text,
+    )
+  )
+    return false;
+  return !/\b(?:not|never|cannot|can't|unable|still|yet|without|remains?)\b.{0,48}\b(?:done|complete|completed|finished|implemented|fixed|created|verified|ready)\b/iu.test(
+    text,
+  );
+}
+
 const TOOL_TEXT_SHAPE =
   /^\s*(?:[\[{<`]|```)[\s\S]*(?:"tool_calls"\s*:|"(?:name|tool)"\s*:\s*"(?:ListFiles|GlobFiles|SearchText|ReadFile|EditFile|WriteFile|CreateFile|DeleteFile|Shell|RunTests|GitStatus|GitDiff)"[\s\S]*(?:"arguments"\s*:|"output"\s*:))/u;
 
@@ -152,7 +192,7 @@ function summarizeFailure(message: string): string {
   const normalized = message.replace(/\s+/gu, " ").trim();
   return normalized.length <= 500
     ? normalized
-    : `${normalized.slice(0, 500)}â€¦[truncated]`;
+    : `${normalized.slice(0, 500)}…[truncated]`;
 }
 
 function isToolShapedAssistantText(text: string): boolean {
@@ -323,6 +363,40 @@ function objectOutput(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/**
+ * Hash only host-owned progress signals. Action history and raw model text are
+ * intentionally excluded: adding another failed attempt must not make a
+ * repeated failure look like progress, and secrets must never be persisted in
+ * a loop signature.
+ */
+function recoveryStateDigest(
+  ledger: AgentTaskLedger,
+  mutationRevision: number,
+): string {
+  return digestRecoveryValue({
+    phase: ledger.phase,
+    filesRead: [...ledger.filesRead].sort(),
+    filesChanged: [...ledger.filesChanged].sort(),
+    verificationRuns: ledger.verificationRuns.map((run) => ({
+      id: run.id,
+      status: run.status,
+      exitCode: run.exitCode,
+    })),
+    taskGraph: ledger.taskGraph
+      ? {
+          currentNodeId: ledger.taskGraph.currentNodeId,
+          revision: ledger.taskGraph.revision,
+          nodes: ledger.taskGraph.nodes.map((node) => ({
+            id: node.id,
+            status: node.status,
+            attempts: node.attempts,
+          })),
+        }
+      : undefined,
+    mutationRevision,
+  });
 }
 
 const MODEL_TOOL_TEXT_LIMIT = 8_000;
@@ -636,22 +710,6 @@ function toolErrorFields(
     : {};
 }
 
-function normalizeWorkspacePath(value: string): string {
-  const parts: string[] = [];
-  const raw = value.trim().replaceAll("\\", "/").replace(/^\/+/, "");
-  for (const part of raw.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      const previous = parts.at(-1);
-      if (previous && previous !== "..") parts.pop();
-      else parts.push(part);
-      continue;
-    }
-    parts.push(part);
-  }
-  return parts.join("/");
-}
-
 function latestToolContinuation(
   messages: readonly NormalizedMessage[],
 ): NormalizedMessage[] {
@@ -785,22 +843,36 @@ const SYSTEM_PROMPT_BY_PROFILE: Record<
   string
 > = {
   minimal:
-    "You are LocalCode, a local-first coding assistant. Respond naturally and " +
+    `You are ${PRODUCT_NAME}, a local-first coding assistant. Respond naturally and ` +
     "helpfully to the user's message. This turn has no workspace tools available " +
     "and does not need any — never claim to be inspecting files or the repository.",
   workspace:
-    "You are LocalCode, a local-first coding assistant. Use the available " +
+    `You are ${PRODUCT_NAME}, a local-first coding assistant. Use the available ` +
     "read-only workspace tools only as needed to answer the user's question " +
     "about this repository, then answer directly. No write, shell or test " +
     "tools are available this turn — do not attempt to modify anything. " +
     TOOL_ERROR_RECOVERY_INSTRUCTION,
   coding:
-    "You are LocalCode. Respect privacy, strict-zero routing, workspace " +
-    "boundaries, permissions, and verify mutations with deterministic tools. " +
-    "When a workspace action is needed, use exactly one available tool per " +
-    "turn; do not describe a planned tool call as prose, JSON, XML, or a " +
-    "code block, and do not assume file contents before reading them. After " +
-    "each tool result, choose the next action from the new evidence. " +
+    `You are ${PRODUCT_NAME}, an autonomous senior engineer working ` +
+    "unsupervised on this repository. You own the objective end-to-end, " +
+    "not just the next tool call: read enough of the surrounding code to " +
+    "be confident before you change it, then act — do not stall in " +
+    "read-only exploration once you have enough evidence to move. When a " +
+    "tool result contradicts what you assumed, update your approach " +
+    "instead of repeating the same action; a stuck approach is a signal to " +
+    "try something different, not a reason to stop. Resolve ambiguity " +
+    "yourself from repository evidence and the stated objective, and " +
+    "proceed on your best judgment; only surface a question when the " +
+    "information you need genuinely is not available anywhere in the " +
+    "repository or the request. Before you report the objective complete, " +
+    "check your own change against what was asked — a task is not done " +
+    "because a file was edited, it is done because the requested behavior " +
+    "actually works. Respect privacy, strict-zero routing, workspace " +
+    "boundaries, and permissions; verify mutations with deterministic " +
+    "tools rather than asserting they worked. Use exactly one available " +
+    "tool per turn; do not describe a planned tool call as prose, JSON, " +
+    "XML, or a code block, and do not assume file contents before reading " +
+    "them. " +
     PLATFORM_EXECUTION_INSTRUCTION +
     " " +
     TOOL_ERROR_RECOVERY_INSTRUCTION,
@@ -833,6 +905,34 @@ function stagedWorkUnitInstruction(
   );
 }
 
+/**
+ * A recovery / verification-feedback turn must name exactly ONE legal next
+ * action. A model can take only one action per turn, so concatenating "your
+ * next tool MUST be ReadFile on X" with "execute an EditFile now" (or with a
+ * different 'next relevant file' to inspect) reads as an unsatisfiable
+ * contradiction and was observed live to freeze small local models into empty
+ * responses. When a fresh read of the write target is still required, that
+ * read IS the single next action; otherwise the single next action is the
+ * bounded mutation. `escalated` produces a shorter reformulation for a repeat
+ * attempt so the loop varies its strategy instead of re-sending an identical
+ * nudge that already failed to produce any action.
+ */
+function nextActionDirective(input: {
+  freshReadPath: string | undefined;
+  mutationTarget: string | undefined;
+  escalated: boolean;
+}): string {
+  const { freshReadPath, mutationTarget, escalated } = input;
+  if (freshReadPath)
+    return escalated
+      ? `Emit only a ReadFile tool call for ${freshReadPath} now — nothing else, no other tool.`
+      : `Your one next action is ReadFile on ${freshReadPath}; its current contents are required before any edit. Emit that single tool call and nothing else.`;
+  const target = mutationTarget ? ` on ${mutationTarget}` : "";
+  return escalated
+    ? `Emit only one EditFile or WriteFile tool call${target} now, with valid arguments — nothing else.`
+    : `Emit exactly one EditFile or WriteFile tool call${target} now with valid arguments for the next required change; do not read again.`;
+}
+
 export async function runAgent(
   task: AgentTask,
   options: AgentLoopOptions,
@@ -849,7 +949,8 @@ export async function runAgent(
     throw new Error(
       "Cannot resume a task with an objective different from its persisted runtime.",
     );
-  if (restoredLedger) reopenTaskForResume(restoredLedger);
+  if (restoredLedger)
+    reopenTaskForResume(restoredLedger, task.resumeChangedPaths ?? []);
   const profile = task.systemPromptProfile ?? "coding";
   const mode: TurnMode =
     task.mode ??
@@ -899,7 +1000,11 @@ export async function runAgent(
       uncertaintyCount:
         mode === "coding" && objectivePaths.length === 0 ? 1 : 0,
     });
-  const planningMode =
+  // Mutable: a weak local planner that cannot produce a valid structured
+  // plan after every LLM-authored retry is exhausted degrades this to
+  // "compatibility" instead of failing the whole task -- see
+  // degradeToCompatibilityPlanning below.
+  let planningMode =
     restoredLedger?.planningMode ?? task.planningMode ?? "compatibility";
   const taskContract = restoredLedger?.contract
     ? cloneTaskContract(restoredLedger.contract)
@@ -957,6 +1062,41 @@ export async function runAgent(
     task.enforceTaskContract === true ||
     task.taskContract !== undefined ||
     (planningMode === "model" && mode === "coding");
+  // Repository-affecting turns always receive the canonical acceptance
+  // assessment, even when the legacy success-criteria callback is disabled.
+  // Conversation/knowledge turns have no repository obligations and retain
+  // their lightweight completion path.
+  const canonicalAcceptanceEnabled =
+    mode !== "conversation" && mode !== "knowledge";
+  const canonicalTaskContract =
+    canonicalAcceptanceEnabled && mode === "coding" && !contractCriteriaEnabled
+      ? {
+          ...taskContract,
+          // Legacy callers often provide a success-criteria callback and
+          // staged paths without opting into the full TaskContract authority.
+          // Keep their existing scope scheduler authoritative while still
+          // requiring a canonical objective/evidence proof for the task.
+          deliverables: taskContract.deliverables.map((deliverable, index) =>
+            index === 0
+              ? {
+                  ...deliverable,
+                  id: "canonical-objective",
+                  description:
+                    "The requested coding objective is reflected in the host-observed workspace.",
+                  kind: "requested_change",
+                  targetPaths: undefined,
+                  artifactExpectations: undefined,
+                }
+              : { ...deliverable, required: false },
+          ),
+          // Scope is still enforced by the existing mutation/read gates. It
+          // is not duplicated as a proof obligation for compatibility tasks
+          // whose path list was inferred rather than contract-authored.
+          evidenceRequirements: taskContract.evidenceRequirements.filter(
+            (requirement) => requirement.kind !== "scope",
+          ),
+        }
+      : taskContract;
   const successCriteria =
     task.successCriteria && task.successCriteria.length > 0
       ? task.successCriteria
@@ -1040,6 +1180,17 @@ export async function runAgent(
   )?.command;
   const createExecutionContext = async () => {
     const context = await options.createExecutionContext(task);
+    if (
+      restoredRuntime?.checkpointId &&
+      (!context.checkpoint ||
+        !context.checkpoint.hasCheckpoint(
+          restoredRuntime.checkpointId,
+          task.id,
+        ))
+    )
+      throw new Error(
+        `Cannot resume because checkpoint ${restoredRuntime.checkpointId} is missing from the current runtime store.`,
+      );
     if (logger) context.logger = logger;
     if (!context.defaultTestCommand && defaultTestCommand)
       context.defaultTestCommand = defaultTestCommand;
@@ -1068,11 +1219,35 @@ export async function runAgent(
   transitionPhase(ledger, "discover", loopOptions);
   options.persistTask?.(ledger);
   let persistedRehydration: TaskRuntimeRehydration | undefined;
+  // The first ledger persistence happens before the recovery policy is
+  // constructed below, so keep this binding available to the persistence
+  // closure without creating a temporal-dead-zone on resume.
+  let recoveryLoopDetector: RecoveryLoopDetector | undefined;
+  // Checkpoint identity is part of durable task state. Reusing the restored
+  // checkpoint lets the host continue preservation checks without creating a
+  // second destructive baseline after a restart.
+  let checkpointId: string | undefined = restoredRuntime?.checkpointId;
   const persistLedger = (
     inFlight?: TaskInFlightMarker,
     rehydration?: TaskRuntimeRehydration,
   ): void => {
-    if (rehydration) persistedRehydration = structuredClone(rehydration);
+    if (rehydration)
+      // Compaction supplies a refreshed context anchor but intentionally does
+      // not repeat every durable field. Merge the envelope so a compaction
+      // checkpoint cannot erase route, evidence, or recovery continuity.
+      persistedRehydration = {
+        ...persistedRehydration,
+        ...structuredClone(rehydration),
+      };
+    if (recoveryLoopDetector && persistedRehydration) {
+      persistedRehydration = {
+        ...persistedRehydration,
+        recoveryHistory: recoveryLoopDetector.snapshot(),
+      };
+    }
+    if (checkpointId && persistedRehydration) {
+      persistedRehydration = { ...persistedRehydration, checkpointId };
+    }
     options.persistTask?.(ledger, inFlight, persistedRehydration);
   };
   const emitPlan = (): void => {
@@ -1147,6 +1322,33 @@ export async function runAgent(
         restoredRuntime?.repositoryRevision,
         restoredRuntime?.repositoryWorkingTreeRevision,
       );
+    const route = persistedRehydration?.route ?? restoredRuntime?.route;
+    const rehydratedCheckpointId =
+      checkpointId ??
+      persistedRehydration?.checkpointId ??
+      restoredRuntime?.checkpointId;
+    const recoveryHistory =
+      recoveryLoopDetector?.snapshot() ??
+      persistedRehydration?.recoveryHistory ??
+      restoredRuntime?.recoveryHistory;
+    const priorAcceptanceEvidence =
+      persistedRehydration?.acceptanceEvidence ??
+      restoredRuntime?.acceptanceEvidence ??
+      [];
+    const derivedAcceptanceEvidence = canonicalAcceptanceEnabled
+      ? deriveEvidenceRecordsFromTaskState({
+          taskId: task.id,
+          contract: canonicalTaskContract,
+          ledger,
+        })
+      : [];
+    const acceptanceEvidence = [
+      ...new Map(
+        [...priorAcceptanceEvidence, ...derivedAcceptanceEvidence].map(
+          (evidence) => [evidence.id, evidence] as const,
+        ),
+      ).values(),
+    ];
     return {
       contextAnchor: {
         ...baseAnchor,
@@ -1168,12 +1370,15 @@ export async function runAgent(
           ? { activeNodeId: ledger.taskGraph.currentNodeId }
           : {}),
       },
-      ...((persistedRehydration?.route ?? restoredRuntime?.route)
-        ? {
-            route: structuredClone(
-              persistedRehydration?.route ?? restoredRuntime?.route,
-            ),
-          }
+      ...(route ? { route: structuredClone(route) } : {}),
+      ...(rehydratedCheckpointId
+        ? { checkpointId: rehydratedCheckpointId }
+        : {}),
+      ...(recoveryHistory
+        ? { recoveryHistory: structuredClone(recoveryHistory) }
+        : {}),
+      ...(acceptanceEvidence.length > 0
+        ? { acceptanceEvidence: structuredClone(acceptanceEvidence) }
         : {}),
     };
   };
@@ -1457,6 +1662,13 @@ export async function runAgent(
       recordRecoveryContract(ledger, {
         id: `${task.id}:tool-recovery:${call.id}`,
         cause: result.code ?? "TOOL_FAILURE",
+        failureClass: classifyFailure({
+          source: "tool",
+          code: result.code,
+          message: result.error,
+          recoverable: result.recoverable,
+        }),
+        stateDigest: recoveryStateDigest(ledger, mutationRevision),
         evidence: [result.error ?? "The planned tool action failed."],
         attemptedStrategies: [
           `${call.name}:${JSON.stringify(summarizeToolInput(input))}`,
@@ -1679,12 +1891,12 @@ export async function runAgent(
   };
   const toolRuns: ToolResult[] = [];
   let finalText = "";
+  let completionClaimed = false;
   let verificationRan = false;
   let verified = false;
   let mutationRevision = 0;
   let verifiedMutationRevision = -1;
   let mutated = false;
-  let checkpointId: string | undefined;
   // Multi-file coding starts as a staged transaction. A small model sees the
   // full objective, but the host permits mutation in one explicitly named
   // file at a time; after verification, the criteria verifier advances the
@@ -1800,12 +2012,22 @@ export async function runAgent(
   const temperature =
     task.temperature ??
     (mode === "conversation" || mode === "knowledge" ? 0.7 : 0.2);
+  const reasoningEffort =
+    task.reasoningEffort ?? (mode === "coding" ? "high" : undefined);
   // Non-progress watchdog: local inference has no request quota, so
   // maxTurns alone is too coarse a safety net for a model stuck repeating
   // the same tool call. Three identical calls in a row stop the run early
   // with an actionable error instead of quietly burning the full budget.
   const NON_PROGRESS_LIMIT = 3;
   const MUTATION_FAILURE_LIMIT = 2;
+  const recoveryPolicy = createRecoveryPolicy(options.recoveryPolicy);
+  recoveryLoopDetector = new RecoveryLoopDetector(
+    recoveryPolicy,
+    restoredRuntime?.recoveryHistory,
+  );
+  // Persist the rehydrated detector immediately so process loss before the
+  // next tool call cannot reset the anti-loop budget.
+  persistLedger(undefined, currentRuntimeRehydration());
   let lastCallSignature: string | undefined;
   let repeatedCallCount = 0;
   let forceNoToolsOnNextTurn = false;
@@ -1815,8 +2037,28 @@ export async function runAgent(
   let lastMutationFailureKey: string | undefined;
   let repeatedMutationFailureCount = 0;
   let noActionCount = 0;
+  // Compatibility-mode tasks (planningMode !== "model") have no equivalent
+  // of appendModelRecoveryPlan/attemptNonProgressRecovery -- those are
+  // hard-gated to the LLM-authored plan graph. Without this, a compatibility
+  // task that confirms its active staged target is genuinely wrong (missing,
+  // and no valid action exists for it) has no way to move to the next
+  // objective path and just exhausts NON_PROGRESS_LIMIT into a terminal
+  // block, even when a perfectly good next target is sitting right there in
+  // objectivePaths. Bounded by objectivePaths.length so this can never pivot
+  // more times than there are real targets to try.
+  let stagedTargetPivotCount = 0;
+  // Every target the pivot above has already abandoned. Without this, two
+  // stuck targets bounce forever (A -> pivot to B -> B also stuck -> pivot
+  // back to A -> ...) until stagedTargetPivotCount's bound is hit, burning
+  // the whole turn budget on oscillation instead of ever reaching a stable
+  // state -- confirmed live against a real model.
+  const pivotedAwayFromTargets = new Set<string>();
   let oversizedBatchCount = 0;
   let modelProtocolRecoveryCount = 0;
+  let lastFailureClass: FailureClass | undefined;
+  let lastRecoveryStateDigest: string | undefined;
+  let recoveryStopDecision: RecoveryLoopDecision | undefined;
+  let recoveryStopFailureClass: FailureClass | undefined;
   let forcedRecoveryTool: { name: "ReadFile"; path: string } | undefined;
   let pendingRecoveryInstruction: string | undefined;
   let modelReplanCount = 0;
@@ -2021,6 +2263,14 @@ export async function runAgent(
     } else if (forcedRecoveryTool) {
       pendingRecoveryInstruction = `Host recovery: use ReadFile on ${forcedRecoveryTool.path} before any other repository action.`;
     }
+    // `observe` is only a legal transition from `act` (the phase state machine
+    // rejects plan/analyze/etc. -> observe). Some dispatch paths reach here
+    // having executed a tool straight from `plan` (e.g. a staged or forced-
+    // recovery tool that skipped the `act` transition), which threw
+    // "Invalid task phase transition plan -> observe" at the end of a run.
+    // Bridge through `act` first so observing a tool result is always legal.
+    if (ledger.phase !== "act" && ledger.phase !== "observe")
+      transitionPhase(ledger, "act", loopOptions);
     transitionPhase(ledger, "observe", loopOptions);
     const normalizedObservedPath = observedPath
       ? normalizeWorkspacePath(observedPath)
@@ -2091,10 +2341,16 @@ export async function runAgent(
           observedMissingPaths.delete(normalizedMutationPath);
         }
       } else if (stagedTask) {
-        // A failed mutation invalidates the current edit proposal. Reopen
-        // discovery so the model can acquire a fresh observation and recover.
+        // A failed mutation invalidates the current edit proposal. Reopen the
+        // target so the model re-reads it before retrying (the fresh-read
+        // gate on EditFile enforces that independently). Do NOT wipe
+        // supporting-evidence-observed here: a failed edit does not advance
+        // mutationRevision, so the already-observed supporting file would be
+        // rejected as a repeated read (CONFLICT) while recovery simultaneously
+        // demanded that same read -- an unsatisfiable contradiction observed
+        // live to freeze the model on the second work unit. The supporting
+        // evidence is still valid; only the target proposal is stale.
         stagedMutationRequired = false;
-        stagedSupportingEvidenceObserved = false;
         const failureKey = mutationFailureKey(call, tool, result, input);
         if (failureKey === lastMutationFailureKey)
           repeatedMutationFailureCount += 1;
@@ -2191,10 +2447,19 @@ export async function runAgent(
         // Keeping the force marker would trap recovery in the same read.
         forcedRecoveryTool = undefined;
       }
+      // Name the exact tool, not "the write operation allowed by the active
+      // plan node" -- that phrasing was observed live to leave a model
+      // stalled indefinitely even after being told the target was missing
+      // and clean, non-contradictory feedback said to create it. A staged
+      // multi-target task only exposes WriteFile/EditFile/DeleteFile for a
+      // confirmed-missing target (STAGED_MUTATION_TOOL_NAMES has no
+      // CreateFile entry); a non-staged task still has CreateFile too.
       pendingRecoveryInstruction =
         `Host recovery: ReadFile confirmed that ${normalizedPath} does not exist. ` +
         "Do not repeat ReadFile for that path. Use ListFiles, GlobFiles or SearchText to discover an existing path; " +
-        "if this is an intended new artifact, use the write operation allowed by the active plan node.";
+        (stagedTask
+          ? "if this is an intended new artifact, call WriteFile with the full file content -- it creates the file because it does not exist yet."
+          : "if this is an intended new artifact, call CreateFile or WriteFile with the full file content.");
       const activeTarget = criteriaWritePaths[0] ?? objectivePaths[0];
       if (
         activeTarget &&
@@ -2257,12 +2522,68 @@ export async function runAgent(
         completedAt: new Date().toISOString(),
       });
     }
+    const failureClass =
+      result.ok && !executionFailed
+        ? null
+        : classifyFailure({
+            source:
+              call.name === "RunTests"
+                ? "verification"
+                : call.name === "Shell"
+                  ? "controller"
+                  : "tool",
+            code:
+              result.code ??
+              (call.name === "RunTests" && executionFailed
+                ? "TEST_FAILED"
+                : undefined),
+            message:
+              result.error ??
+              (typeof output?.stderr === "string"
+                ? output.stderr
+                : typeof output?.output === "string"
+                  ? output.output
+                  : undefined),
+            recoverable: result.recoverable,
+          });
+    const recoveryObservation = recoveryLoopDetector!.observe({
+      actionKind: call.name,
+      normalizedArguments: input,
+      stateDigest: recoveryStateDigest(ledger, mutationRevision),
+      failureClass,
+      progress: result.ok && !executionFailed,
+    });
+    if (failureClass) {
+      lastFailureClass = failureClass;
+      lastRecoveryStateDigest = recoveryStateDigest(ledger, mutationRevision);
+    } else if (
+      recoveryObservation.stateChanged ||
+      recoveryObservation.totalObservations === 1
+    ) {
+      lastFailureClass = undefined;
+      lastRecoveryStateDigest = undefined;
+    }
+    if (recoveryObservation.shouldStop) {
+      recoveryStopDecision = recoveryObservation;
+      recoveryStopFailureClass = failureClass ?? undefined;
+      logger?.warn("agent.recovery.policy_limit", {
+        action: call.name,
+        failureClass,
+        reason: recoveryObservation.reason,
+        repeatedSignatureCount: recoveryObservation.repeatedSignatureCount,
+        consecutiveFailureCount: recoveryObservation.consecutiveFailureCount,
+        totalObservations: recoveryObservation.totalObservations,
+        recoveryAttempts: recoveryObservation.recoveryAttempts,
+      });
+    }
     if (nonGitRepository) {
       // The command failure remains visible in toolRuns/actions, but it is a
       // capability absence rather than a task error. Reset the repeated
       // error detector so a valid non-Git workspace cannot enter a doom loop.
       lastErrorCode = undefined;
       repeatedErrorCount = 0;
+      lastFailureClass = undefined;
+      lastRecoveryStateDigest = undefined;
     } else if (!result.ok && result.code) {
       if (result.code === lastErrorCode) repeatedErrorCount += 1;
       else {
@@ -2292,6 +2613,8 @@ export async function runAgent(
       tool: call.name,
       ...summarizeToolResult(result),
       repeatedErrorCount,
+      failureClass,
+      recoveryReason: recoveryObservation.reason,
     });
   };
 
@@ -2528,11 +2851,19 @@ export async function runAgent(
   const requiredFreshReadPath = (
     paths: readonly string[],
   ): string | undefined =>
-    paths.find(
-      (candidatePath) =>
-        readRevisions.get(normalizeWorkspacePath(candidatePath)) !==
-        mutationRevision,
-    );
+    paths.find((candidatePath) => {
+      const normalized = normalizeWorkspacePath(candidatePath);
+      // A path ReadFile already confirmed missing this revision does not
+      // need "a fresh read" -- it needs the write operation instead, and
+      // the ReadFile tool itself rejects a repeat with CONFLICT /
+      // MISSING_PATH_ALREADY_OBSERVED. Without this check the two
+      // subsystems contradicted each other in the same turn: this feedback
+      // demanded "your next tool MUST be ReadFile on X" while the tool call
+      // it just demanded would itself be rejected as a forbidden repeat --
+      // observed live freezing the model on a confirmed-missing path.
+      if (observedMissingPaths.has(normalized)) return false;
+      return readRevisions.get(normalized) !== mutationRevision;
+    });
 
   const userWorkPreserved = async (): Promise<boolean> => {
     const check = options.checkUserWorkPreserved ?? checkpointPreservationCheck;
@@ -2573,6 +2904,18 @@ export async function runAgent(
     const finalReviewPerformed = await reviewFinalDiff();
     const preserved = await userWorkPreserved();
     const objectiveProof = await objectiveProofForLedger();
+    const acceptanceProof = canonicalAcceptanceEnabled
+      ? evaluateProofBackedCompletion({
+          obligations: compileAcceptanceObligations(canonicalTaskContract),
+          evidence: deriveEvidenceRecordsFromTaskState({
+            taskId: task.id,
+            contract: canonicalTaskContract,
+            ledger,
+            ...(objectiveProof ? { objectiveProof } : {}),
+          }),
+          declaredComplete: completionClaimed,
+        })
+      : undefined;
     let completion = evaluateCompletionGate({
       mode,
       objectiveSatisfied:
@@ -2590,6 +2933,7 @@ export async function runAgent(
       unresolvedBlockers,
       userWorkPreserved: preserved,
       ...(objectiveProof ? { objectiveProof } : {}),
+      ...(acceptanceProof ? { acceptanceProof } : {}),
     });
     if (!modelPlanIsComplete())
       completion = {
@@ -2616,6 +2960,7 @@ export async function runAgent(
       status: completion.canComplete ? "completed" : "blocked",
       completion,
       ...(objectiveProof ? { objectiveProof } : {}),
+      ...(acceptanceProof ? { acceptanceProof } : {}),
       evidenceCount,
       ledger,
       turns,
@@ -2652,6 +2997,37 @@ export async function runAgent(
     message: string,
     failure?: ProviderFailure,
   ): Promise<AgentRunResult> => {
+    const failureClass = classifyFailure({
+      source: "provider",
+      code: failure?.code,
+      message,
+      recoverable: false,
+    });
+    const recoveryEvaluation = evaluateRecovery({
+      failureClass,
+      attemptedStrategies: ledger.recoveryContracts.flatMap((item) =>
+        item.strategy ? [item.strategy] : [],
+      ),
+      policy: recoveryPolicy,
+    });
+    recordRecoveryContract(
+      ledger,
+      createRecoveryContract({
+        id: `${task.id}:failure-recovery:${turns}:${ledger.recoveryContracts.length + 1}`,
+        cause: failure?.code ?? "PROVIDER_FAILURE",
+        failedRequirement: message,
+        evidence: [message],
+        attemptedStrategies: ledger.recoveryContracts.flatMap(
+          (item) => item.attemptedStrategies,
+        ),
+        forbiddenRepeats: [message],
+        proposedRecovery: toLegacyRecoveryStrategy(recoveryEvaluation.action),
+        failureClass,
+        stateDigest: recoveryStateDigest(ledger, mutationRevision),
+        strategy: recoveryEvaluation.action,
+        changedStrategy: recoveryEvaluation.changedStrategy,
+      }),
+    );
     unresolvedBlockers = Math.max(1, unresolvedBlockers);
     addTaskBlocker(ledger, {
       id: `${task.id}:failure:${turns}`,
@@ -2752,10 +3128,11 @@ export async function runAgent(
       // failed node boundary.
       if (planningMode === "model" && allowRecovery) {
         const gapPaths = new Set(
-          objectiveProof.missingRequirements.flatMap((gap) =>
-            taskContract.deliverables
-              .find((deliverable) => deliverable.id === gap.requirementId)
-              ?.targetPaths?.map(normalizeWorkspacePath) ?? [],
+          objectiveProof.missingRequirements.flatMap(
+            (gap) =>
+              taskContract.deliverables
+                .find((deliverable) => deliverable.id === gap.requirementId)
+                ?.targetPaths?.map(normalizeWorkspacePath) ?? [],
           ),
         );
         const candidateNodes = [
@@ -2874,6 +3251,64 @@ export async function runAgent(
       });
     }
     return result;
+  };
+
+  // A policy decision is authoritative control-plane state, not a telemetry
+  // hint.  Once the detector reports a terminal condition, finish the task
+  // as a truthful blocker before another provider request can be issued.
+  const consumeRecoveryStop = async (
+    turn: number,
+  ): Promise<AgentRunResult | undefined> => {
+    const decision = recoveryStopDecision;
+    if (!decision) return undefined;
+    recoveryStopDecision = undefined;
+    const failureClass =
+      recoveryStopFailureClass ??
+      (decision.reason === "SECURITY_DENIAL"
+        ? "SECURITY_DENIAL"
+        : decision.reason === "REPEATED_ACTION"
+          ? "REPEATED_ACTION"
+          : "NO_PROGRESS");
+    recoveryStopFailureClass = undefined;
+    const reason = decision.reason ?? "POLICY_LIMIT";
+    const message =
+      reason === "SECURITY_DENIAL"
+        ? "Host security policy denied the action; the task is blocked and no further model action is allowed."
+        : `Recovery policy stopped the task after a bounded ${reason.toLowerCase().replaceAll("_", " ")} condition.`;
+    recordRecoveryContract(
+      ledger,
+      createRecoveryContract({
+        id: `${task.id}:recovery-policy-stop:${turn}:${ledger.recoveryContracts.length + 1}`,
+        cause: `RECOVERY_POLICY_${reason}`,
+        failedRequirement: message,
+        evidence: [
+          `Recovery signature ${decision.signature} reached the host policy boundary.`,
+        ],
+        attemptedStrategies: ledger.recoveryContracts.flatMap(
+          (item) => item.attemptedStrategies,
+        ),
+        forbiddenRepeats: [decision.signature],
+        proposedRecovery: "stop",
+        failureClass,
+        changedStrategy: false,
+      }),
+    );
+    unresolvedBlockers = Math.max(1, unresolvedBlockers);
+    addTaskBlocker(ledger, {
+      id: `${task.id}:recovery-policy-stop:${turn}`,
+      summary: message,
+      recoverable: false,
+      suggestedAction:
+        reason === "SECURITY_DENIAL"
+          ? "Review the host security policy and explicitly resume only after the denied action is understood."
+          : "Resume only after a changed recovery strategy is selected by the host policy.",
+    });
+    finalText = message;
+    persistLedger();
+    const finished = await finish(turn, false);
+    if (finished === CONTINUE_AGENT_LOOP)
+      throw new Error("A terminal recovery policy decision cannot continue.");
+    return finished;
   };
 
   const requiresMutationInNextModelPlan = (
@@ -3005,6 +3440,56 @@ export async function runAgent(
       signal,
     });
 
+  // A local planner model is not guaranteed to be capable of the
+  // ProposeTaskPlan structured tool-call protocol -- that is a distinct
+  // capability from being able to edit files, and small/weak local models
+  // have been observed to exhaust every retry without ever returning a
+  // parseable proposal (confirmed live: "The LLM planner did not produce an
+  // acceptable plan" on the very first initial-plan request, i.e. before any
+  // execution was even attempted). Failing the entire task outright in that
+  // case punishes the user for a planner-protocol mismatch the host itself
+  // chose, when the same objective is very likely still executable through
+  // the ordinary host-driven (non-model) graph. Degrade instead of failing:
+  // rebuild the compatibility task graph the host would have used had
+  // planningMode never been "model", and let the normal turn loop run it.
+  const degradeToCompatibilityPlanning = (reason: string): void => {
+    logger?.warn("agent.plan.degraded_to_compatibility", {
+      reason,
+      attempts: modelReplanCount + 1,
+    });
+    planningMode = "compatibility";
+    // ledger.planningMode was already frozen to "model" by the `??=` above
+    // (it runs long before this can ever fire) and is what a resumed run
+    // re-derives its own planningMode from (`restoredLedger?.planningMode
+    // ?? ...`). Leaving it stale means a resume after degrading re-enters
+    // "model" mode against a taskGraph that is now actually compatibility-
+    // shaped -- initializeModelPlan runs again, asks the planner for a
+    // structured proposal on top of already-in-progress compatibility
+    // nodes, and the task oscillates between the two planning paradigms
+    // every time it is resumed instead of just continuing the work that is
+    // already underway. This must be a plain overwrite, not `??=`.
+    ledger.planningMode = "compatibility";
+    ledger.taskGraph = compileTaskGraph({
+      objective: task.objective,
+      mode,
+      candidateFiles: objectivePaths,
+      verificationCommands: verificationPlan.map((item) => item.command),
+      constraints,
+    });
+    addTaskEvidence(ledger, {
+      id: `${task.id}:plan-degraded:${modelReplanCount}`,
+      kind: "decision",
+      source: "host controller",
+      summary: `The LLM planner could not produce a usable structured plan after ${
+        modelReplanCount + 1
+      } attempt(s) (${reason}). Falling back to host-driven execution instead of failing the task.`,
+      relevance: 0.9,
+      freshness: 1,
+    });
+    transitionPhase(ledger, "plan", loopOptions);
+    persistLedger();
+  };
+
   const initializeModelPlan = async (): Promise<AgentRunResult | undefined> => {
     if (planningMode !== "model") return undefined;
     transitionPhase(ledger, "plan", loopOptions);
@@ -3015,7 +3500,8 @@ export async function runAgent(
       // (for example by labelling repository discovery as a semantic node).
       // Treat that rejection exactly like an invalid accepted proposal: keep
       // the original objective, ask the same LLM planner for one bounded
-      // replacement, and only fail if that recovery is also unusable.
+      // replacement, and only degrade to host-driven planning if that
+      // recovery is also unusable.
       const reason =
         result.error ?? "The LLM planner did not return a structured plan.";
       const recovered = await appendModelRecoveryPlan(
@@ -3030,10 +3516,8 @@ export async function runAgent(
         "INVALID_INITIAL_PLAN",
       );
       if (recovered) return undefined;
-      return await failureResult(
-        0,
-        `The LLM planner did not produce an acceptable plan: ${reason}`,
-      );
+      degradeToCompatibilityPlanning(reason);
+      return undefined;
     }
     try {
       acceptModelPlan(
@@ -3054,7 +3538,8 @@ export async function runAgent(
         "INVALID_INITIAL_PLAN",
       );
       if (recovered) return undefined;
-      return await failureResult(0, message);
+      degradeToCompatibilityPlanning(message);
+      return undefined;
     }
     const firstNode = currentModelNode();
     if (firstNode && modelNodeNeedsClarification(firstNode)) {
@@ -3089,6 +3574,12 @@ export async function runAgent(
     nextActions: readonly string[],
     cause = "OBJECTIVE_VERIFICATION_FAILED",
     supersedeNodeId?: string,
+    policyMetadata?: {
+      failureClass?: FailureClass;
+      stateDigest?: string;
+      strategy?: RecoveryAction;
+      changedStrategy?: boolean;
+    },
   ): Promise<boolean> => {
     if (planningMode !== "model" || modelReplanCount >= 2) return false;
     const replanNumber = modelReplanCount + 1;
@@ -3106,6 +3597,18 @@ export async function runAgent(
       forbiddenRepeats: nextActions,
       proposedRecovery: "replan",
       ...(supersedeNodeId ? { supersedeNodeId } : {}),
+      ...(policyMetadata?.failureClass
+        ? { failureClass: policyMetadata.failureClass }
+        : {}),
+      ...(policyMetadata?.stateDigest
+        ? { stateDigest: policyMetadata.stateDigest }
+        : {}),
+      ...(policyMetadata?.strategy
+        ? { strategy: policyMetadata.strategy }
+        : {}),
+      ...(policyMetadata?.changedStrategy === undefined
+        ? {}
+        : { changedStrategy: policyMetadata.changedStrategy }),
     });
     recordRecoveryContract(ledger, recovery);
     persistLedger();
@@ -3183,6 +3686,119 @@ export async function runAgent(
       });
     }
     return false;
+  };
+
+  // Shared recovery path for every "the agent looks stuck" watchdog
+  // (repeated identical call, repeated tool error, repeated mutation
+  // failure). Each previously hard-aborted the task on its own; routing
+  // them through the same append-only replan mechanism the mutation-
+  // stagnation watchdog already uses lets the planner try a different
+  // strategy before the run is abandoned. `appendModelRecoveryPlan`
+  // itself caps total recovery attempts across the whole task, so this
+  // cannot loop forever.
+  const attemptNonProgressRecovery = async (
+    cause: string,
+    issues: readonly string[],
+    nextActions: readonly string[],
+    failureClassOverride?: FailureClass,
+  ): Promise<boolean> => {
+    const failureClass =
+      failureClassOverride ??
+      classifyFailure({ source: "controller", code: cause, message: cause });
+    const recordedStrategies = ledger.recoveryContracts.flatMap((item) =>
+      item.strategy ? [item.strategy] : [],
+    );
+    // The watchdog itself is evidence that the immediately preceding
+    // strategy was effectively a repeat.  Record that bounded inference so
+    // the policy can prove that its next choice is genuinely different while
+    // still allowing the first recovery attempt to proceed.
+    const attemptedStrategies: RecoveryAction[] =
+      recordedStrategies.length > 0 ? recordedStrategies : ["retry_same"];
+    const recoveryEvaluation = evaluateRecovery({
+      failureClass,
+      attemptedStrategies,
+      repeatedCount: Math.max(
+        repeatedCallCount,
+        repeatedErrorCount,
+        repeatedMutationFailureCount,
+        1,
+      ),
+      stateChanged: false,
+      policy: recoveryPolicy,
+    });
+    const stateDigest =
+      lastRecoveryStateDigest ?? recoveryStateDigest(ledger, mutationRevision);
+    logger?.warn("agent.recovery.evaluated", {
+      cause,
+      failureClass,
+      action: recoveryEvaluation.action,
+      allowed: recoveryEvaluation.allowed,
+      changedStrategy: recoveryEvaluation.changedStrategy,
+      reason: recoveryEvaluation.reason,
+    });
+    if (!recoveryEvaluation.allowed) {
+      unresolvedBlockers = Math.max(1, unresolvedBlockers);
+      addTaskBlocker(ledger, {
+        id: `${task.id}:recovery-policy:${ledger.recoveryContracts.length + 1}`,
+        summary: recoveryEvaluation.reason,
+        recoverable: false,
+      });
+      persistLedger();
+      return false;
+    }
+    const stuckNodeId = currentModelNode()?.id;
+    if (stuckNodeId) updateTaskNode(stuckNodeId, "failed");
+    const replanned = await appendModelRecoveryPlan(
+      issues,
+      nextActions,
+      cause,
+      stuckNodeId,
+      {
+        failureClass,
+        stateDigest,
+        strategy: recoveryEvaluation.action,
+        changedStrategy: recoveryEvaluation.changedStrategy,
+      },
+    );
+    if (!replanned) {
+      // Compatibility execution has no semantic planner to call, but the
+      // failed strategy still belongs in the authoritative ledger. The
+      // existing caller then finishes as BLOCKED rather than retrying it.
+      if (planningMode !== "model") {
+        const legacyStrategy: RecoveryStrategy = toLegacyRecoveryStrategy(
+          recoveryEvaluation.action,
+        );
+        recordRecoveryContract(
+          ledger,
+          createRecoveryContract({
+            id: `${task.id}:recovery:${ledger.recoveryContracts.length + 1}`,
+            cause,
+            failedRequirement: issues[0],
+            evidence: issues,
+            attemptedStrategies,
+            forbiddenRepeats: nextActions,
+            proposedRecovery: legacyStrategy,
+            failureClass,
+            stateDigest,
+            strategy: recoveryEvaluation.action,
+            changedStrategy: recoveryEvaluation.changedStrategy,
+          }),
+        );
+        persistLedger();
+      }
+      return false;
+    }
+    unresolvedBlockers = 0;
+    repeatedCallCount = 0;
+    lastCallSignature = undefined;
+    repeatedErrorCount = 0;
+    lastErrorCode = undefined;
+    repeatedMutationFailureCount = 0;
+    lastMutationFailureKey = undefined;
+    noActionCount = 0;
+    transitionPhase(ledger, "plan", loopOptions);
+    persistLedger();
+    return true;
   };
 
   const recoverModelPlanDeadEnd = async (turn: number): Promise<boolean> => {
@@ -3573,6 +4189,7 @@ export async function runAgent(
             messages: requestMessages,
             temperature,
             maxOutputTokens: turnMaxOutputTokens,
+            ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
             ...(turnTools.length > 0
               ? {
                   tools: turnTools.map(toolSchema),
@@ -3659,6 +4276,38 @@ export async function runAgent(
         type: "error",
         error: recoverableProviderFailure,
       });
+      const protocolFailureClass = classifyFailure({
+        source: "provider",
+        code: recoverableProviderFailure.code,
+        message: recoverableProviderFailure.message,
+        recoverable: true,
+      });
+      const protocolRecovery = evaluateRecovery({
+        failureClass: protocolFailureClass,
+        repeatedCount: modelProtocolRecoveryCount,
+        attemptedStrategies: ledger.recoveryContracts.flatMap((item) =>
+          item.strategy ? [item.strategy] : [],
+        ),
+        policy: recoveryPolicy,
+      });
+      recordRecoveryContract(
+        ledger,
+        createRecoveryContract({
+          id: `${task.id}:protocol-recovery:${turn}:${modelProtocolRecoveryCount}`,
+          cause: recoverableProviderFailure.code,
+          failedRequirement: message,
+          evidence: [message],
+          attemptedStrategies: ledger.recoveryContracts.flatMap(
+            (item) => item.attemptedStrategies,
+          ),
+          forbiddenRepeats: ["malformed provider envelope"],
+          proposedRecovery: toLegacyRecoveryStrategy(protocolRecovery.action),
+          failureClass: protocolFailureClass,
+          stateDigest: recoveryStateDigest(ledger, mutationRevision),
+          strategy: protocolRecovery.action,
+          changedStrategy: protocolRecovery.changedStrategy,
+        }),
+      );
       logger?.warn("agent.model.protocol_recovery", {
         turn,
         count: modelProtocolRecoveryCount,
@@ -3744,6 +4393,11 @@ export async function runAgent(
 
     const presentedAssistantText = assistantTextParts.join("");
     finalText = presentedAssistantText || finalText;
+    if (
+      toolCalls.length === 0 &&
+      assistantClaimsCompletion(presentedAssistantText)
+    )
+      completionClaimed = true;
     logger?.debug("agent.model.response", {
       turn,
       done,
@@ -3938,6 +4592,8 @@ export async function runAgent(
           correction,
           repeatedInput,
         );
+        const recoveryStop = await consumeRecoveryStop(turn);
+        if (recoveryStop) return recoveryStop;
         readLoopRecoveryCount += 1;
         lastCallSignature = undefined;
         repeatedCallCount = 0;
@@ -3957,9 +4613,24 @@ export async function runAgent(
           repeatedCount: repeatedCallCount,
           tools: toolCalls.map((call) => call.name),
         });
-        const message = `Agent loop made no progress: the same tool call (${toolCalls
-          .map((call) => call.name)
-          .join(", ")}) repeated ${repeatedCallCount} times in a row.`;
+        const toolNames = toolCalls.map((call) => call.name).join(", ");
+        const recovered = await attemptNonProgressRecovery(
+          "NO_PROGRESS_REPEATED_CALL",
+          [
+            `The same tool call (${toolNames}) repeated ${repeatedCallCount} times in a row with no new progress.`,
+          ],
+          [
+            "Propose a different tool, target, or approach instead of repeating the same call.",
+          ],
+          "REPEATED_ACTION",
+        );
+        if (recovered) {
+          logger?.warn("agent.non_progress.recovered", {
+            reason: "repeated_tool_call",
+          });
+          continue;
+        }
+        const message = `Agent loop made no progress: the same tool call (${toolNames}) repeated ${repeatedCallCount} times in a row.`;
         unresolvedBlockers = 1;
         finalText = message;
         const finished = await finish(turn);
@@ -4000,6 +4671,7 @@ export async function runAgent(
         toolCalls: normalizeToolCallsForContinuation(toolCalls),
       });
       for (const call of toolCalls) {
+        if (recoveryStopDecision) break;
         const tool = toolMap.get(call.name);
         let input: unknown = {};
         try {
@@ -4039,6 +4711,8 @@ export async function runAgent(
           result,
         });
       }
+      const recoveryStop = await consumeRecoveryStop(turn);
+      if (recoveryStop) return recoveryStop;
       forceNoToolsOnNextTurn = true;
       transitionPhase(ledger, "reflect", loopOptions);
       persistLedger();
@@ -4108,6 +4782,11 @@ export async function runAgent(
       // model turn instead of executing them against the next node.
       let modelPlanObservationClosed = false;
       for (const [callIndex, call] of toolCalls.entries()) {
+        // Do not execute later calls from the same provider response after a
+        // host-side recovery policy has become terminal (especially a
+        // security denial). The batch is observed only up to that boundary;
+        // the outer loop consumes the decision and finishes as blocked.
+        if (recoveryStopDecision) break;
         transitionPhase(ledger, "act", loopOptions);
         const tool = toolMap.get(call.name);
         // Capture the LLM-authored node before any result handling. Parsing or
@@ -4563,12 +5242,14 @@ export async function runAgent(
           }
           if (
             forcedRecoveryTool &&
-            tool.name === forcedRecoveryTool.name &&
-            requestedPath !== forcedRecoveryTool.path
+            (tool.name !== forcedRecoveryTool.name ||
+              requestedPath !== forcedRecoveryTool.path)
           )
             throw new ToolError(
-              "CONFLICT",
-              `Recovery requires ReadFile on ${forcedRecoveryTool.path}; ${requestedPath ?? "the requested path"} is outside the authorized recovery target.`,
+              tool.name === forcedRecoveryTool.name
+                ? "CONFLICT"
+                : "PERMISSION_DENIED",
+              `Recovery requires ReadFile on ${forcedRecoveryTool.path}; ${tool.name} for ${requestedPath ?? "the requested path"} is outside the authorized recovery action.`,
               {
                 ...(requestedPath ? { path: requestedPath } : {}),
                 recoverable: true,
@@ -4784,7 +5465,11 @@ export async function runAgent(
             checkpointId = await context.checkpoint.create(task.id, [
               candidatePath,
             ]);
-            emit(loopOptions, { type: "checkpoint.created", id: checkpointId });
+            emit(loopOptions, {
+              type: "checkpoint.created",
+              id: checkpointId,
+              paths: [candidatePath],
+            });
             context.checkpointId = checkpointId;
           } else if (
             (tool.risk === "write" || tool.risk === "destructive") &&
@@ -4843,11 +5528,57 @@ export async function runAgent(
             ...(requestedPath ? { target: requestedPath } : {}),
             startedAt: toolStartedAt,
           });
+          // RunTests can legitimately write coverage/snapshot files as a
+          // side effect and always needs attribution. Shell only needs it
+          // when the command isn't classified read-only (ls/cat/git status/
+          // git log/...), which is by far the most common Shell call and
+          // otherwise pays for two extra git subprocess spawns for nothing.
+          const attributesMutatedPaths =
+            call.name === "RunTests" ||
+            (call.name === "Shell" &&
+              typeof input === "object" &&
+              input !== null &&
+              "command" in input &&
+              typeof input.command === "string" &&
+              classifyShellCommand(input.command) !== "read");
+          // Attribution is best-effort bookkeeping around the real tool
+          // call, not part of its outcome: a signal abort or transient git
+          // failure here must never turn an already-succeeded tool.execute
+          // into a recorded failure, so failures are swallowed to undefined
+          // instead of propagating to the surrounding catch.
+          const safeListWorkingTreeChangedPaths = async (): Promise<
+            string[] | undefined
+          > => {
+            try {
+              return await listWorkingTreeChangedPaths(
+                task.root,
+                signal,
+                logger,
+              );
+            } catch {
+              return undefined;
+            }
+          };
+          const pathsBeforeExecute = attributesMutatedPaths
+            ? await safeListWorkingTreeChangedPaths()
+            : undefined;
           let output: unknown;
-          try {
-            output = await tool.execute(input, context);
-          } finally {
-            persistLedger();
+          // Keep the in-flight marker durable until the complete observation
+          // boundary below records the result, action, evidence, and any
+          // checkpoint mutation. Clearing it in a finally block immediately
+          // after execute() creates a replay window: a process loss after a
+          // successful destructive call but before its ledger commit would
+          // look like an unstarted mutation on resume.
+          output = await tool.execute(input, context);
+          if (pathsBeforeExecute) {
+            const pathsAfterExecute = await safeListWorkingTreeChangedPaths();
+            if (pathsAfterExecute) {
+              const before = new Set(pathsBeforeExecute);
+              recordTaskMutatedPaths(
+                ledger,
+                pathsAfterExecute.filter((candidate) => !before.has(candidate)),
+              );
+            }
           }
           const execution = executionFailure(call.name, input, output);
           const result: ToolResult = {
@@ -4917,6 +5648,8 @@ export async function runAgent(
       }
       transitionPhase(ledger, "reflect", loopOptions);
       persistLedger();
+      const recoveryStop = await consumeRecoveryStop(turn);
+      if (recoveryStop) return recoveryStop;
       if (pendingModelPlanRecovery) {
         const recoveryRequest = pendingModelPlanRecovery;
         pendingModelPlanRecovery = undefined;
@@ -4977,6 +5710,22 @@ export async function runAgent(
           repeatedCount: repeatedErrorCount,
           code: lastErrorCode,
         });
+        const recovered = await attemptNonProgressRecovery(
+          "NO_PROGRESS_REPEATED_ERROR",
+          [
+            `The agent made no progress after ${repeatedErrorCount} ${lastErrorCode ?? "recoverable"} errors in a row.`,
+          ],
+          [
+            "Propose a different tool, target, or approach that avoids the failing action.",
+          ],
+          lastFailureClass ?? "NO_PROGRESS",
+        );
+        if (recovered) {
+          logger?.warn("agent.non_progress.recovered", {
+            reason: "repeated_tool_error",
+          });
+          continue;
+        }
         unresolvedBlockers = 1;
         finalText = `Agent made no progress after ${repeatedErrorCount} ${lastErrorCode ?? "recoverable"} errors.`;
         const finished = await finish(turn);
@@ -4989,6 +5738,22 @@ export async function runAgent(
           repeatedCount: repeatedMutationFailureCount,
           mutationFailureKey: lastMutationFailureKey,
         });
+        const recovered = await attemptNonProgressRecovery(
+          "NO_PROGRESS_MUTATION_FAILURE",
+          [
+            `The agent could not produce a valid mutation after ${repeatedMutationFailureCount} attempts in a row.`,
+          ],
+          [
+            "Propose a different mutation approach or target instead of repeating the failing edit.",
+          ],
+          lastFailureClass ?? "PATCH_APPLY_FAILURE",
+        );
+        if (recovered) {
+          logger?.warn("agent.non_progress.recovered", {
+            reason: "repeated_mutation_failure",
+          });
+          continue;
+        }
         unresolvedBlockers = 1;
         finalText =
           "Agent could not produce a valid mutation after repeated attempts; the workspace was left unchanged for this work unit.";
@@ -5050,17 +5815,13 @@ export async function runAgent(
         let output = "";
         let passed = false;
         try {
-          try {
-            const verification = await runTestsTool.execute(
-              runTestsTool.validate({ command: planned.command }),
-              context,
-            );
-            exitCode = verification.exitCode;
-            output = verification.output;
-            passed = exitCode === 0;
-          } finally {
-            persistLedger();
-          }
+          const verification = await runTestsTool.execute(
+            runTestsTool.validate({ command: planned.command }),
+            context,
+          );
+          exitCode = verification.exitCode;
+          output = verification.output;
+          passed = exitCode === 0;
         } catch (error) {
           if (
             signal.aborted ||
@@ -5091,20 +5852,29 @@ export async function runAgent(
           exitCode,
           output,
         });
+        // Host-run verification is NOT a response to a tool the model called,
+        // so it must NOT be sent as a `role:"tool"` message: doing so leaves an
+        // orphan tool_call_id (no matching assistant tool_call) in the native
+        // tool-calling conversation. That malformed history makes local models
+        // reply unreliably — intermittent EMPTY responses that the loop reads as
+        // "no executable action", which stalls multi-step tasks (confirmed live
+        // via request capture against a real local model). Deliver it as a host
+        // observation (role:"user") so the conversation stays protocol-valid.
         messages.push({
-          role: "tool",
-          toolCallId: `localcode-verification-${planned.stage}`,
-          content: JSON.stringify({
-            tool: "RunTests",
-            stage: planned.stage,
-            command: planned.command,
-            ok: passed,
-            exitCode,
-            output:
-              output.length > MODEL_EXECUTION_TEXT_LIMIT
-                ? `${output.slice(0, MODEL_EXECUTION_TEXT_LIMIT)}\n[host output truncated for model context]`
-                : output,
-          }),
+          role: "user",
+          content: `Host verification (${planned.stage}) — run by the host, not a tool you called: ${JSON.stringify(
+            {
+              tool: "RunTests",
+              stage: planned.stage,
+              command: planned.command,
+              ok: passed,
+              exitCode,
+              output:
+                output.length > MODEL_EXECUTION_TEXT_LIMIT
+                  ? `${output.slice(0, MODEL_EXECUTION_TEXT_LIMIT)}\n[host output truncated for model context]`
+                  : output,
+            },
+          )}`,
         });
         if (!passed) break;
       }
@@ -5401,12 +6171,34 @@ export async function runAgent(
         const criteriaActions = criteria?.nextActions.length
           ? ` Host next actions: ${criteria.nextActions.slice(0, 4).join(" ")}`
           : "";
+        // A staged multi-target task locks the model to one target at a
+        // time via stagedWorkUnitInstruction ("work only on this target...
+        // the host, not the model, advances the next target"). criteria
+        // comes from the host's own verifySuccessCriteria callback, which
+        // reasons purely from filesystem/objective state and has no
+        // awareness of that lock -- it can name a DIFFERENT path as the
+        // next required read. Emitting both instructions verbatim in the
+        // same turn tells the model "work only on A" and "your next tool
+        // MUST read B" at once, an unresolvable contradiction that was
+        // observed live to freeze the model for the rest of the task
+        // (confirmed: three consecutive no-op turns, then a terminal
+        // block). Only surface the fresh-read requirement when it agrees
+        // with the currently staged target.
+        const stagedActiveTarget = stagedTask
+          ? (criteriaWritePaths[0] ?? objectivePaths[0])
+          : undefined;
+        const normalizedStagedActiveTarget = stagedActiveTarget
+          ? normalizeWorkspacePath(stagedActiveTarget)
+          : undefined;
         const freshReadPath = criteria
           ? requiredFreshReadPath(criteria.nextPaths)
           : undefined;
-        const freshReadFeedback = freshReadPath
-          ? ` Your next tool MUST be ReadFile on ${freshReadPath} before any EditFile or WriteFile.`
-          : "";
+        const freshReadFeedback =
+          freshReadPath &&
+          (normalizedStagedActiveTarget === undefined ||
+            normalizeWorkspacePath(freshReadPath) === normalizedStagedActiveTarget)
+            ? ` Your next tool MUST be ReadFile on ${freshReadPath} before any EditFile or WriteFile.`
+            : "";
         const protectedCriteria = ledger.successCriteria
           .filter((criterion) => criterion.required && criterion.satisfied)
           .map((criterion) => criterion.description);
@@ -5424,30 +6216,110 @@ export async function runAgent(
                 ? "The current LLM-authored node requires a user decision. Do not invent a workspace action."
                 : ""
             : "";
+        // Re-sending the identical nudge after an empty/no-action turn is a
+        // non-productive loop: a local model that returned nothing to one
+        // phrasing returns nothing to the same phrasing again, and the run
+        // just burns its recovery budget into a terminal block (observed
+        // live: three consecutive empty turns on the multiply work unit).
+        // Vary the strategy -- collapse to one unambiguous directive on the
+        // first attempt, then escalate to a shorter, stripped reformulation on
+        // the repeat -- and never demand a read and an edit in the same turn.
+        const escalatedNoAction = noActionCount >= 2;
+        const guardedFreshReadPath = freshReadFeedback ? freshReadPath : undefined;
+        const noActionDirective = nextActionDirective({
+          freshReadPath: guardedFreshReadPath,
+          mutationTarget: normalizedStagedActiveTarget ?? criteriaWritePaths[0],
+          escalated: escalatedNoAction,
+        });
         messages.push({
           role: "user",
           content: semanticNodeFeedback
             ? semanticNodeFeedback + criteriaFeedback + criteriaActions
-            : hasReadEvidence
-              ? "Host observation: relevant repository evidence is already available." +
+            : escalatedNoAction
+              ? // Escalation varies the framing and tightens the command, but
+                // must KEEP the concrete "how" (criteriaActions) -- that hint
+                // (e.g. "add a focused test asserting multiply(2,3) equals 6")
+                // is exactly what an empty-returning small model needs to
+                // compose a hard edit; dropping it removed the model's only
+                // scaffold and left it silent on the last work unit.
+                "The previous turn produced no tool call." +
                 criteriaFeedback +
                 criteriaActions +
-                freshReadFeedback +
-                protectedFeedback +
                 " " +
-                "Stop narrating and execute exactly one implementation workspace tool " +
-                "now; use EditFile or WriteFile with valid arguments for the next " +
-                "required change. Do not emit prose or tool-shaped JSON."
-              : "Host observation: the previous assistant turn produced no workspace tool action." +
-                criteriaFeedback +
-                criteriaActions +
-                freshReadFeedback +
-                protectedFeedback +
-                " " +
-                "This coding task is not complete. Execute exactly one available workspace tool " +
-                "now with valid arguments. Do not explain a future action or emit tool-shaped " +
-                "JSON in prose. Continue only from repository evidence.",
+                noActionDirective +
+                " Reply with that tool call only; no prose, no JSON, no code block."
+              : hasReadEvidence
+                ? "Host observation: relevant repository evidence is already available." +
+                  criteriaFeedback +
+                  criteriaActions +
+                  protectedFeedback +
+                  " " +
+                  noActionDirective +
+                  " Do not emit prose or tool-shaped JSON."
+                : "Host observation: the previous assistant turn produced no workspace tool action." +
+                  criteriaFeedback +
+                  criteriaActions +
+                  protectedFeedback +
+                  " " +
+                  noActionDirective +
+                  " Continue only from repository evidence. Do not emit tool-shaped JSON in prose.",
         });
+        continue;
+      }
+      // Host-driven target pivot: the model exhausted every bounded retry
+      // without a single workspace action. If the active target has been
+      // independently confirmed missing (a real ReadFile/ListFiles
+      // observation, not the model's say-so) and was never mutated, and the
+      // objective names another path this task hasn't tried yet, advance to
+      // it instead of terminating -- the model may be correctly refusing to
+      // mutate a target that the host's own path-extraction guessed wrong,
+      // not actually stuck. planningMode === "model" tasks already have
+      // appendModelRecoveryPlan for this; this is the compatibility-mode
+      // equivalent.
+      const stuckTarget = criteriaWritePaths[0] ?? objectivePaths[0];
+      const normalizedStuckTarget = stuckTarget
+        ? normalizeWorkspacePath(stuckTarget)
+        : undefined;
+      const stuckTargetConfirmedMissing =
+        normalizedStuckTarget !== undefined &&
+        observedMissingPaths.has(normalizedStuckTarget) &&
+        !ledger.filesChanged.some(
+          (changed) => normalizeWorkspacePath(changed) === normalizedStuckTarget,
+        );
+      const nextPivotTarget = objectivePaths
+        .map(normalizeWorkspacePath)
+        .filter((value, index, all) => all.indexOf(value) === index)
+        .find(
+          (value) =>
+            value !== normalizedStuckTarget &&
+            !pivotedAwayFromTargets.has(value) &&
+            !ledger.filesChanged.some(
+              (changed) => normalizeWorkspacePath(changed) === value,
+            ),
+        );
+      if (
+        mode === "coding" &&
+        planningMode !== "model" &&
+        stuckTargetConfirmedMissing &&
+        nextPivotTarget &&
+        stagedTargetPivotCount < objectivePaths.length
+      ) {
+        stagedTargetPivotCount += 1;
+        if (normalizedStuckTarget) pivotedAwayFromTargets.add(normalizedStuckTarget);
+        criteriaWritePaths = [nextPivotTarget];
+        criteriaReadPaths = [nextPivotTarget];
+        stagedMutationRequired = false;
+        noActionCount = 0;
+        syncTargetPlan(criteriaWritePaths);
+        messages.push({
+          role: "user",
+          content:
+            `Host observation: ${normalizedStuckTarget} was confirmed missing and produced no valid workspace action after bounded recovery attempts. ` +
+            `The host is advancing the staged work unit to ${nextPivotTarget}. ` +
+            "Work only on this new target; do not return to the previous one.",
+        });
+        transitionPhase(ledger, "reflect", loopOptions);
+        persistLedger();
         continue;
       }
       unresolvedBlockers = 1;

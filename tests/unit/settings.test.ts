@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -12,6 +12,12 @@ import { createPermissionGrant } from "../../src/tools/permission-grants.js";
 
 test("interactive ASK is the default and explicit modes remain selectable", () => {
   expect(readSettings({}).permissionMode).toBe("ASK");
+  expect(
+    readSettings({
+      SHELRACODE_PERMISSION: "EDIT",
+      LOCALCODE_PERMISSION: "PLAN",
+    }).permissionMode,
+  ).toBe("EDIT");
   expect(readSettings({ LOCALCODE_PERMISSION: "EDIT" }).permissionMode).toBe(
     "EDIT",
   );
@@ -29,6 +35,36 @@ test("repository settings are validated and persisted separately from global sta
   });
   expect(await readRepositorySettings(root)).toEqual({
     privacy: "local_only",
+    routingMode: "strict-zero",
+    permissionMode: "EDIT",
+  });
+  expect(
+    await Bun.file(path.join(root, ".shelracode", "config.json")).exists(),
+  ).toBe(true);
+});
+
+test("legacy repository settings are read and migrated to the ShelraCode path", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "shelracode-settings-"));
+  const legacyDirectory = path.join(root, ".localcode");
+  await mkdir(legacyDirectory, { recursive: true });
+  await writeFile(
+    path.join(legacyDirectory, "config.json"),
+    JSON.stringify({ privacy: "private", routingMode: "strict-zero" }),
+    "utf8",
+  );
+
+  expect(await readRepositorySettings(root)).toEqual({
+    privacy: "private",
+    routingMode: "strict-zero",
+  });
+
+  await persistRepositorySettings(root, { permissionMode: "EDIT" });
+
+  expect(
+    await Bun.file(path.join(root, ".shelracode", "config.json")).exists(),
+  ).toBe(true);
+  expect(await readRepositorySettings(root)).toMatchObject({
+    privacy: "private",
     routingMode: "strict-zero",
     permissionMode: "EDIT",
   });

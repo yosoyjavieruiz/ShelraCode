@@ -65,6 +65,23 @@ test("objective review keeps an explicitly named root document", () => {
   ]);
 });
 
+// Regression: "documento llamado X" ("document called X") is the natural
+// Spanish phrasing, but the keyword-adjacency check only recognized the
+// English word "called" and the unrelated connectors "de"/"del". A file
+// named this way was silently dropped, which (via turn-policy.ts's reuse of
+// this detector) misclassified a plain "read this file" request as a
+// tool-less general-knowledge turn.
+test("objective review recognizes the Spanish 'llamado/llamada' file-naming phrase", () => {
+  expect(
+    extractObjectivePaths(
+      "Lee el documento llamado CATALOG.md y resume su contenido.",
+    ),
+  ).toEqual(["CATALOG.md"]);
+  expect(
+    extractObjectivePaths("Abre el archivo llamado notas.txt."),
+  ).toEqual(["notas.txt"]);
+});
+
 test("objective review blocks a named file that was never inspected", async () => {
   const ledger = createTaskLedger({
     id: "objective-review-missing-read",
@@ -555,4 +572,142 @@ test("objective review advances inferred staged targets one at a time", async ()
 
   expect(result.pass).toBe(false);
   expect(result.nextPaths).toEqual(["src/session.ts"]);
+});
+
+test("objective review does not treat a bare 'project directory' phrase in prose as an unresolved placeholder", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-objective-review-prose-"),
+  );
+  try {
+    await writeFile(
+      path.join(root, "CONTRIBUTING.md"),
+      "# Contributing\n\nSet the project directory before running tests.\n",
+    );
+    const ledger = createTaskLedger({
+      id: "objective-review-prose",
+      objective: "Add a contributing guide explaining local setup.",
+      mode: "coding",
+    });
+    recordTaskAction(ledger, {
+      id: "read-contributing",
+      kind: "read",
+      target: "CONTRIBUTING.md",
+      status: "succeeded",
+    });
+    recordTaskAction(ledger, {
+      id: "write-contributing",
+      kind: "write",
+      target: "CONTRIBUTING.md",
+      status: "succeeded",
+    });
+
+    const result = await reviewCodingObjective(
+      task("Add a contributing guide explaining local setup."),
+      ledger,
+      root,
+    );
+
+    expect(result.issues.join(" ")).not.toContain("unresolved placeholder");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("objective review does not treat a testing.md filename mention as a request for test evidence", async () => {
+  const ledger = createTaskLedger({
+    id: "objective-review-filename",
+    objective:
+      "Fix the wording in docs/testing.md that describes the manual QA process.",
+    mode: "coding",
+  });
+  recordTaskAction(ledger, {
+    id: "read-testing-doc",
+    kind: "read",
+    target: "docs/testing.md",
+    status: "succeeded",
+  });
+  recordTaskAction(ledger, {
+    id: "write-testing-doc",
+    kind: "write",
+    target: "docs/testing.md",
+    status: "succeeded",
+  });
+
+  const result = await reviewCodingObjective(
+    task(
+      "Fix the wording in docs/testing.md that describes the manual QA process.",
+    ),
+    ledger,
+    process.cwd(),
+  );
+
+  expect(result.issues.join(" ")).not.toContain("no passing test evidence");
+});
+
+test("objective review does not treat a hyphenated test-helpers.ts filename mention as a request for test evidence", async () => {
+  const ledger = createTaskLedger({
+    id: "objective-review-hyphenated-filename",
+    objective: "Fix the test-helpers.ts file to export a new helper.",
+    mode: "coding",
+  });
+  recordTaskAction(ledger, {
+    id: "read-test-helpers",
+    kind: "read",
+    target: "test-helpers.ts",
+    status: "succeeded",
+  });
+  recordTaskAction(ledger, {
+    id: "write-test-helpers",
+    kind: "write",
+    target: "test-helpers.ts",
+    status: "succeeded",
+  });
+
+  const result = await reviewCodingObjective(
+    task("Fix the test-helpers.ts file to export a new helper."),
+    ledger,
+    process.cwd(),
+  );
+
+  expect(result.issues.join(" ")).not.toContain("no passing test evidence");
+});
+
+test("objective review still flags a literal unfilled template token in a changed artifact", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-objective-review-template-token-"),
+  );
+  try {
+    await writeFile(
+      path.join(root, "package.json"),
+      '{"name": "app", "repository": "repository-name"}\n',
+    );
+    const ledger = createTaskLedger({
+      id: "objective-review-template-token",
+      objective: "Create the package.json for this project.",
+      mode: "coding",
+    });
+    recordTaskAction(ledger, {
+      id: "read-package",
+      kind: "read",
+      target: "package.json",
+      status: "succeeded",
+    });
+    recordTaskAction(ledger, {
+      id: "write-package",
+      kind: "write",
+      target: "package.json",
+      status: "succeeded",
+    });
+
+    const result = await reviewCodingObjective(
+      task("Create the package.json for this project."),
+      ledger,
+      root,
+    );
+
+    expect(result.pass).toBe(false);
+    expect(result.issues.join(" ")).toContain("unresolved placeholder");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -56,11 +56,16 @@ export type AppEvent =
   | { type: "route.selected"; decision: RouteDecision; reason?: string }
   | { type: "route.failed"; error: string; detail?: string }
   | { type: "quota.updated"; quota: QuotaSnapshot }
-  | { type: "checkpoint.created"; id: string }
+  | { type: "checkpoint.created"; id: string; paths?: string[] }
   | {
       type: "approval.requested";
       description: string;
       risk: ToolRisk;
+      // See ToolApprovalRequest.preview (tools/types.ts) — the bounded
+      // before/after excerpt of the content this action would write, so
+      // the transcript's own approval-request row can carry it too, not
+      // just the modal.
+      preview?: string[];
     }
   | { type: "task.completed"; result: unknown }
   | { type: "task.blocked"; error: string; detail?: string }

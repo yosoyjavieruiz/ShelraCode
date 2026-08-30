@@ -9,7 +9,7 @@ afterEach(() => {
   cleanup = undefined;
 });
 
-test("LocalCode leader shortcuts dispatch named UI commands", () => {
+test("ShelraCode leader shortcuts dispatch named UI commands", () => {
   const harness = createTestKeymap({ defaultKeys: true });
   cleanup = harness.cleanup;
   const calls: string[] = [];
@@ -20,13 +20,13 @@ test("LocalCode leader shortcuts dispatch named UI commands", () => {
   harness.keymap.registerLayer({
     commands: [
       {
-        name: "localcode.models",
+        name: "shelracode.models",
         run: () => {
           calls.push("models");
         },
       },
     ],
-    bindings: [{ key: "<leader>m", cmd: "localcode.models" }],
+    bindings: [{ key: "<leader>m", cmd: "shelracode.models" }],
   });
 
   harness.host.press("x", { ctrl: true });
@@ -43,14 +43,14 @@ test("Home suggestion shortcuts dispatch before the composer", () => {
   harness.keymap.registerLayer({
     priority: 100,
     commands: HOME_SHORTCUTS.map(([, id]) => ({
-      name: `localcode.${id}`,
+      name: `shelracode.${id}`,
       run: () => {
         calls.push(id);
       },
     })),
     bindings: HOME_SHORTCUTS.map(([key, id]) => ({
       key,
-      cmd: `localcode.${id}`,
+      cmd: `shelracode.${id}`,
     })),
   });
 

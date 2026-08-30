@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile, unlink, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { assertWorkspacePath, resolveWorkspacePath } from "../shared/paths.js";
+import { PRODUCT_NAME } from "../product/identity.js";
 import { LocalCodeDatabase } from "../storage/database.js";
 import { ToolError } from "../tools/errors.js";
 import type { LocalCodeLogger } from "../shared/logging.js";
@@ -62,6 +63,10 @@ export class CheckpointService {
   }
 
   private readonly logger?: LocalCodeLogger;
+
+  hasCheckpoint(checkpointId: string, taskId?: string): boolean {
+    return this.db.checkpointExists(checkpointId, taskId);
+  }
 
   async create(taskId: string, paths: string[]): Promise<string> {
     const id = randomUUID();
@@ -200,7 +205,7 @@ export class CheckpointService {
       });
       throw new ToolError(
         "STALE_EDIT",
-        `${relativePath} changed after LocalCode captured its checkpoint. Read it again before editing.`,
+        `${relativePath} changed after ${PRODUCT_NAME} captured its checkpoint. Read it again before editing.`,
         {
           recoverable: true,
           path: relativePath,
@@ -217,11 +222,18 @@ export class CheckpointService {
 
   /**
    * Check that every file captured by the active task still contains the
-   * latest content LocalCode wrote. A mismatch means an external edit landed
+   * latest content ${PRODUCT_NAME} wrote. A mismatch means an external edit landed
    * after the checkpoint's last mutation and completion must not claim that
    * user work was preserved.
    */
-  async isPreserved(checkpointId: string): Promise<boolean> {
+  async isPreserved(checkpointId: string, taskId?: string): Promise<boolean> {
+    if (!this.hasCheckpoint(checkpointId, taskId)) {
+      this.logger?.warn("checkpoint.preservation.failed", {
+        checkpointId,
+        reason: "missing",
+      });
+      return false;
+    }
     for (const file of this.db.checkpointFiles(checkpointId)) {
       const current = await readWorkspaceFile(this.root, file.path);
       if (hash(current.content) !== file.lastHash) {

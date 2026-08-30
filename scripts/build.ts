@@ -30,7 +30,7 @@ const result = await Bun.build({
 
 if (!result.success) {
   for (const log of result.logs) console.error(log);
-  throw new Error("LocalCode build failed");
+  throw new Error("ShelraCode build failed");
 }
 
 const executableName =
@@ -101,19 +101,38 @@ console.log(
 if (process.env.SHELRA_BUILD_SKIP_INSTALL === "1") {
   console.log("Skipped per-user installation (SHELRA_BUILD_SKIP_INSTALL=1).");
 } else {
-  const installed = await installExecutable({
-    sourcePath: executablePath,
-    version: VERSION,
-    platform: process.platform,
-    architecture: process.arch,
-  });
-  console.log(
-    `Installed active ${PRODUCT_NAME} ${installed.manifest.version}.`,
-  );
-  console.log(`Global command: ${CLI_NAME}`);
-  console.log(`Install directory: ${installed.paths.binDir}`);
-  if (installed.pathPersisted)
+  try {
+    const installed = await installExecutable({
+      sourcePath: executablePath,
+      version: VERSION,
+      platform: process.platform,
+      architecture: process.arch,
+    });
     console.log(
-      "User PATH updated. Open a new terminal to use shelra everywhere.",
+      `Installed active ${PRODUCT_NAME} ${installed.manifest.version}.`,
     );
+    console.log(`Global command: ${CLI_NAME}`);
+    console.log(`Install directory: ${installed.paths.binDir}`);
+    if (installed.pathPersisted)
+      console.log(
+        "User PATH updated. Open a new terminal to use shelra everywhere.",
+      );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const isLock =
+      message.includes("still running or locked") ||
+      message.includes("EPERM") ||
+      message.includes("EBUSY");
+    if (isLock) {
+      console.warn(
+        `Warning: Could not update the active executable in %USERPROFILE%\\.shelra\\bin — it is locked (EPERM). The bundle in dist/ was built successfully.`,
+      );
+      console.warn(`  ${message}`);
+      console.warn(
+        `Close any running shelra processes and run 'bun run scripts/build.ts' again, or use 'SHELRA_BUILD_SKIP_INSTALL=1 bun run scripts/build.ts' to skip installation.`,
+      );
+    } else {
+      throw error;
+    }
+  }
 }

@@ -18,6 +18,80 @@ const TOOL_MARKERS = [
 const TOOL_SHAPED_TEXT =
   /^\s*(?:[\[{<`]|```)[\s\S]*(?:"(?:name|tool|tool_calls)"\s*:)/u;
 
+/** Find the first `{`/`[` in text and return the substring up to its matching close, respecting string content. */
+function extractBalancedJson(
+  text: string,
+): { body: string; start: number; end: number } | undefined {
+  const start = text.search(/[[{]/u);
+  if (start < 0) return undefined;
+  const open = text[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === open) depth += 1;
+    else if (character === close) {
+      depth -= 1;
+      if (depth === 0)
+        return { body: text.slice(start, index + 1), start, end: index + 1 };
+    }
+  }
+  return undefined;
+}
+
+const FENCE_EDGE_PATTERN = /^```[a-z]*\r?\n?|\r?\n?```$/giu;
+const ENVELOPE_TAG_EDGE_PATTERN =
+  /^(?:<\/?(?:tools|response|tool_request|tool_response|tool_call|xml)>|\[\/?(?:END_)?TOOL_REQUEST\])\s*|\s*(?:<\/?(?:tools|response|tool_request|tool_response|tool_call|xml)>|\[\/?(?:END_)?TOOL_REQUEST\])$/giu;
+
+/**
+ * recoverTextToolCalls already rejected this text as a legal tool-call
+ * envelope. That rejection has two very different causes: the JSON is
+ * genuinely broken (often a truncated stream, a real malformed attempt), or
+ * the JSON parses fine but simply is not shaped like a tool call (a model
+ * explaining the tool schema with `{"name": "example", "tool_calls": []}` as
+ * a documentation example). Only the first case is a protocol defect worth
+ * aborting the turn for; the second is ordinary text that happens to
+ * contain JSON — but ONLY when there is other content around the JSON blob
+ * (prose, a fence, an envelope tag) showing it's embedded in an explanation.
+ * A bare, standalone JSON blob with nothing else is far more likely to be a
+ * genuine (if malformed) tool-call attempt, so that case still errors.
+ */
+function isUnparseableToolShapedText(text: string): boolean {
+  if (!TOOL_SHAPED_TEXT.test(text)) return false;
+  const trimmed = text.trim();
+  const extracted = extractBalancedJson(trimmed);
+  if (!extracted) return true;
+  const before = trimmed
+    .slice(0, extracted.start)
+    .replace(FENCE_EDGE_PATTERN, "")
+    .replace(ENVELOPE_TAG_EDGE_PATTERN, "")
+    .trim();
+  const after = trimmed
+    .slice(extracted.end)
+    .replace(FENCE_EDGE_PATTERN, "")
+    .replace(ENVELOPE_TAG_EDGE_PATTERN, "")
+    .trim();
+  if (!before && !after) return true;
+  try {
+    JSON.parse(extracted.body);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function isBoundary(text: string, index: number): boolean {
   return (
     index === 0 || new Set([" ", "\t", "\r", "\n"]).has(text[index - 1] ?? "")
@@ -119,7 +193,7 @@ export async function* normalizeProviderEvents(
         const calls = recoverTextToolCalls(quarantined, turn);
         if (calls) {
           for (const call of calls) yield { type: "tool.call", call };
-        } else if (!TOOL_SHAPED_TEXT.test(quarantined)) {
+        } else if (!isUnparseableToolShapedText(quarantined)) {
           const visible = flushText(quarantined);
           if (visible) yield visible;
         }
@@ -137,7 +211,7 @@ export async function* normalizeProviderEvents(
           const calls = recoverTextToolCalls(quarantined, turn);
           if (calls) {
             for (const call of calls) yield { type: "tool.call", call };
-          } else if (!TOOL_SHAPED_TEXT.test(quarantined)) {
+          } else if (!isUnparseableToolShapedText(quarantined)) {
             const visible = flushText(quarantined);
             if (visible) yield visible;
           } else {

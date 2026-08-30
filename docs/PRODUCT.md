@@ -1,8 +1,8 @@
-# LocalCode Product
+# ShelraCode Product
 
 ## Problem
 
-Coding agents make users manually choose a model, runtime, provider, context window, privacy trade-off, and billing route. LocalCode makes that decision visible and policy-bound.
+Coding agents make users manually choose a model, runtime, provider, context window, privacy trade-off, and billing route. ShelraCode makes that decision visible and policy-bound.
 
 ## Target user
 
@@ -14,19 +14,19 @@ Local when possible. Free cloud when useful. Paid only when the user explicitly 
 
 ## MVP promise
 
-Every no-argument `shelra`/`localcode` launch opens the same keyboard-first TUI
-from the current workspace. `shelra setup`/`localcode setup` explicitly opens
+Every no-argument `shelra` launch opens the keyboard-first TUI from the current
+workspace. `shelra setup` explicitly opens
 the onboarding flow for hardware, local runtimes, model fit, provider
 readiness, privacy policy, and routing mode. Inside the workspace the user can
 inspect the repository, route a task, use safe tools, see route explanations,
-verify changes, and roll back LocalCode-owned edits safely.
+verify changes, and roll back ShelraCode-owned edits safely.
 
 ## Core flows
 
 1. Setup: inspect hardware, runtimes, local models, provider readiness, privacy and strict-zero defaults.
 2. Task: classify the task, scan sensitive paths/content, choose an eligible local/free route, execute tools, verify, and explain.
 3. Recovery: show provider/quota/policy failure, preserve local execution, and never silently cross into paid inference.
-4. Safety: checkpoint before mutation, detect external conflicts, and restore only LocalCode-owned changes.
+4. Safety: checkpoint before mutation, detect external conflicts, and restore only ShelraCode-owned changes.
 
 ## Success metrics
 

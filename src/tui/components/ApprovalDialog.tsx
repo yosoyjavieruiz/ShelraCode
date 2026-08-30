@@ -7,15 +7,35 @@ import {
   type ApprovalOption,
 } from "../state/approval.js";
 
+type AccessorOrValue<T> = T | (() => T);
+
+function readProp<T>(value: AccessorOrValue<T> | undefined): T | undefined {
+  return typeof value === "function" ? (value as () => T)() : value;
+}
+
 export function ApprovalDialog(props: {
   theme: ThemeTokens;
-  width: number;
-  height: number;
-  action?: string;
-  impact?: string;
-  scopeDescription?: string;
-  busy?: boolean;
-  selectedIndex?: number;
+  // Must be the raw signal accessor, not an already-invoked value
+  // (`width={width}`, not `width={width()}`). This render pipeline's
+  // reactive binding for a custom component only tracks a dependency when
+  // it receives a function to call itself -- an invoked value is a frozen
+  // snapshot from whenever the parent's render body last ran. Confirmed
+  // bug: the whole dialog rendered invisible/stuck on the first real
+  // approval request because every prop here was passed pre-invoked (see
+  // src/tui/components/StatusBar.tsx and Composer.tsx for the same
+  // constraint already documented and worked around there).
+  width: AccessorOrValue<number>;
+  height: AccessorOrValue<number>;
+  action?: AccessorOrValue<string | undefined>;
+  impact?: AccessorOrValue<string | undefined>;
+  scopeDescription?: AccessorOrValue<string | undefined>;
+  // Bounded before/after excerpt of the exact content this action would
+  // write (see ToolApprovalRequest.preview, tools/types.ts) — approving a
+  // write/edit/delete must show what will change, not just a path, so the
+  // decision is never made blind to the actual content.
+  preview?: AccessorOrValue<string[] | undefined>;
+  busy?: AccessorOrValue<boolean>;
+  selectedIndex?: AccessorOrValue<number>;
   onDecision?: (decision: ApprovalOption["decision"]) => void;
   onMove?: (delta: 1 | -1) => void;
   onApprove?: () => void;
@@ -23,21 +43,31 @@ export function ApprovalDialog(props: {
   onKeyDown?: (event: KeyEvent) => void;
 }) {
   const colors = props.theme.colors;
-  const panelWidth = Math.min(Math.max(48, props.width - 8), 86);
+  const width = () => readProp(props.width) ?? 0;
+  const height = () => readProp(props.height) ?? 0;
+  const busy = () => readProp(props.busy) ?? false;
+  const panelWidth = () => Math.min(Math.max(48, width() - 8), 86);
   const selectedIndex = () =>
     Math.min(
       APPROVAL_OPTIONS.length - 1,
-      Math.max(0, props.selectedIndex ?? 0),
+      Math.max(0, readProp(props.selectedIndex) ?? 0),
     );
+  // Capped short: this is a preview to sanity-check before deciding, not a
+  // pager — the full diff still renders in the transcript once the action
+  // runs (tool-renderers.tsx). Panel height grows to fit it so the preview
+  // is never clipped by a fixed box.
+  const PREVIEW_MAX_LINES = 8;
+  const previewLines = () => (readProp(props.preview) ?? []).slice(0, PREVIEW_MAX_LINES);
+  const panelHeight = () => 20 + (previewLines().length > 0 ? previewLines().length + 1 : 0);
   return (
     <box
       id="approval-dialog"
       ref={(value) => queueMicrotask(() => value.focus())}
       position="absolute"
-      top={Math.max(1, Math.floor((props.height - 20) / 2))}
-      left={Math.max(2, Math.floor((props.width - panelWidth) / 2))}
-      width={panelWidth}
-      height={20}
+      top={Math.max(1, Math.floor((height() - panelHeight()) / 2))}
+      left={Math.max(2, Math.floor((width() - panelWidth()) / 2))}
+      width={panelWidth()}
+      height={panelHeight()}
       padding={1}
       border
       borderStyle="single"
@@ -49,7 +79,7 @@ export function ApprovalDialog(props: {
       focused
       zIndex={220}
       onKeyDown={(event: KeyEvent) => {
-        if (props.busy) {
+        if (busy()) {
           event.preventDefault();
           return;
         }
@@ -77,22 +107,54 @@ export function ApprovalDialog(props: {
       <box flexDirection="column" gap={1}>
         <text fg={themeColor(props.theme, colors.status.warning)}>
           <strong>
-            {props.busy ? "Saving permission" : "Approval required"}
+            {() => (busy() ? "Saving permission" : "Approval required")}
           </strong>
         </text>
         <text fg={themeColor(props.theme, colors.text.primary)}>
           Allow workspace action
         </text>
         <text fg={themeColor(props.theme, colors.text.secondary)}>
-          {props.action ?? "npm publish"}
+          {() => readProp(props.action) ?? "npm publish"}
         </text>
         <text fg={themeColor(props.theme, colors.text.secondary)}>
-          {props.impact ?? "This creates an external side effect."}
+          {() =>
+            readProp(props.impact) ?? "This creates an external side effect."
+          }
         </text>
+        {() => {
+          const lines = previewLines();
+          const total = readProp(props.preview)?.length ?? 0;
+          if (lines.length === 0) return null;
+          return (
+            <box flexDirection="column" gap={0}>
+              {lines.map((line) => (
+                <text
+                  fg={themeColor(
+                    props.theme,
+                    line.startsWith("+")
+                      ? colors.git.added
+                      : line.startsWith("-")
+                        ? colors.git.removed
+                        : colors.text.muted,
+                  )}
+                >
+                  {line}
+                </text>
+              ))}
+              {total > lines.length ? (
+                <text fg={themeColor(props.theme, colors.text.muted)}>
+                  {`  … ${total - lines.length} more preview lines`}
+                </text>
+              ) : null}
+            </box>
+          );
+        }}
         <text fg={themeColor(props.theme, colors.text.muted)}>
-          {props.busy
-            ? "Saving your permission before the agent continues…"
-            : "Review the action and choose how long the permission should last."}
+          {() =>
+            busy()
+              ? "Saving your permission before the agent continues…"
+              : "Review the action and choose how long the permission should last."
+          }
         </text>
         <box flexDirection="column" gap={0}>
           {APPROVAL_OPTIONS.map((option, index) => (
@@ -109,15 +171,20 @@ export function ApprovalDialog(props: {
             >
               <text fg={themeColor(props.theme, colors.text.primary)}>
                 <strong>
-                  {`${index === selectedIndex() ? "›" : " "} [${option.key}] ${option.label}`}
+                  {() =>
+                    `${index === selectedIndex() ? "›" : " "} [${option.key}] ${option.label}`
+                  }
                 </strong>
-                {` · ${
-                  option.decision === "session" && props.scopeDescription
-                    ? `Do not ask again for ${props.scopeDescription} this session`
-                    : option.decision === "project" && props.scopeDescription
-                      ? `Save ${props.scopeDescription} for this project`
-                      : option.detail
-                }`}
+                {() => {
+                  const scopeDescription = readProp(props.scopeDescription);
+                  return ` · ${
+                    option.decision === "session" && scopeDescription
+                      ? `Do not ask again for ${scopeDescription} this session`
+                      : option.decision === "project" && scopeDescription
+                        ? `Save ${scopeDescription} for this project`
+                        : option.detail
+                  }`;
+                }}
               </text>
             </box>
           ))}

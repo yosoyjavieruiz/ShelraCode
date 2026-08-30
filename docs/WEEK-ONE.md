@@ -51,7 +51,7 @@ restoration, docs and changelog.
 
 Done: `bun run build` now creates `dist/shelra.exe`, atomically activates it
 under `%USERPROFILE%\.shelra\bin`, writes the active version manifest,
-updates the user PATH, preserves the `localcode` compatibility shim, and is
+updates the user PATH, and is
 verified from an external disposable project directory.
 
 ## Deferred

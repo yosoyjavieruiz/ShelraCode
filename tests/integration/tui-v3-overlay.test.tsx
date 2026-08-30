@@ -5,13 +5,13 @@ import { readUIFixture } from "../../src/tui/state/fixtures.js";
 
 const renderers: Array<{ destroy: () => void }> = [];
 afterEach(() => {
-  delete process.env.LOCALCODE_UI_FIXTURE;
+  delete process.env.SHELRACODE_UI_FIXTURE;
   for (const renderer of renderers) renderer.destroy();
   renderers.length = 0;
 });
 
 test("command palette owns the narrow frame", async () => {
-  process.env.LOCALCODE_UI_FIXTURE = "palette";
+  process.env.SHELRACODE_UI_FIXTURE = "palette";
   const setup = await testRender(() => AppShell({ fixture: readUIFixture() }), {
     width: 80,
     height: 24,
@@ -29,11 +29,11 @@ test("command palette owns the narrow frame", async () => {
   // removed rather than duplicating that information.
   expect(narrow).not.toContain("COMMAND PALETTE");
 
-  delete process.env.LOCALCODE_UI_FIXTURE;
+  delete process.env.SHELRACODE_UI_FIXTURE;
 });
 
 test("model-picker fixture keeps narrow metadata on its own row", async () => {
-  process.env.LOCALCODE_UI_FIXTURE = "model-picker";
+  process.env.SHELRACODE_UI_FIXTURE = "model-picker";
   const setup = await testRender(() => AppShell({ fixture: readUIFixture() }), {
     width: 80,
     height: 24,
@@ -46,5 +46,5 @@ test("model-picker fixture keeps narrow metadata on its own row", async () => {
   expect(frame).toContain("Qwen 2.5 Coder 7B");
   expect(frame).toContain("LM Studio");
   expect(frame).toContain("FREE CLOUD");
-  delete process.env.LOCALCODE_UI_FIXTURE;
+  delete process.env.SHELRACODE_UI_FIXTURE;
 });

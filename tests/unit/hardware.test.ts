@@ -20,6 +20,7 @@ describe("llmfit hardware adapter", () => {
           isolation: {
             applicationPolicy: "enforced",
             osEnforced: false,
+            networkEnforced: false,
             mechanism: "none",
             reason: "fixture",
           },
@@ -36,6 +37,7 @@ describe("llmfit hardware adapter", () => {
         isolation: {
           applicationPolicy: "enforced",
           osEnforced: false,
+          networkEnforced: false,
           mechanism: "none",
           reason: "fixture",
         },

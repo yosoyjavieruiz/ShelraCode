@@ -7,6 +7,7 @@
  * The next agent turn must still re-read the affected files; this policy never
  * replays an interrupted mutation.
  */
+import { workspacePathComparisonKey } from "../shared/workspace-paths.js";
 
 export type ResumeWorkspaceStatus =
   "compatible" | "task_changes_detected" | "blocked";
@@ -28,19 +29,12 @@ export interface ResumeWorkspaceAssessment {
   unexpectedPaths: string[];
 }
 
-function normalizePath(value: string): string {
-  const normalized = value
-    .trim()
-    .replaceAll("\\", "/")
-    .replace(/^\.\//, "")
-    .replace(/\/+/g, "/");
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
-
 function uniquePaths(values: readonly string[] | undefined): string[] {
   return [
     ...new Set(
-      (values ?? []).map(normalizePath).filter((value) => value.length > 0),
+      (values ?? [])
+        .map(workspacePathComparisonKey)
+        .filter((value) => value.length > 0),
     ),
   ].sort();
 }
@@ -91,9 +85,17 @@ export function assessResumeWorkspace(
 
   const changedPaths = uniquePaths(input.currentWorkingTreePaths);
   if (changedPaths.length === 0)
-    return blocked(
-      "Cannot attribute the working-tree change because no changed paths were enumerated.",
-    );
+    // The fingerprint can change for a reason that isn't a content diff (for
+    // example gitWorkingTreeRevision's digest includes the checked-out
+    // branch name); with zero paths enumerated there is nothing to
+    // attribute, and nothing unsafe to block.
+    return {
+      status: "compatible",
+      reason:
+        "The working-tree fingerprint changed without enumerating any changed paths (for example, a branch switch with an otherwise clean tree); there is nothing to attribute.",
+      changedPaths: [],
+      unexpectedPaths: [],
+    };
 
   const ownedPaths = new Set(
     uniquePaths([
@@ -106,7 +108,7 @@ export function assessResumeWorkspace(
   );
   if (unexpectedPaths.length > 0)
     return blocked(
-      "Cannot resume because the working tree contains changes outside the task scope.",
+      `Cannot resume because the working tree contains changes outside the task scope: ${unexpectedPaths.join(", ")}.`,
       changedPaths,
       unexpectedPaths,
     );

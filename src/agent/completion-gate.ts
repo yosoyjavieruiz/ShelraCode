@@ -5,6 +5,7 @@ import {
 } from "../context/evidence-sufficiency.js";
 import type { ContextEvidence } from "./task-state.js";
 import type { ObjectiveProofAssessment } from "./objective-proof.js";
+import type { AcceptanceProofAssessment } from "../evidence/acceptance.js";
 
 export interface CompletionGateInput {
   mode: TurnMode;
@@ -24,12 +25,18 @@ export interface CompletionGateInput {
   userWorkPreserved: boolean;
   /** Host-owned proof of the requested objective, when a contract is active. */
   objectiveProof?: ObjectiveProofAssessment;
+  /** Canonical obligation/evidence proof, when the caller has compiled one. */
+  acceptanceProof?: AcceptanceProofAssessment;
 }
 
 export interface CompletionDecision {
   canComplete: boolean;
   reasons: string[];
   evidenceState: EvidenceSufficiency;
+  /** Present only when canonical acceptance proof participated in the gate. */
+  acceptanceProof?: AcceptanceProofAssessment;
+  /** True when a completion declaration was rejected for lack of proof. */
+  falseSuccess?: boolean;
 }
 
 const EVIDENCE_MODES = new Set<TurnMode>([
@@ -62,6 +69,14 @@ export function evaluateCompletionGate(
       reasons.push(
         `required objective proof is missing: ${requirement.requirementId}`,
       );
+  if (input.acceptanceProof && !input.acceptanceProof.canComplete) {
+    const proofReasons = input.acceptanceProof.reasons.slice(0, 8);
+    if (proofReasons.length > 0)
+      reasons.push(
+        ...proofReasons.map((reason) => `acceptance proof: ${reason}`),
+      );
+    else reasons.push("required acceptance proof is missing");
+  }
   if (input.successCriteriaSatisfied === false)
     reasons.push("success criteria are not satisfied");
   if (EVIDENCE_MODES.has(input.mode) && evidenceState !== "SUFFICIENT")
@@ -84,5 +99,15 @@ export function evaluateCompletionGate(
   if (input.unresolvedBlockers > 0) reasons.push("unresolved blockers remain");
   if (!input.userWorkPreserved)
     reasons.push("pre-existing user work is not preserved");
-  return { canComplete: reasons.length === 0, reasons, evidenceState };
+  return {
+    canComplete: reasons.length === 0,
+    reasons,
+    evidenceState,
+    ...(input.acceptanceProof
+      ? {
+          acceptanceProof: input.acceptanceProof,
+          falseSuccess: input.acceptanceProof.falseSuccess,
+        }
+      : {}),
+  };
 }

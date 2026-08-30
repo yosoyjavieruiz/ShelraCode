@@ -1,6 +1,6 @@
 # TUI
 
-LocalCode's implemented terminal experience is documented in
+ShelraCode's implemented terminal experience is documented in
 [`docs/UI-V2.md`](UI-V2.md). Its visual system is Obsidian Violet: a true-black
 canvas, deep neutral surfaces, amethyst focus and semantic state colors.
 

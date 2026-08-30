@@ -154,7 +154,11 @@ test("the process layer bounds both returned output and live output", async () =
       .join("").length,
   ).toBeLessThanOrEqual(1_024);
   expect(result.isolation.applicationPolicy).toBe("enforced");
-  expect(result.isolation.osEnforced).toBe(false);
+  // Windows now has a real Job Object adapter (see src/shared/win32/); this
+  // call doesn't request network denial, so only lifecycle containment
+  // applies, not the AppContainer network guarantee.
+  expect(result.isolation.osEnforced).toBe(process.platform === "win32");
+  expect(result.isolation.networkEnforced).toBe(false);
 });
 
 test("child processes receive no credential variables", async () => {
@@ -182,6 +186,12 @@ test("child processes receive no credential variables", async () => {
 });
 
 test("required OS isolation fails closed when no native adapter is available", async () => {
+  if (process.platform === "win32") {
+    // Windows now has a real Job Object adapter, so "required" isolation is
+    // satisfiable and must succeed rather than fail closed -- see the next
+    // test for the platform-specific positive assertion.
+    return;
+  }
   await expect(
     runShellCommand("echo isolated", {
       intent: "execute",
@@ -189,4 +199,15 @@ test("required OS isolation fails closed when no native adapter is available", a
       allowWeakIsolation: false,
     }),
   ).rejects.toBeInstanceOf(ProcessIsolationError);
+});
+
+test("required OS isolation succeeds on Windows via the Job Object adapter", async () => {
+  if (process.platform !== "win32") return;
+  const result = await runShellCommand("echo isolated", {
+    intent: "execute",
+    isolation: "required",
+    allowWeakIsolation: false,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.isolation.osEnforced).toBe(true);
 });

@@ -1,11 +1,12 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { openControlPlane } from "../src/cli/control-plane.js";
+import { PRODUCT_STATE_DIR_NAME, readProductEnv } from "../src/product/identity.js";
 
 const root = process.cwd();
 const outputPath =
-  process.env.LOCALCODE_CATALOG_PATH?.trim() ||
-  path.join(root, ".localcode", "model-catalog.json");
+  readProductEnv(process.env, "CATALOG_PATH") ||
+  path.join(root, PRODUCT_STATE_DIR_NAME, "model-catalog.json");
 const controlPlane = await openControlPlane(root);
 
 try {

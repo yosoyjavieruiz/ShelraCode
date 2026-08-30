@@ -292,6 +292,43 @@ describe("OpenAI-compatible provider contract", () => {
     expect(bodies[1]).not.toHaveProperty("tool_choice");
   });
 
+  test("forwards reasoningEffort as reasoning_effort when present, and omits it when absent", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fakeFetch: FetchLike = async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response("data: [DONE]\n\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+    const adapter = provider(fakeFetch);
+
+    for await (const _event of adapter.stream(
+      {
+        modelId: "fake-coder",
+        messages: [{ role: "user", content: "read package.json" }],
+        reasoningEffort: "high",
+        stream: true,
+      },
+      new AbortController().signal,
+    )) {
+      // drain
+    }
+    for await (const _event of adapter.stream(
+      {
+        modelId: "fake-coder",
+        messages: [{ role: "user", content: "Hola" }],
+        stream: true,
+      },
+      new AbortController().signal,
+    )) {
+      // drain
+    }
+
+    expect(bodies[0]?.reasoning_effort).toBe("high");
+    expect(bodies[1]).not.toHaveProperty("reasoning_effort");
+  });
+
   test("provider logs request and stream lifecycle without logging message content", async () => {
     const logs: LogRecord[] = [];
     const logger = createLogger({

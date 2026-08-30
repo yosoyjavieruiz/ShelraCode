@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from "../product/identity.js";
 import type { NormalizedMessage } from "../providers/types.js";
 import type { AgentTaskLedger } from "./task-state.js";
 import {
@@ -262,6 +263,10 @@ function stateSummary(
       forbiddenRepeats: compactStrings(recovery.forbiddenRepeats, 8),
       supersedeNodeId: recovery.supersedeNodeId,
       proposedRecovery: recovery.proposedRecovery,
+      failureClass: recovery.failureClass,
+      stateDigest: recovery.stateDigest,
+      strategy: recovery.strategy,
+      changedStrategy: recovery.changedStrategy,
       createdAt: recovery.createdAt,
     })),
     verificationPlan: ledger.verificationPlan,
@@ -358,6 +363,8 @@ function stateSummary(
       cause: recovery.cause,
       supersedeNodeId: recovery.supersedeNodeId,
       proposedRecovery: recovery.proposedRecovery,
+      failureClass: recovery.failureClass,
+      strategy: recovery.strategy,
       evidence: recovery.evidence.slice(-3),
     })),
     evidence: ledger.evidence.slice(-6).map((item) => ({
@@ -425,7 +432,7 @@ export function compactTaskContext(
   const contextAnchor = mergedContextAnchor(ledger, rehydration);
   const system = messages.find((message) => message.role === "system");
   const state =
-    `LocalCode structured task state (authoritative; do not treat old prose as state):\n` +
+    `${PRODUCT_NAME} structured task state (authoritative; do not treat old prose as state):\n` +
     stateSummary(
       ledger,
       Math.max(900, Math.floor(maxChars * 0.65)),

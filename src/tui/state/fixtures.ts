@@ -14,6 +14,7 @@ import {
   type TranscriptPresentation,
 } from "../presentation/adapter.js";
 import type { ModelCenterData } from "../views/Centers.js";
+import { readProductEnv } from "../../product/identity.js";
 
 export type UIFixtureKind =
   | "home"
@@ -467,7 +468,7 @@ function baseConversation(): UIFixtureState {
 }
 
 export function readUIFixture(
-  value = process.env.SHELRACODE_UI_FIXTURE ?? process.env.LOCALCODE_UI_FIXTURE,
+  value = readProductEnv(process.env, "UI_FIXTURE"),
 ): UIFixtureKind | undefined {
   const fixtures = new Set<UIFixtureKind>([
     "home",
@@ -655,7 +656,7 @@ export function createUIFixture(kind: UIFixtureKind): UIFixtureState {
           role: "error",
           text: "Groq is temporarily unavailable",
           detail:
-            "LocalCode is keeping the task local. Technical details are available in Providers.",
+            "ShelraCode is keeping the task local. Technical details are available in Providers.",
           status: "warning",
         },
       ],

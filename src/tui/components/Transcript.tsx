@@ -780,13 +780,58 @@ function PresentationItem(props: {
     );
   }
   if (kind === "approval-request") {
+    const current = () => {
+      const value = props.item();
+      return value.kind === "approval-request" ? value : undefined;
+    };
     return (
-      <text fg={color(colors.status.warning)}>
+      <box flexDirection="column">
+        <text fg={color(colors.status.warning)}>
+          {() => `Approval required · ${current()?.description ?? ""}`}
+        </text>
+        {() => {
+          const preview = current()?.preview;
+          if (!preview || preview.length === 0) return null;
+          return (
+            <box flexDirection="column" paddingLeft={2}>
+              <For each={preview}>
+                {(line) => (
+                  <text
+                    width="100%"
+                    wrapMode="word"
+                    fg={color(
+                      line.startsWith("+")
+                        ? colors.git.added
+                        : line.startsWith("-")
+                          ? colors.git.removed
+                          : colors.text.muted,
+                    )}
+                  >
+                    {line}
+                  </text>
+                )}
+              </For>
+            </box>
+          );
+        }}
+      </box>
+    );
+  }
+  if (kind === "checkpoint-notice") {
+    return (
+      <text fg={color(colors.purple[300])}>
         {() => {
           const current = props.item();
-          return current.kind === "approval-request"
-            ? `Approval required · ${current.description}`
-            : "";
+          if (current.kind !== "checkpoint-notice") return "";
+          const scope =
+            current.paths && current.paths.length > 0
+              ? ` · ${current.paths.slice(0, 3).join(", ")}${
+                  current.paths.length > 3
+                    ? ` +${current.paths.length - 3} more`
+                    : ""
+                }`
+              : "";
+          return `⌁ Checkpoint saved${scope} · restorable with /rollback`;
         }}
       </text>
     );

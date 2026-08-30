@@ -1,8 +1,0 @@
-[agents]
-enabled = true
-max_concurrent_threads_per_session = 6
-default_subagent_reasoning_effort = "medium"
-
-[features]
-multi_agent = true
-

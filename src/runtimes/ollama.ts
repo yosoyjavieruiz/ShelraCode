@@ -7,6 +7,7 @@ import type {
   RuntimeHealth,
 } from "./types.js";
 import { isGenerativeModelId } from "./model-filter.js";
+import { estimateModelQuality } from "../shared/model-quality.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -119,7 +120,11 @@ export class OllamaRuntime implements LocalRuntimeAdapter {
               retentionKnown: true,
               trainsOnInputs: false,
             },
-            quality: { coding: 0.6, toolUse: 0.6, confidence: "unknown" },
+            quality: estimateModelQuality({
+              modelId: name,
+              displayName: name,
+              parameters: text(details?.parameter_size),
+            }),
             health: { state: "healthy" },
             local: {
               runtime: this.id,

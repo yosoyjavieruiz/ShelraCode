@@ -44,6 +44,8 @@ const model: ModelCandidate = {
 
 test("agent doctor reports measured capability and unmeasured release gates", () => {
   const output = agentDoctorLines([model]).join("\n");
+  expect(output).toContain("ShelraCode Agent Diagnostics");
+  expect(output).not.toContain("LocalCode");
   expect(output).toContain("Capability                    coding_agent");
   expect(output).toContain("Conversation                  PASS");
   expect(output).toContain("Editing                       PASS");

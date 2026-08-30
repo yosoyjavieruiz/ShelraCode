@@ -4,6 +4,11 @@ import type { LocalCodeLogger } from "../shared/logging.js";
 import type { PermissionMode } from "../shared/types.js";
 import type { ToolErrorCode } from "./errors.js";
 import type { ProcessIsolationMode } from "../shared/process-isolation.js";
+import type {
+  ExecutionBroker,
+  ExecutionNetworkMode,
+} from "../security/execution-broker.js";
+import type { ModelDriverProfile } from "../driver/profile.js";
 
 export type ToolRisk = "read" | "write" | "execute" | "destructive";
 
@@ -30,6 +35,15 @@ export interface ToolApprovalRequest {
   tool?: string;
   path?: string;
   command?: string;
+  /**
+   * Bounded before/after excerpt of the exact content being written, so the
+   * approval prompt shows what will change instead of just naming a path —
+   * approving a write/edit must never mean approving it blind. `+`/`-`
+   * prefixed lines for the host UI to color; capped short (see
+   * requirePermission's callers, tools/workspace.ts) since this is a
+   * preview, not a full diff.
+   */
+  preview?: string[];
 }
 
 export interface ToolExecutionContext {
@@ -37,6 +51,14 @@ export interface ToolExecutionContext {
   permissionMode: PermissionMode;
   signal: AbortSignal;
   network?: boolean;
+  /** Host-selected network boundary; strict-zero is fail-closed. */
+  networkMode?: ExecutionNetworkMode;
+  /** Distinguishes trusted host callers from the model-facing runtime path. */
+  modelAuthority?: "host" | "model";
+  /** Exact profile supplied only after host-side certification/revalidation. */
+  driverProfile?: ModelDriverProfile;
+  /** Optional host-side side-effect broker. Tools create a strict default when omitted. */
+  executionBroker?: ExecutionBroker;
   /** Whether child execution must have a host-provided OS isolation adapter. */
   osIsolation?: ProcessIsolationMode;
   /** Explicit host opt-in when only application policy is available. */

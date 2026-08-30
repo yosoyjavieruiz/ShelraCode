@@ -239,7 +239,7 @@ export function ModelsView(props: {
             <EmptyState
               theme={props.theme}
               title="No model is ready"
-              detail="Shelra Code can continue in local-only setup once a runtime is available."
+              detail="ShelraCode can continue in local-only setup once a runtime is available."
               action="Run /doctor"
             />
           ) : null}
@@ -401,7 +401,7 @@ export function ProvidersView(props: {
             <EmptyState
               theme={props.theme}
               title="Local-only mode is ready"
-              detail="No cloud provider is configured. This is a valid Shelra Code setup."
+              detail="No cloud provider is configured. This is a valid ShelraCode setup."
             />
           ) : null}
         </box>
@@ -702,7 +702,7 @@ export function SetupView(props: {
       <SectionHeading
         theme={props.theme}
         eyebrow="Setup"
-        title="Shelra Code"
+        title="ShelraCode"
         detail={`${stage() + 1}/${stages.length}`}
       />
       <text fg={themeColor(props.theme, colors.purple[300])}>{progress()}</text>
@@ -1138,7 +1138,7 @@ export function GenericCenterView(props: {
             <EmptyState
               theme={props.theme}
               title="Nothing to show yet"
-              detail="This view will fill as Shelra Code observes the workspace."
+              detail="This view will fill as ShelraCode observes the workspace."
             />
           ) : (
             props.lines.map((line) => (
@@ -1244,7 +1244,7 @@ export function ChangesView(props: {
           theme={props.theme}
           icon="✓"
           title="Working tree clean"
-          detail="No Shelra Code changes to review."
+          detail="No ShelraCode changes to review."
         />
       )}
     </box>

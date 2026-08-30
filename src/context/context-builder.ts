@@ -10,6 +10,13 @@ import type {
   SkillMetadata,
 } from "../instructions/skill-loader.js";
 import type { TrustedInstruction } from "../instructions/trust-policy.js";
+import type {
+  CapabilityActivationDecision,
+  CapabilityActivationMode,
+  CapabilityTaskContext,
+} from "../agent/dynamic-capabilities.js";
+import type { ModelDriverProfile } from "../driver/profile.js";
+import type { PairedCapabilityEvaluationReport } from "../evals/paired-capability.js";
 
 export interface ContextBudgetInput {
   advertisedContext: number;
@@ -57,8 +64,18 @@ export interface RepositoryContextOptions {
   instructionSources?: readonly string[];
   /** Build bounded structural repository evidence for the current objective. */
   buildIntelligence?: boolean;
-  /** Load project Skill metadata and only bodies matching the objective. */
+  /** Historical alias: true is an explicit opt-in for matching Skill bodies. */
   loadSkills?: boolean;
+  /** Host policy for runtime Skill activation; defaults to disabled. */
+  skillActivation?: CapabilityActivationMode;
+  /** Exact certified Driver profile used for Skill compatibility decisions. */
+  skillProfile?: ModelDriverProfile;
+  /** Exact tool/context configuration digest paired evidence was measured with. */
+  skillConfigurationDigest?: string;
+  /** Host-derived task tags used by the Dynamic Capability System. */
+  skillTask?: CapabilityTaskContext;
+  /** Host-owned paired reports produced by Shelra Lab; repository text cannot supply these. */
+  skillEvaluations?: readonly PairedCapabilityEvaluationReport[];
   logger?: LocalCodeLogger;
 }
 
@@ -86,6 +103,8 @@ export interface RepositoryContext {
   /** All Skill metadata is bounded; selected bodies are loaded lazily. */
   skillMetadata?: SkillMetadata[];
   selectedSkills?: LoadedSkill[];
+  /** Host-owned activation decisions for objective-selected Skills. */
+  skillActivationDecisions?: CapabilityActivationDecision[];
   instructionSources?: string[];
   searchBackend:
     "rg" | "fallback" | "no_matches" | "unavailable" | "not_needed";

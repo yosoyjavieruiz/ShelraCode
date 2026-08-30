@@ -196,6 +196,48 @@ test("a child receives fresh bounded context and returns scoped evidence", async
   );
 });
 
+test("a delegated broker built for a fresh task with no certified Driver profile still permits a read-only tool call", async () => {
+  // Reproduces exactly what coordinator.ts's childContextFactory builds:
+  // ...context (which, in real production -- src/tui/app.tsx -- always
+  // has modelAuthority: "model" and, for a fresh/non-resumed task, no
+  // driverProfile) overridden with an explicit executionBroker. Before
+  // finding #4 was fixed, executionBrokerFor derived writeAuthority
+  // "none" from modelAuthority:"model" + no driverProfile, while the
+  // coordinator's broker defaulted to "bounded" -- the mismatch rejected
+  // even this read-only SearchText call with PERMISSION_DENIED.
+  const root = await mkdtemp(path.join(os.tmpdir(), "localcode-subagent-"));
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(
+    path.join(root, "src", "parser.ts"),
+    "export function parse(input: string) { return input.trim(); }\n",
+    "utf8",
+  );
+  const { createExecutionBroker } =
+    await import("../../src/security/execution-broker.js");
+  const ctx: ToolExecutionContext = {
+    root,
+    permissionMode: "PLAN",
+    signal: new AbortController().signal,
+    network: false,
+    modelAuthority: "model",
+    executionBroker: createExecutionBroker({
+      root,
+      networkMode: "strict-zero",
+      allowUnverifiedProcesses: false,
+      writeAuthority: "none",
+    }),
+  };
+
+  const result = await searchTextTool.execute(
+    searchTextTool.validate({ query: "parse", path: "src" }),
+    ctx,
+  );
+
+  expect(result.matches.some((match) => match.path.includes("parser.ts"))).toBe(
+    true,
+  );
+});
+
 test("an aborted parent cancels the child without invoking the provider", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "localcode-subagent-"));
   const provider = new ReadOnlyChildProvider();

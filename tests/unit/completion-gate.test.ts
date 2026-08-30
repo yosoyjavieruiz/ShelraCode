@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { evaluateCompletionGate } from "../../src/agent/completion-gate.js";
 import type { ObjectiveProofAssessment } from "../../src/agent/objective-proof.js";
+import type { AcceptanceProofAssessment } from "../../src/evidence/acceptance.js";
 
 const base = {
   objectiveSatisfied: true,
@@ -150,4 +151,27 @@ test("coding work can complete when the host objective proof passes", () => {
   } as Parameters<typeof evaluateCompletionGate>[0]);
 
   expect(decision.canComplete).toBe(true);
+});
+
+test("completion gate rejects an incomplete canonical acceptance proof", () => {
+  const acceptanceProof: AcceptanceProofAssessment = {
+    canComplete: false,
+    falseSuccess: true,
+    reasons: ["required obligation is pending: criterion:objective (behavior)"],
+    obligations: [],
+    evidenceRefs: [],
+  };
+  const decision = evaluateCompletionGate({
+    ...base,
+    mode: "workspace_question",
+    evidenceCount: 1,
+    acceptanceProof,
+  });
+
+  expect(decision.canComplete).toBe(false);
+  expect(decision.falseSuccess).toBe(true);
+  expect(decision.acceptanceProof).toBe(acceptanceProof);
+  expect(decision.reasons).toContain(
+    "acceptance proof: required obligation is pending: criterion:objective (behavior)",
+  );
 });

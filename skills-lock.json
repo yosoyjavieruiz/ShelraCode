@@ -2,10 +2,10 @@
   "version": 1,
   "skills": {
     "opentui": {
-      "source": "anomalyco/opentui",
+      "source": "cline/cline",
       "sourceType": "github",
-      "skillPath": "packages/web/src/content/SKILL.md",
-      "computedHash": "b6c0e0a4b731c269adfe31db509b47da4fa37b04c86c88e663098150dcc18018"
+      "skillPath": ".agents/skills/opentui/SKILL.md",
+      "computedHash": "0e8ffbf43260f39dc76c8ab58486558c0a57cac2f465a2015c6cc864c133344d"
     }
   }
 }

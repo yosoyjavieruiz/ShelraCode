@@ -8,6 +8,12 @@ import { OpenAICompatibleLocalRuntime } from "../src/runtimes/http.js";
 import { runCommand } from "../src/shared/process.js";
 import { workspaceTools } from "../src/tools/workspace.js";
 import { recommendedAgentContextChars } from "../src/agent/context-budget.js";
+import { readProductEnv } from "../src/product/identity.js";
+import {
+  probeAgentCapability,
+  driverProfileFromCapabilityProbe,
+} from "../src/agent/capability-probe.js";
+import { createExecutionBroker } from "../src/security/execution-broker.js";
 
 const runtime = new OpenAICompatibleLocalRuntime(
   "lm-studio",
@@ -18,12 +24,12 @@ const complex = process.argv.includes("--complex");
 const requiredToolChoice = process.argv.includes("--required");
 const debugMessages = process.argv.includes("--debug");
 const configuredTemperature = Number(
-  process.env.LOCALCODE_LIVE_TEMPERATURE ?? "0",
+  readProductEnv(process.env, "LIVE_TEMPERATURE") ?? "0",
 );
 const liveTemperature = Number.isFinite(configuredTemperature)
   ? configuredTemperature
   : 0;
-const modelId = process.env.LOCALCODE_LIVE_MODEL_ID;
+const modelId = readProductEnv(process.env, "LIVE_MODEL_ID");
 const candidates = await runtime.listModels();
 const candidate = candidates.find((item) =>
   modelId
@@ -39,7 +45,7 @@ if (!candidate) {
   );
 }
 
-const root = await mkdtemp(path.join(os.tmpdir(), "localcode-live-agent-"));
+const root = await mkdtemp(path.join(os.tmpdir(), "shelracode-live-agent-"));
 const database = new LocalCodeDatabase(":memory:");
 const checkpoint = new CheckpointService(database, root);
 const events: string[] = [];
@@ -48,7 +54,7 @@ try {
   await writeFile(
     path.join(root, "package.json"),
     JSON.stringify({
-      name: "localcode-live-agent-fixture",
+      name: "shelracode-live-agent-fixture",
       version: "0.0.0",
       scripts: { test: "bun test" },
     }) + "\n",
@@ -110,8 +116,8 @@ try {
       `Could not initialize the disposable fixture Git repo: ${gitInit.stderr}`,
     );
   for (const args of [
-    ["config", "user.name", "LocalCode Fixture"],
-    ["config", "user.email", "fixture@localcode.invalid"],
+    ["config", "user.name", "ShelraCode Fixture"],
+    ["config", "user.email", "fixture@shelracode.invalid"],
     ["add", "."],
     ["commit", "-qm", "fixture baseline"],
   ]) {
@@ -126,6 +132,27 @@ try {
       );
   }
 
+  const controller = new AbortController();
+
+  // Production (src/tui/app.tsx) never grants write authority unconditionally:
+  // it sets modelAuthority: "model" and only allows mutation when a real
+  // capability probe against this exact model has certified a driver
+  // profile. A harness that omits modelAuthority exercises a different,
+  // unconditionally-"bounded" code path in executionBrokerFor() (src/tools/
+  // workspace.ts) and never proves the real gate works. Run the same
+  // disposable executable probe app.tsx relies on, against this fixture
+  // root, so this script fails the way production would fail.
+  const probeResult = await probeAgentCapability(
+    runtime.provider(),
+    candidate.modelId ?? candidate.displayName,
+    controller.signal,
+    { root },
+  );
+  const driverProfile = driverProfileFromCapabilityProbe(
+    candidate,
+    probeResult,
+  );
+
   const objective = complex
     ? "Use the workspace tools to complete this coding task. Inspect src/math.ts, src/index.ts, and tests/math.test.ts. Fix add(a, b) so it sums, implement multiply(a, b) in src/math.ts, export both functions from src/index.ts, add a multiply unit test, run bun test, and review the final diff. Do not write a plan or code in prose and do not modify package metadata."
     : "Read src/message.ts, change the exact greeting value from hello to hello world, run bun test, and report the verified result.";
@@ -137,7 +164,6 @@ try {
       ]
     : ['src/message.ts exports greeting = "hello world"', "bun test passes"];
 
-  const controller = new AbortController();
   const result = await runAgent(
     {
       id: complex
@@ -292,6 +318,17 @@ try {
           permissionMode: "AUTO" as const,
           signal: controller.signal,
           network: false,
+          modelAuthority: "model" as const,
+          ...(driverProfile ? { driverProfile } : {}),
+          executionBroker: createExecutionBroker({
+            root,
+            networkMode: "strict-zero" as const,
+            allowUnverifiedProcesses: false,
+            defaultTestCommand: "bun test",
+            ...(driverProfile
+              ? { driverProfile }
+              : { writeAuthority: "none" as const }),
+          }),
           checkpoint,
           env: process.env,
         };
@@ -328,6 +365,13 @@ try {
           displayName: candidate.displayName,
           quantization: candidate.local?.quant,
           context: candidate.capabilities.maxContext,
+        },
+        driverCertification: {
+          agentCapabilityClass: probeResult.agentCapabilityClass,
+          editApplied: probeResult.execution?.editApplied ?? false,
+          testIteration: probeResult.execution?.testIteration ?? false,
+          certified: driverProfile !== undefined,
+          writeAuthority: driverProfile?.writeAuthority,
         },
         task: {
           status: result.status,

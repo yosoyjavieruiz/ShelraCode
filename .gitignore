@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .localcode/
+.shelracode/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
@@ -10,3 +11,6 @@ dist/
 debug.log
 coverage/
 
+# runtime agent trace logs (debug output, not source)
+shelra-events*.jsonl
+run*.jsonl

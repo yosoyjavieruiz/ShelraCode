@@ -1,4 +1,4 @@
- ◈ LocalCode ~/project                                                           AUTO LOCAL PRIVATE 
+ ◈ ShelraCode ~/project                                                           AUTO LOCAL PRIVATE 
                                                                                                     
                                                                                                     
    ◈                                                                                                
@@ -24,8 +24,7 @@
                                                                                                     
                                                                                                     
  ┌────────────────────────────────────────────────────────────────────────────────────────────────┐ 
- │ Ask LocalCode anything…                                                                        │ 
+ │ Ask ShelraCode anything…                                                                        │ 
  │                                                                                                │ 
  └─@─context─AUTO─LOCAL-FIRST────────────────────────Enter─send─·─Shift+Enter─newline─·─Esc─clear─┘ 
  ● Ready · local-first · strict-zero                                   LOCAL · $0 · private  Ctrl+P 
-

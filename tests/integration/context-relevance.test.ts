@@ -161,12 +161,17 @@ test("direct repository language facts are sufficient when manifests or language
   ).toContain("package.json");
 });
 
-test("repository state does not treat LocalCode runtime state as project content", async () => {
+test("repository state does not treat ShelraCode runtime state as project content", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "localcode-context-"));
   temporaryRoots.push(root);
   await mkdir(path.join(root, ".localcode"), { recursive: true });
+  await mkdir(path.join(root, ".shelracode"), { recursive: true });
   await writeFile(
     path.join(root, ".localcode", "config.json"),
+    JSON.stringify({ setup: true }),
+  );
+  await writeFile(
+    path.join(root, ".shelracode", "config.json"),
     JSON.stringify({ setup: true }),
   );
   await writeFile(path.join(root, "agent.jsonl"), '{"event":"runtime"}\n');
@@ -186,6 +191,7 @@ test("repository state does not treat LocalCode runtime state as project content
   expect(context.snapshot?.topLevelEntries).toEqual([
     ".git",
     ".localcode",
+    ".shelracode",
     "agent.jsonl",
   ]);
   expect(context.evidenceState).toBe("INSUFFICIENT");

@@ -14,7 +14,12 @@ import type {
 } from "../../src/providers/types.js";
 import type { ModelCandidate } from "../../src/shared/types.js";
 import { LocalCodeDatabase } from "../../src/storage/database.js";
-import { workspaceTools } from "../../src/tools/workspace.js";
+import {
+  editFileTool,
+  readFileTool,
+  runTestsTool,
+  workspaceTools,
+} from "../../src/tools/workspace.js";
 import type { VerificationCommand } from "../../src/agent/verification-plan.js";
 import { createLogger, type LogRecord } from "../../src/shared/logging.js";
 import { compileTaskContract } from "../../src/agent/task-contract.js";
@@ -154,6 +159,20 @@ describe("agent loop", () => {
     // the provider exposes no private reasoning stream. Otherwise a slow
     // local inference looks like a frozen agent until the first tool call.
     const provider = new FakeAgentProvider(false);
+    let editExecuted = false;
+    let mutationMarkerSeen = false;
+    let mutationClearedBeforeCommit = false;
+    const instrumentedEditFileTool = {
+      ...editFileTool,
+      async execute(
+        input: Parameters<typeof editFileTool.execute>[0],
+        context: Parameters<typeof editFileTool.execute>[1],
+      ) {
+        const output = await editFileTool.execute(input, context);
+        editExecuted = true;
+        return output;
+      },
+    };
 
     const result = await runAgent(
       {
@@ -169,12 +188,22 @@ describe("agent loop", () => {
       },
       {
         provider,
-        tools: workspaceTools,
+        tools: [readFileTool, instrumentedEditFileTool, runTestsTool],
         logger: createLogger({
           level: "debug",
           sink: { write: (record) => logs.push(record) },
         }),
         onEvent: (event) => events.push(event.type),
+        persistTask: (ledger, inFlight) => {
+          if (inFlight?.kind === "mutation") mutationMarkerSeen = true;
+          if (
+            editExecuted &&
+            mutationMarkerSeen &&
+            !inFlight &&
+            !ledger.actions.some((action) => action.id === "task-1:tool:edit-1")
+          )
+            mutationClearedBeforeCommit = true;
+        },
         verifySuccessCriteria: (_task, ledger) => ({
           pass:
             ledger.filesChanged.includes("src/value.ts") &&
@@ -191,6 +220,7 @@ describe("agent loop", () => {
     );
 
     expect(result.verified).toBe(true);
+    expect(mutationClearedBeforeCommit).toBe(false);
     expect(result.text).toContain("verified");
     expect(provider.requests[0]?.modelId).toBe("fake-coder-wire-id");
     expect(provider.requests[0]?.temperature).toBe(0.2);
@@ -618,11 +648,91 @@ describe("agent loop", () => {
         "required objective proof is missing: deliverable-path-2",
       ]),
     );
+    expect(result.acceptanceProof?.canComplete).toBe(false);
+    expect(result.acceptanceProof?.falseSuccess).toBe(true);
+    expect(result.acceptanceProof?.evidenceRefs).not.toContain(
+      "task-proof-loop:objective-proof:deliverable:deliverable-path-2",
+    );
     expect(result.objectiveProof?.missingRequirements).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ requirementId: "deliverable-path-2" }),
       ]),
     );
+  });
+
+  test("consumes a workspace escape as a terminal recovery decision", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "localcode-security-recovery-stop-"),
+    );
+    let providerCalls = 0;
+    const provider: ProviderAdapter = {
+      id: "local",
+      displayName: "Security recovery fixture",
+      async discoverModels() {
+        return [candidate];
+      },
+      async health() {
+        return { state: "healthy" as const };
+      },
+      async quota() {
+        return {
+          providerId: "local",
+          confidence: "unknown" as const,
+          observedAt: new Date().toISOString(),
+        };
+      },
+      async *stream() {
+        providerCalls += 1;
+        if (providerCalls === 1)
+          yield {
+            type: "tool.call" as const,
+            call: {
+              id: "escape-read",
+              name: "ReadFile",
+              arguments: JSON.stringify({ path: "../outside.txt" }),
+            },
+          };
+        else yield { type: "text.delta" as const, text: "should not run" };
+        yield { type: "done" as const };
+      },
+      classifyError(error: unknown) {
+        return {
+          code: "UNKNOWN" as const,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      },
+    };
+
+    const result = await runAgent(
+      {
+        id: "security-recovery-stop",
+        objective: "Inspect the repository.",
+        root,
+        candidate,
+        repositoryPolicy: "private",
+        permissionMode: "PLAN",
+        mode: "workspace_question",
+        maxTurns: 4,
+        systemPromptProfile: "workspace",
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "PLAN" as const,
+          signal: new AbortController().signal,
+        }),
+      },
+    );
+
+    expect(providerCalls).toBe(1);
+    expect(result.status).toBe("blocked");
+    expect(result.ledger.recoveryContracts.at(-1)).toMatchObject({
+      failureClass: "SECURITY_DENIAL",
+      proposedRecovery: "stop",
+    });
+    expect(result.text).toContain("security policy");
   });
 
   test("does not turn a dependency name into a phantom mutation target", async () => {
@@ -1681,7 +1791,7 @@ describe("agent loop", () => {
         } else {
           yield {
             type: "text.delta",
-            text: "The package entry confirms this is the LocalCode application.",
+            text: "The package entry confirms this is the ShelraCode application.",
           };
         }
         yield { type: "done" };
@@ -3111,14 +3221,16 @@ describe("agent loop", () => {
       ),
     ).toBe(false);
     expect(requests[2]?.messages.at(-1)?.content).toContain(
-      "implementation workspace tool",
+      "Emit exactly one EditFile or WriteFile tool call",
     );
     expect(requests[2]?.messages.at(-1)?.content).toContain("EditFile");
     expect(
       result.messages.some(
         (message) =>
           message.role === "user" &&
-          message.content.includes("implementation workspace tool"),
+          message.content.includes(
+            "Emit exactly one EditFile or WriteFile tool call",
+          ),
       ),
     ).toBe(true);
     expect(await readFile(path.join(root, "value.ts"), "utf8")).toContain(
@@ -4499,6 +4611,10 @@ describe("agent loop", () => {
     expect(result.status).toBe("blocked");
     expect(result.completion.reasons).toContain("unresolved blockers remain");
     expect(calls).toBeLessThan(6);
+    expect(result.ledger.recoveryContracts.at(-1)?.failureClass).toBe(
+      "FILE_NOT_FOUND",
+    );
+    expect(result.ledger.recoveryContracts.at(-1)?.strategy).toBe("relocalize");
   });
 
   test("converts a provider crash into a failed task ledger", async () => {

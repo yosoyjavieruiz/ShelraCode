@@ -2,10 +2,24 @@
 const NETWORK_COMMAND_PATTERNS = [
   /\b(?:curl|wget|irm|iwr|invoke-webrequest|invoke-restmethod)\b/iu,
   /\b(?:bitsadmin|start-bitstransfer|certutil)\b/iu,
-  /\bgit\s+(?:clone|fetch|pull|submodule\s+(?:add|update))\b/iu,
+  /\bgit\s+(?:clone|fetch|pull|push|ls-remote|remote\s+(?:add|update)|submodule\s+(?:add|update))\b/iu,
+  /\b(?:ssh|scp|sftp|nc|ncat|telnet)\b/iu,
   /\b(?:npm|pnpm|yarn|bun)\s+(?:install|add|update|remove|publish|link|dlx|x)\b/iu,
   /\b(?:pip|poetry|cargo)\s+(?:install|add|update|fetch)\b/iu,
   /\b(?:python|python3|node|deno|bun)\b[^\r\n]*(?:https?:\/\/|\b(?:fetch|requests?\.|axios|urllib|http\.request)\b)/iu,
+  /\b(?:require|import)\s*\(\s*["'](?:node:)?(?:net|http|https|dns|tls|dgram|http2|undici)["']\s*\)/iu,
+];
+
+/**
+ * Without an OS network namespace, a script file is an opaque authority
+ * boundary: the host cannot prove that its contents avoid network egress.
+ * Strict-zero therefore treats common runtime script entrypoints as unsafe
+ * unless a future native isolation adapter is active.
+ */
+const UNVERIFIED_RUNTIME_SCRIPT_PATTERNS = [
+  /\b(?:node|nodejs|deno)(?:\.exe)?\s+(?:(?:--[^\s]+)(?:\s+["']?[^\s;&|"']+["']?)?\s+)*["']?(?:\.{0,2}[\\/])?[^\s;&|"'=]+\.(?:c?js|mjs|ts|tsx|jsx)\b/iu,
+  /\bbun(?:\.exe)?\s+run\s+["']?(?:\.{0,2}[\\/])?[^\s;&|"'=]+\.(?:c?js|mjs|ts|tsx|jsx)\b/iu,
+  /\b(?:python|python3|ruby|perl|php)(?:\.exe)?\s+["']?(?:\.{0,2}[\\/])?[^\s;&|"'=]+\.(?:py|rb|pl|php)\b/iu,
 ];
 
 const DESTRUCTIVE_COMMAND_PATTERNS = [
@@ -18,7 +32,16 @@ const DESTRUCTIVE_COMMAND_PATTERNS = [
 ];
 
 export function commandRequiresNetwork(command: string): boolean {
-  return NETWORK_COMMAND_PATTERNS.some((pattern) => pattern.test(command));
+  return (
+    NETWORK_COMMAND_PATTERNS.some((pattern) => pattern.test(command)) ||
+    commandRequiresUnverifiedRuntime(command)
+  );
+}
+
+export function commandRequiresUnverifiedRuntime(command: string): boolean {
+  return UNVERIFIED_RUNTIME_SCRIPT_PATTERNS.some((pattern) =>
+    pattern.test(command),
+  );
 }
 
 export function commandIsDestructive(command: string): boolean {

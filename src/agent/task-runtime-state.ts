@@ -1,7 +1,14 @@
 import type { AgentTaskLedger } from "./task-state.js";
+import { MAX_WORKTREE_PATHS } from "../context/repository-snapshot.js";
+import {
+  exactModelIdentityDigest,
+  type ModelDriverProfile,
+} from "../driver/profile.js";
+import type { RecoveryLoopSnapshot } from "./recovery.js";
+import type { EvidenceRecord } from "../evidence/acceptance.js";
+import type { ModelCandidate } from "../shared/types.js";
 
 export const TASK_RUNTIME_SCHEMA_VERSION = 1;
-const MAX_RUNTIME_WORKTREE_PATHS = 512;
 
 export interface TaskRuntimeRouteIdentity {
   candidateId: string;
@@ -9,6 +16,106 @@ export interface TaskRuntimeRouteIdentity {
   modelId?: string;
   runtimeId?: string;
   capability?: string;
+  /** Exact certified Driver reference; omitted means authority is unknown. */
+  driverProfileId?: string;
+  driverIdentityDigest?: string;
+  configurationDigest?: string;
+}
+
+export interface TaskRuntimeDriverReference {
+  driverProfileId: string;
+  driverIdentityDigest: string;
+  configurationDigest: string;
+}
+
+/**
+ * Revalidate a persisted exact Driver reference against facts observed by the
+ * current host. A runtime snapshot is durable state, not current authority:
+ * missing profiles, stale configuration, changed runtime metadata, expired
+ * profiles, and partial references all fail closed by returning undefined.
+ */
+export function revalidateTaskRuntimeDriverReference(
+  route: TaskRuntimeRouteIdentity | undefined,
+  profile: ModelDriverProfile | undefined,
+  candidate: ModelCandidate,
+  currentConfigurationDigest: string | undefined,
+  now = new Date(),
+): TaskRuntimeDriverReference | undefined {
+  if (!route || !profile) return undefined;
+  if (
+    route.candidateId !== candidate.id ||
+    route.providerId !== candidate.providerId ||
+    (route.modelId !== undefined && route.modelId !== candidate.modelId) ||
+    (route.runtimeId !== undefined &&
+      route.runtimeId !== candidate.local?.runtime)
+  )
+    return undefined;
+  if (
+    !route.driverProfileId ||
+    !route.driverIdentityDigest ||
+    !route.configurationDigest
+  )
+    return undefined;
+  if (
+    profile.status !== "certified" ||
+    profile.id !== route.driverProfileId ||
+    profile.identityDigest !== route.driverIdentityDigest
+  )
+    return undefined;
+  if (
+    !currentConfigurationDigest ||
+    currentConfigurationDigest.trim() !== route.configurationDigest
+  )
+    return undefined;
+  if (profile.expiresAt) {
+    const expiresAt = Date.parse(profile.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= now.getTime())
+      return undefined;
+  }
+  try {
+    if (exactModelIdentityDigest(profile.identity) !== profile.identityDigest)
+      return undefined;
+  } catch {
+    return undefined;
+  }
+
+  const identity = profile.identity;
+  const local = candidate.local;
+  // These are the runtime facts the catalog can currently expose. Unknown
+  // values are not treated as equal: an exact authority reference cannot be
+  // restored when the host cannot prove the same artifact/runtime/template.
+  if (
+    candidate.providerId !== identity.providerFamily ||
+    candidate.modelId !== identity.modelId ||
+    !local ||
+    local.runtime !== identity.runtime
+  )
+    return undefined;
+  if (
+    identity.runtimeVersion !== null &&
+    local.runtimeVersion !== identity.runtimeVersion
+  )
+    return undefined;
+  if (identity.quantization !== null && local.quant !== identity.quantization)
+    return undefined;
+  if (identity.artifactId !== null && local.artifactId !== identity.artifactId)
+    return undefined;
+  if (
+    identity.chatTemplate !== null &&
+    local.chatTemplate !== identity.chatTemplate
+  )
+    return undefined;
+  if (
+    identity.toolTemplate !== null &&
+    local.toolParser !== identity.toolTemplate
+  )
+    return undefined;
+
+  return {
+    driverProfileId: route.driverProfileId,
+    driverIdentityDigest: route.driverIdentityDigest,
+    configurationDigest: route.configurationDigest,
+  };
 }
 
 export interface TaskContextAnchor {
@@ -30,6 +137,9 @@ export interface TaskContextAnchor {
 export interface TaskRuntimeRehydration {
   contextAnchor: TaskContextAnchor;
   route?: TaskRuntimeRouteIdentity;
+  checkpointId?: string;
+  recoveryHistory?: RecoveryLoopSnapshot;
+  acceptanceEvidence?: EvidenceRecord[];
 }
 
 export type TaskInFlightKind =
@@ -53,6 +163,9 @@ export interface TaskRuntimeSnapshot {
   ledger: AgentTaskLedger;
   route?: TaskRuntimeRouteIdentity;
   contextAnchor: TaskContextAnchor;
+  checkpointId?: string;
+  recoveryHistory?: RecoveryLoopSnapshot;
+  acceptanceEvidence?: EvidenceRecord[];
   activeNodeId?: string;
   inFlight?: TaskInFlightMarker;
   updatedRevision: number;
@@ -69,6 +182,9 @@ export interface TaskRuntimeSnapshotInput {
   repositoryWorkingTreePaths?: string[];
   route?: TaskRuntimeRouteIdentity;
   contextAnchor?: Partial<TaskContextAnchor>;
+  checkpointId?: string;
+  recoveryHistory?: RecoveryLoopSnapshot;
+  acceptanceEvidence?: EvidenceRecord[];
   activeNodeId?: string;
   inFlight?: TaskInFlightMarker;
   updatedRevision?: number;
@@ -156,12 +272,21 @@ export function createTaskRuntimeSnapshot(
       ? {
           repositoryWorkingTreePaths: unique(
             input.repositoryWorkingTreePaths,
-          ).slice(0, MAX_RUNTIME_WORKTREE_PATHS),
+          ).slice(0, MAX_WORKTREE_PATHS),
         }
       : {}),
     ledger: structuredClone(input.ledger),
     ...(input.route ? { route: structuredClone(input.route) } : {}),
     contextAnchor,
+    ...(input.checkpointId?.trim()
+      ? { checkpointId: input.checkpointId.trim() }
+      : {}),
+    ...(input.recoveryHistory
+      ? { recoveryHistory: structuredClone(input.recoveryHistory) }
+      : {}),
+    ...(input.acceptanceEvidence
+      ? { acceptanceEvidence: structuredClone(input.acceptanceEvidence) }
+      : {}),
     ...(activeNodeId ? { activeNodeId } : {}),
     ...(input.inFlight ? { inFlight: structuredClone(input.inFlight) } : {}),
     updatedRevision: input.updatedRevision ?? 0,

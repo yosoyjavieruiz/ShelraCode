@@ -109,6 +109,21 @@ function stringField(value: unknown, key: string): string | undefined {
   return typeof candidate === "string" && candidate ? candidate : undefined;
 }
 
+// DelegateSubagents (plural) takes a `requests` array rather than a single
+// `objective` string field, so its target needs its own extraction instead
+// of the flat stringField lookups every other tool uses.
+function delegateBatchTarget(
+  fields: Record<string, unknown> | undefined,
+): string | undefined {
+  const requests = fields?.requests;
+  if (!Array.isArray(requests) || requests.length === 0) return undefined;
+  const first = stringField(record(requests[0]), "objective");
+  const count = requests.length;
+  return first
+    ? `${count} ${count === 1 ? "investigation" : "investigations"}: ${first}${count > 1 ? "…" : ""}`
+    : `${count} ${count === 1 ? "investigation" : "investigations"}`;
+}
+
 function activityMetadata(tool: string, input: unknown) {
   const fields = record(input);
   const path =
@@ -142,6 +157,25 @@ function activityMetadata(tool: string, input: unknown) {
     },
     GitDiff: { kind: "diff", label: "DIFF", target: "working tree" },
     GitStatus: { kind: "status", label: "STATUS", target: "working tree" },
+    GlobFiles: {
+      kind: "search",
+      label: "GLOB",
+      target: stringField(fields, "pattern"),
+    },
+    // DelegateSubagent(s) hand off part of the investigation to a
+    // fresh-context child; without an explicit target here the row would
+    // fall back to the raw tool name (see the generic branch below) and the
+    // user would have no visibility into what was actually delegated.
+    DelegateSubagent: {
+      kind: "tool",
+      label: "DELEGATE",
+      target: stringField(fields, "objective"),
+    },
+    DelegateSubagents: {
+      kind: "tool",
+      label: "DELEGATE",
+      target: delegateBatchTarget(fields),
+    },
   };
   const definition = definitions[tool] ?? {
     kind: "tool" as const,
@@ -176,6 +210,25 @@ function requestDetails(tool: string, input: unknown): string[] | undefined {
   }
   if (tool === "DeleteFile")
     details.push("Destructive deletion requested; host approval is required.");
+  const pattern = stringField(fields, "pattern");
+  if (pattern) details.push(`Glob pattern: ${pattern}`);
+  const objective = stringField(fields, "objective");
+  if (objective) details.push(`Delegated objective: ${objective}`);
+  const allowedTools = fields.allowedTools;
+  if (Array.isArray(allowedTools) && allowedTools.length > 0) {
+    const names = allowedTools.filter(
+      (item): item is string => typeof item === "string",
+    );
+    if (names.length > 0) details.push(`Child tools: ${names.join(", ")}`);
+  }
+  const requests = fields.requests;
+  if (Array.isArray(requests)) {
+    requests.forEach((request, index) => {
+      const requestObjective = stringField(record(request), "objective");
+      if (requestObjective)
+        details.push(`Child ${index + 1} objective: ${requestObjective}`);
+    });
+  }
   return details.length > 0 ? details : undefined;
 }
 
@@ -356,6 +409,64 @@ function resultPresentation(result: ToolResult): {
           .filter((file): file is string => typeof file === "string"),
         ...(count > 16 ? [`… ${count - 16} more files`] : []),
       ],
+    };
+  }
+  if (result.tool === "GlobFiles") {
+    const files = record(output)?.files;
+    const count = Array.isArray(files) ? files.length : 0;
+    return {
+      summary: `${count} ${count === 1 ? "match" : "matches"}`,
+      details: [
+        ...(Array.isArray(files) ? files : [])
+          .slice(0, 16)
+          .filter((file): file is string => typeof file === "string"),
+        ...(count > 16 ? [`… ${count - 16} more files`] : []),
+      ],
+    };
+  }
+  if (result.tool === "DelegateSubagent") {
+    const child = record(output);
+    const status = stringField(child, "status") ?? "unknown";
+    const evidence = child?.evidence;
+    const evidenceCount = Array.isArray(evidence) ? evidence.length : 0;
+    const toolRuns = child?.toolRuns;
+    const text = stringField(child, "text");
+    const sourceIds = child?.sourceIds;
+    return {
+      summary: `${status} · ${evidenceCount} evidence · ${
+        typeof toolRuns === "number" ? toolRuns : 0
+      } child calls`,
+      details: [
+        ...(text ? [`Findings: ${text.slice(0, 600)}`] : []),
+        ...(Array.isArray(sourceIds) && sourceIds.length > 0
+          ? [
+              `Sources read: ${sourceIds
+                .filter((id): id is string => typeof id === "string")
+                .slice(0, 10)
+                .join(", ")}`,
+            ]
+          : []),
+      ],
+    };
+  }
+  if (result.tool === "DelegateSubagents") {
+    const batch = record(output);
+    const results = Array.isArray(batch?.results) ? batch!.results : [];
+    const completed = results.filter(
+      (item) => record(item)?.status === "completed",
+    ).length;
+    return {
+      summary: `${completed}/${results.length} completed`,
+      details: results.flatMap((item, index) => {
+        const child = record(item);
+        const objective = stringField(child, "objective");
+        const status = stringField(child, "status") ?? "unknown";
+        const text = stringField(child, "text");
+        return [
+          `Child ${index + 1}${objective ? `: ${objective}` : ""} — ${status}`,
+          ...(text ? [text.slice(0, 300)] : []),
+        ];
+      }),
     };
   }
   if (result.tool === "RunTests" || result.tool === "Shell") {
@@ -762,6 +873,25 @@ export function presentAppEvent(
   if (event.type === "tool.started")
     return { ...startTool(state, event), agentPhase: undefined };
   if (event.type === "tool.finished") return finishTool(state, event);
+  if (event.type === "checkpoint.created") {
+    // Every checkpoint is a safe restore point (/rollback) created before a
+    // mutation; surfacing it here means one never exists silently — the
+    // user always sees when and why one was made (see agent/loop.ts, the
+    // only emitter, and checkpoint-notice's presentation types.ts comment).
+    return {
+      ...state,
+      items: [
+        ...state.items,
+        {
+          kind: "checkpoint-notice",
+          id: nextId(state, turnId, "checkpoint-notice"),
+          turnId,
+          checkpointId: event.id,
+          ...(event.paths ? { paths: event.paths } : {}),
+        },
+      ],
+    };
+  }
   if (event.type === "plan.changed") {
     const steps = event.steps.map((step) => ({
       label: step.description,
@@ -931,6 +1061,7 @@ export function presentAppEvent(
                 : event.risk === "execute"
                   ? "external"
                   : "unknown",
+          ...(event.preview ? { preview: event.preview } : {}),
         },
       ],
     };

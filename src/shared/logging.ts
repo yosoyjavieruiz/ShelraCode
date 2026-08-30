@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { readProductEnv } from "../product/identity.js";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type LogLevelSetting = LogLevel | "off";
@@ -249,26 +250,26 @@ class StructuredLogger implements LocalCodeLogger {
 
 export function createLogger(options: LoggerOptions = {}): LocalCodeLogger {
   const env = options.env ?? process.env;
+  const configuredLevel = readProductEnv(env, "LOG_LEVEL");
+  const configuredTrace = readProductEnv(env, "AGENT_TRACE") === "1";
+  const configuredPathFromEnv = readProductEnv(env, "LOG_PATH");
+  const configuredStderr = readProductEnv(env, "LOG_STDERR");
   const level =
     options.level ??
-    parseLevel(
-      env.LOCALCODE_LOG_LEVEL ??
-        (env.LOCALCODE_AGENT_TRACE === "1" ? "debug" : undefined),
-    );
+    parseLevel(configuredLevel ?? (configuredTrace ? "debug" : undefined));
   const enabled = options.enabled ?? level !== "off";
   const sinks: LogSink[] = [];
   if (options.sink) sinks.push(options.sink);
-  const configuredPath = options.filePath ?? env.LOCALCODE_LOG_PATH;
+  const configuredPath = options.filePath ?? configuredPathFromEnv;
   if (configuredPath) {
     const sink = fileSink(configuredPath);
     if (sink) sinks.push(sink);
   }
   const writeStderr =
     options.stderr ??
-    (env.LOCALCODE_LOG_STDERR === "1" ||
-      (env.LOCALCODE_LOG_STDERR !== "0" &&
-        (env.LOCALCODE_LOG_LEVEL !== undefined ||
-          env.LOCALCODE_AGENT_TRACE === "1") &&
+    (configuredStderr === "1" ||
+      (configuredStderr !== "0" &&
+        (configuredLevel !== undefined || configuredTrace) &&
         !configuredPath));
   if (writeStderr) sinks.push(stderrSink());
   return new StructuredLogger(

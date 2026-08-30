@@ -6,6 +6,10 @@ import {
   readSettings,
   type LocalCodeSettings,
 } from "../config/settings.js";
+import {
+  PRODUCT_STATE_DIR_NAME,
+  readProductEnv,
+} from "../product/identity.js";
 import { LlmfitHardwareIntelligence } from "../hardware/llmfit.js";
 import type {
   HardwareInspection,
@@ -27,6 +31,7 @@ import { createLogger, type LocalCodeLogger } from "../shared/logging.js";
 import { LocalCodeDatabase } from "../storage/database.js";
 import {
   AGENT_CAPABILITY_PROBE_VERSION,
+  driverProfileFromCapabilityProbe,
   probeFreeCloudModelCapabilities,
   probeLocalModelCapabilities,
 } from "../agent/capability-probe.js";
@@ -86,7 +91,8 @@ async function stateLocation(
   env: Record<string, string | undefined>,
 ): Promise<string> {
   const directory =
-    env.LOCALCODE_STATE_DIR?.trim() || path.join(os.homedir(), ".localcode");
+    readProductEnv(env, "STATE_DIR") ||
+    path.join(os.homedir(), PRODUCT_STATE_DIR_NAME);
   await mkdir(directory, { recursive: true });
   return path.join(directory, "state.sqlite");
 }
@@ -430,11 +436,23 @@ export async function openControlPlane(
         const preferredPending = orderedPending.find((candidate) =>
           isPreferredModel(candidate, options.preferredModelId),
         );
-        const defaultProbeTargets = hasReusableCodingRoute
-          ? []
-          : loadedPending.length > 0
-            ? loadedPending
-            : orderedPending.slice(0, 3);
+        // A loaded but never-probed model must be measured even when a
+        // cached unloaded model already looks like a coding route. Otherwise
+        // the currently loaded model (e.g. qwen3-8b) stays UNPROBED while the
+        // router keeps advertising a stale cached model that is not resident,
+        // producing the intermittent "capability evidence is unavailable" STOP
+        // when the user picks the loaded model.
+        const loadedUnprobed = loadedPending.filter(
+          (candidate) => !cached.has(candidate.id),
+        );
+        const defaultProbeTargets =
+          loadedUnprobed.length > 0
+            ? loadedUnprobed
+            : hasReusableCodingRoute
+              ? []
+              : loadedPending.length > 0
+                ? loadedPending
+                : orderedPending.slice(0, 3);
         const probeTargets = [
           ...(preferredPending ? [preferredPending] : []),
           ...defaultProbeTargets,
@@ -506,6 +524,26 @@ export async function openControlPlane(
               candidate.modelId ?? candidate.displayName,
               candidate.agentProbe,
             );
+            // Closes the gap that made write authority permanently
+            // unreachable: `driverProfileCanWrite` requires a
+            // `status: "certified"` profile, and nothing ever produced
+            // one -- every real EditFile/WriteFile/CreateFile failed with
+            // "requires a current certified Driver profile" for every
+            // model, always, regardless of how capable the model actually
+            // was. See driverProfileFromCapabilityProbe's doc comment.
+            try {
+              const driverProfile = driverProfileFromCapabilityProbe(
+                candidate,
+                candidate.agentProbe,
+              );
+              if (driverProfile) db.saveModelDriverProfile(driverProfile);
+            } catch (error) {
+              logger.warn("driver_profile.certification_failed", {
+                candidateId: candidate.id,
+                providerId: candidate.providerId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
           }
         models = discoveredModels.map((candidate) => {
           const cachedProbe = cached.get(candidate.id);

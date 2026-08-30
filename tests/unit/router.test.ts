@@ -128,15 +128,8 @@ describe("route selection", () => {
 
   test("an ineligible selected model cannot suppress an eligible fallback", () => {
     const weak = candidate({
-      id: "lm-studio/chat-only",
-      agentProbe: {
-        conversation: true,
-        readTool: false,
-        multiTurnTools: false,
-        agenticCodingEligible: false,
-        agentCapabilityClass: "chat_only",
-        notes: [],
-      },
+      id: "lm-studio/down",
+      health: { state: "down" },
     });
     const fallback = candidate({
       id: "openrouter/free-coder",
@@ -164,7 +157,7 @@ describe("route selection", () => {
     expect(decision.explanation).toContain("eligible fallback route");
     expect(
       decision.rejections.find((item) => item.candidateId === weak.id)?.reasons,
-    ).toContain("capability chat_only is below required workspace_reader");
+    ).toContain("provider or runtime is down");
   });
 
   test("an eligible selected model remains the preferred route", () => {
@@ -288,7 +281,7 @@ describe("route selection", () => {
     expect(decision.explanation).toContain("Local discovery execution");
   });
 
-  test("advanced coding remains a hard gate without a bounded execution scope", () => {
+  test("a below-required capability is a soft scoring signal, not a hard gate, without a bounded execution scope", () => {
     const bounded = candidate({
       id: "local/bounded-coder",
       agentProbe: {
@@ -306,9 +299,9 @@ describe("route selection", () => {
 
     const decision = selectRoute(route);
 
-    expect(decision.selected).toBeUndefined();
+    expect(decision.selected?.candidate.id).toBe(bounded.id);
     expect(decision.explanation).toContain(
-      "capability coding_agent is below required advanced_coding_agent",
+      "Capability is below the required advanced_coding_agent role (measured coding_agent)",
     );
   });
 
@@ -613,7 +606,7 @@ describe("route selection", () => {
     expect(selectRoute(route).selected).toBeUndefined();
   });
 
-  test("rejects a candidate whose capability probe is weaker than the task", () => {
+  test("still selects a candidate whose capability probe is weaker than the task", () => {
     const failedProbe = candidate({
       id: "local/chat-only",
       providerId: "local",
@@ -636,13 +629,14 @@ describe("route selection", () => {
     };
     const decision = selectRoute(route);
 
-    expect(decision.selected).toBeUndefined();
-    expect(decision.rejections[0]?.reasons).toContain(
-      "capability chat_only is below required advanced_coding_agent",
+    expect(decision.selected?.candidate.id).toBe(failedProbe.id);
+    expect(decision.rejections).toHaveLength(0);
+    expect(decision.explanation).toContain(
+      "Capability is below the required advanced_coding_agent role (measured chat_only)",
     );
   });
 
-  test("rejects a chat-only candidate before scoring an advanced coding task", () => {
+  test("still selects a chat-only candidate for an advanced coding task, scored lower", () => {
     const weak = candidate({
       id: "local/chat-only-advanced-task",
       agentProbe: {
@@ -662,20 +656,18 @@ describe("route selection", () => {
 
     const decision = selectRoute(route);
 
-    expect(decision.selected).toBeUndefined();
-    expect(decision.rejections[0]?.reasons).toContain(
-      "capability chat_only is below required advanced_coding_agent",
-    );
+    expect(decision.selected?.candidate.id).toBe(weak.id);
+    expect(decision.rejections).toHaveLength(0);
+    expect(decision.selected?.breakdown.taskFit).toBeLessThan(1);
   });
 
-  test("rejects a candidate with no capability evidence for a tool task", () => {
+  test("still selects a candidate with no capability evidence for a tool task", () => {
     const unprobed = candidate({ id: "local/unprobed", agentProbe: undefined });
 
     const decision = selectRoute(request([unprobed]));
-    expect(decision.selected).toBeUndefined();
-    expect(decision.rejections[0]?.reasons).toContain(
-      "capability evidence is unavailable for required workspace_reader",
-    );
+    expect(decision.selected?.candidate.id).toBe(unprobed.id);
+    expect(decision.rejections).toHaveLength(0);
+    expect(decision.explanation).toContain(", unprobed)");
   });
 
   test("respects an open circuit breaker before scoring", () => {
@@ -703,7 +695,7 @@ describe("route selection", () => {
     );
   });
 
-  test("uses capability as a hard admission gate before quality scoring", () => {
+  test("uses capability as a scoring signal, weighing a stronger measured candidate higher", () => {
     const weak = candidate({
       id: "local/chat-only",
       displayName: "Chat only",
@@ -727,9 +719,7 @@ describe("route selection", () => {
     expect(decision.selected?.candidate.id).toBe("local/strong");
     expect(
       decision.rejections.find((item) => item.candidateId === weak.id),
-    ).toMatchObject({
-      reasons: ["capability chat_only is below required workspace_reader"],
-    });
+    ).toBeUndefined();
   });
 
   test("local candidates do not lose eligibility because of a cloud quota snapshot", () => {

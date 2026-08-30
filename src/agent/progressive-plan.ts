@@ -166,7 +166,22 @@ export async function inspectVerifiedPreparationTargets(
   limit = 8,
 ): Promise<VerifiedPreparationTarget[]> {
   const rootPath = path.resolve(root);
-  const creationRequested = CREATION_INTENT_PATTERN.test(objective);
+  // `\b` is an ASCII word boundary: it never fires right after an accented
+  // vowel (á/í/é/ó/ú aren't `\w`), so testing CREATION_INTENT_PATTERN
+  // against the raw objective silently fails on the Rioplatense/vos
+  // imperative forms ("Creá", "agregá", "generá", ...) that are completely
+  // ordinary Spanish phrasing for a creation request -- confirmed live:
+  // "Creá una página web básica en index.html" left creationRequested
+  // false, which made the eligible-targets scan below skip the
+  // not-yet-existing index.html entirely and the whole task dead-end on
+  // "no verified mutation scope was found" for an ordinary
+  // greenfield-creation request. Stripping diacritics before testing (the
+  // same technique isGreenfieldObjective already uses in
+  // src/agent/task-contract.ts) fixes it without needing to enumerate
+  // every accented verb form here too.
+  const creationRequested = CREATION_INTENT_PATTERN.test(
+    objective.normalize("NFD").replace(/\p{Diacritic}/gu, ""),
+  );
   const objectiveLower = objective.toLowerCase();
   const eligible: VerifiedPreparationTarget[] = [];
 

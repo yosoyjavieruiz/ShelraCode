@@ -172,7 +172,7 @@ function compactionObserved(
       messages.some(
         (message) =>
           message.role === "system" &&
-          message.content.includes("LocalCode structured task state"),
+          message.content.includes("ShelraCode structured task state"),
       ),
   );
 }

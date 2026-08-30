@@ -5,6 +5,7 @@ import {
   renderContextPacket,
 } from "../context/context-compiler.js";
 import type { TurnMode } from "./turn-policy.js";
+import { describesMutation } from "./mutation-intent.js";
 
 export const PLAN_TOOL_NAME = "ProposeTaskPlan";
 const DEFAULT_MAX_PLAN_NODES = 32;
@@ -251,14 +252,29 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+// A small local model's tool-call JSON is not always schema-constrained:
+// (1) one stray non-string element (an object, a number) in an otherwise-
+// valid array must not discard every other legitimate entry alongside it —
+// that turns a single type slip into a cascading failure (an empty
+// candidateFiles/allowedTools, or parseNode rejecting the whole node because
+// dependencies came back undefined); (2) a single-item list is sometimes
+// emitted as a bare string instead of a one-element array (a common
+// confusion for a model not under strict grammar-constrained decoding) —
+// treat that the same as `[value]` instead of rejecting the field outright.
 function stringArray(value: unknown): string[] | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
   if (!Array.isArray(value)) return undefined;
-  const values = value.filter(
-    (item): item is string => typeof item === "string",
-  );
-  return values.length === value.length
-    ? [...new Set(values.map((item) => item.trim()).filter(Boolean))]
-    : undefined;
+  return [
+    ...new Set(
+      value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function parseNode(value: unknown): PlanNodeProposal | undefined {
@@ -385,16 +401,30 @@ function effectiveNodeKind(
     : "workspace";
 }
 
-const SEMANTIC_WORKSPACE_ACTION_PATTERN =
-  /\b(?:create|created|creating|write|writing|edit|editing|add|adding|delete|deleting|remove|removing|fix|repair|implement|implementing|generate|generating|build|building|update|updating|modify|modifying|migrat|refactor|rename|renaming|install|configur|change|changing|crear|crea|creando|escribir|escrib|editar|edita|añadir|agregar|eliminar|borrar|reparar|implementar|implementa|generar|genera|construir|construye|actualizar|modificar|migrar|refactorizar|renombrar|instalar|configurar|cambiar|cambio)\b/iu;
-const SEMANTIC_WORKSPACE_OBSERVATION_PATTERN =
-  /\b(?:read|reading|inspect|inspecting|search|searching|find|finding|locate|locating|extract|extracting|parse|parsing|trace|tracing|list|listing|verify|verifying|validate|validating|leer|leyendo|inspeccionar|inspeccionando|buscar|buscando|encontrar|localizar|extraer|extrayendo|parsear|rastrear|listar|verificar|validar)\b/iu;
+// "validate"/"verify"/"inspect"/"trace" are inherently ambiguous for a
+// semantic node: "validate the plan against the acceptance criteria already
+// supplied as evidence" is legitimate reasoning-only work, while "validate
+// the app by running it" needs a workspace tool. A small local model reaches
+// for these words constantly even when describing pure reasoning, so this
+// narrower pattern is enforced as a warning, not a hard error.
+const SEMANTIC_WORKSPACE_AMBIGUOUS_OBSERVATION_PATTERN =
+  /\b(?:inspect|inspecting|trace|tracing|verify|verifying|validate|validating|inspeccionar|inspeccionando|rastrear|verificar|validar)\b/iu;
 
-function semanticNodeRequiresWorkspaceTool(objective: string): boolean {
-  return (
-    SEMANTIC_WORKSPACE_ACTION_PATTERN.test(objective) ||
-    SEMANTIC_WORKSPACE_OBSERVATION_PATTERN.test(objective)
-  );
+// "read"/"search"/"find"/"locate"/"extract"/"parse"/"list" have no sensible
+// pure-reasoning interpretation: there is no way to "read src/auth.ts" or
+// "search for X" without actually touching the repository, so — unlike the
+// pattern above — these stay a hard error, same as SEMANTIC_WORKSPACE_ACTION.
+const SEMANTIC_WORKSPACE_UNAMBIGUOUS_OBSERVATION_PATTERN =
+  /\b(?:read|reading|search|searching|find|finding|locate|locating|extract|extracting|parse|parsing|list|listing|leer|leyendo|buscar|buscando|encontrar|localizar|extraer|extrayendo|parsear|listar)\b/iu;
+
+function semanticNodeDescribesAmbiguousObservation(objective: string): boolean {
+  return SEMANTIC_WORKSPACE_AMBIGUOUS_OBSERVATION_PATTERN.test(objective);
+}
+
+function semanticNodeDescribesUnambiguousObservation(
+  objective: string,
+): boolean {
+  return SEMANTIC_WORKSPACE_UNAMBIGUOUS_OBSERVATION_PATTERN.test(objective);
 }
 
 export function validatePlanProposal(
@@ -456,12 +486,33 @@ export function validatePlanProposal(
       nodeTools.some((tool) => FILE_MUTATION_TOOLS.has(tool))
     )
       errors.push(`semantic node ${node.id} cannot request file mutations`);
+    // A semantic node's real safety guarantee is structural: its tools and
+    // candidateFiles are empty (enforced above/elsewhere), so it cannot
+    // touch the workspace regardless of what its objective prose says. Text
+    // like "inspect the entry point to decide how to add the counter
+    // feature" legitimately describes an upcoming node's work while this
+    // node stays reasoning-only — keyword-matching free text can't tell
+    // that apart from a genuinely mislabeled node, and hard-failing on it
+    // burns a small model's bounded recovery budget on an ambiguity the
+    // model structurally cannot resolve by rewording. These are signal for
+    // the model to reconsider, not a safety boundary, so they are warnings.
+    if (nodeKind === "semantic" && describesMutation(node.objective))
+      warnings.push(
+        `semantic node ${node.id} mentions a mutation-like word; if it actually needs to change the repository rather than reason over evidence already supplied, use kind=workspace with explicit tools and scope instead`,
+      );
     if (
       nodeKind === "semantic" &&
-      semanticNodeRequiresWorkspaceTool(node.objective)
+      semanticNodeDescribesUnambiguousObservation(node.objective)
     )
-      errors.push(
-        `semantic node ${node.id} describes a workspace observation or mutation; use kind=workspace with explicit tools and scope`,
+      warnings.push(
+        `semantic node ${node.id} mentions a repository-observation word (e.g. read/search/find/list); if it actually needs to read or search the repository rather than reason over evidence already supplied, use kind=workspace with explicit tools and scope instead`,
+      );
+    if (
+      nodeKind === "semantic" &&
+      semanticNodeDescribesAmbiguousObservation(node.objective)
+    )
+      warnings.push(
+        `semantic node ${node.id} mentions an ambiguous observation-like word (e.g. validate/verify/inspect); if it actually needs to read or search the repository rather than reason over evidence already supplied, use kind=workspace with explicit tools and scope instead`,
       );
     if (
       nodeTools.some((tool) => FILE_MUTATION_TOOLS.has(tool)) &&
@@ -504,10 +555,27 @@ export function validatePlanProposal(
         )
       );
     })
-  )
-    errors.push(
-      "this coding task still needs at least one workspace node with an explicit file mutation tool and candidate path",
+  ) {
+    const message =
+      "this coding task still needs at least one workspace node with an explicit file mutation tool and candidate path";
+    // A model naturally plans "investigate, then decide what to change"
+    // before it has read anything — that is legitimate work, not a stall.
+    // Only hard-fail the very first proposal for a task (no existing graph
+    // yet) when it is ALL semantic/clarification with no real workspace
+    // node at all; once it has genuinely started touching the repository,
+    // let it continue and add the mutation node in the next revision. A
+    // later proposal (existingNodes non-empty, i.e. recovery/continuation)
+    // still hard-requires it: by then the model has had a turn to act on
+    // its own investigation and a further stall is a real dead end.
+    const isInitialProposal = (context.existingNodes ?? []).length === 0;
+    const hasRealWorkspaceNode = proposal.nodes.some(
+      (node) =>
+        effectiveNodeKind(node) === "workspace" &&
+        (node.scope?.allowedTools?.length ?? 0) > 0,
     );
+    if (isInitialProposal && hasRealWorkspaceNode) warnings.push(message);
+    else errors.push(message);
+  }
   if (hasCycle(proposal.nodes, existingNodes))
     errors.push("plan dependency cycle detected");
   return { valid: errors.length === 0, errors, warnings };

@@ -4,6 +4,8 @@ import type {
   TaskClass,
 } from "../shared/types.js";
 import { isDirectRepositoryFactQuestion } from "../shared/repository-facts.js";
+import { describesMutation } from "./mutation-intent.js";
+import { extractObjectivePaths } from "./objective-review.js";
 
 /**
  * The host classifies a turn before creating a model request. The model never
@@ -113,7 +115,16 @@ export function isGreetingOrSmallTalk(objective: string): boolean {
 
 function referencesRepository(objective: string): boolean {
   const lower = normalizeObjective(objective);
-  return REPO_REFERENCE_TERMS.some((term) => lower.includes(term));
+  if (REPO_REFERENCE_TERMS.some((term) => lower.includes(term))) return true;
+  // "lee el archivo llamado CATALOG.md" / "read config.json" name a specific
+  // file without ever saying "project" or "repo". That is still a workspace
+  // reference -- withholding read tools here makes the model falsely claim
+  // it cannot access local files at all (confirmed live: EXPLAIN-class
+  // objectives naming a bare filename fell through to "knowledge" mode,
+  // which grants zero tools). Read-tool exposure is low-risk to over-grant,
+  // so reuse the existing explicit-file-mention detector rather than
+  // requiring generic repository vocabulary.
+  return extractObjectivePaths(objective).length > 0;
 }
 
 function explicitlyReadOnly(objective: string): boolean {
@@ -162,9 +173,7 @@ function hasMutationIntent(objective: string): boolean {
     )
   )
     return false;
-  return /\b(?:add|change|create|delete|edit|fix|implement|modify|refactor|remove|rename|update|write|agrega|arregla|cambia|crea|elimina|implementa|modifica|renombra|actualiza)\b/iu.test(
-    normalized,
-  );
+  return describesMutation(normalized);
 }
 
 function policy(

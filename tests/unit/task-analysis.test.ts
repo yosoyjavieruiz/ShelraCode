@@ -28,6 +28,15 @@ test("classifies multi-file debugging as high-complexity work", () => {
   expect(task.contextNeed).toBeGreaterThan(4_000);
 });
 
+test("classifies 'patch' and 'correct' as debugging/edit work, not a low-tier explanation", () => {
+  expect(
+    analyzeTask("Patch the race condition in the connection pool").class,
+  ).toBe("DEBUGGING");
+  expect(
+    analyzeTask("Correct the off-by-one error in the loop bounds").class,
+  ).toBe("DEBUGGING");
+});
+
 test("classifies a Spanish-language bug fix request as debugging work needing tools", () => {
   const task = analyzeTask(
     "Corrige el bug de autenticación y ejecuta los tests.",

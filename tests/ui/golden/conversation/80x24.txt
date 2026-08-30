@@ -1,4 +1,4 @@
- ◈ LocalCode ~/project                                       AUTO LOCAL PRIVATE 
+ ◈ ShelraCode ~/project                                       AUTO LOCAL PRIVATE 
                                                                                 
                                                                                 
    ◈                                                                            
@@ -7,7 +7,7 @@
                                                                                 
    Local · Free · Private                                                       
                                                                                 
-   PROJECT  localcode · main                                                    
+   PROJECT  shelracode · main                                                    
    HARDWARE Detecting machine…                                                  
                                                                                 
    PATH  Local → Free → Ask · 0 free providers                                  
@@ -18,8 +18,7 @@
                                                                                 
                                                                                 
  ┌────────────────────────────────────────────────────────────────────────────┐ 
- │ Ask LocalCode anything…                                                    │ 
+ │ Ask ShelraCode anything…                                                    │ 
  │                                                                            │ 
  └─@ctx─·─AUTO─·─LOCAL───────────Enter─send─·─Shift+Enter─newline─·─Esc─clear─┘ 
  ● Ready · local-first · strict-zero               LOCAL · $0 · private  Ctrl+P 
-

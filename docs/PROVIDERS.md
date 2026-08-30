@@ -39,7 +39,7 @@ The v0.1 registry does not advertise a Cloudflare adapter. Current official pric
 
 ## Gemini
 
-The v0.1 registry does not advertise a Gemini adapter. The current free tier is public-only for LocalCode's default policy because official pricing states free-tier content may be used to improve products. It remains deferred until the adapter can enforce that boundary in code.
+The v0.1 registry does not advertise a Gemini adapter. The current free tier is public-only for ShelraCode's default policy because official pricing states free-tier content may be used to improve products. It remains deferred until the adapter can enforce that boundary in code.
 
 ## OpenCode Zen
 

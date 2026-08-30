@@ -1,4 +1,4 @@
-# LocalCode observability and logs
+# ShelraCode observability and logs
 
 Checked 2026-08-24 against the active source path in `src/tui/app.tsx`,
 `src/cli/control-plane.ts`, `src/agent/loop.ts`, and the normalized provider
@@ -10,24 +10,24 @@ Structured logs are disabled by default. In PowerShell, use a disposable
 workspace or a path that is already excluded from Git:
 
 ```powershell
-$logDir = Join-Path $PWD ".localcode\logs"
+$logDir = Join-Path $PWD ".shelracode\logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
-$env:LOCALCODE_LOG_LEVEL = "debug"
-$env:LOCALCODE_LOG_PATH = Join-Path $logDir "agent.jsonl"
-$env:LOCALCODE_LOG_STDERR = "0"
-$env:LOCALCODE_AGENT_TRACE = "1"
+$env:SHELRACODE_LOG_LEVEL = "debug"
+$env:SHELRACODE_LOG_PATH = Join-Path $logDir "agent.jsonl"
+$env:SHELRACODE_LOG_STDERR = "0"
+$env:SHELRACODE_AGENT_TRACE = "1"
 ```
 
 For a short interactive run, logs can go to the terminal instead:
 
 ```powershell
-$env:LOCALCODE_LOG_LEVEL = "info"
-$env:LOCALCODE_LOG_PATH = ""
-$env:LOCALCODE_LOG_STDERR = "1"
+$env:SHELRACODE_LOG_LEVEL = "info"
+$env:SHELRACODE_LOG_PATH = ""
+$env:SHELRACODE_LOG_STDERR = "1"
 ```
 
 The `.env.example` values keep logging off until a tester explicitly enables
-it. `LOCALCODE_AGENT_TRACE=1` also enables the legacy developer trace; it does
+it. `SHELRACODE_AGENT_TRACE=1` also enables the developer trace; it does
 not change routing, permissions, privacy, or model selection.
 
 ## Record contract
@@ -94,13 +94,13 @@ The built-in report intentionally aggregates events instead of printing raw
 records:
 
 ```powershell
-bun run logs:inspect -- .localcode\logs\agent.jsonl
+bun run logs:inspect -- .shelracode\logs\agent.jsonl
 ```
 
 For ad-hoc filtering in PowerShell:
 
 ```powershell
-Get-Content .localcode\logs\agent.jsonl |
+Get-Content .shelracode\logs\agent.jsonl |
   ForEach-Object { $_ | ConvertFrom-Json } |
   Group-Object event |
   Sort-Object Count -Descending
@@ -109,7 +109,7 @@ Get-Content .localcode\logs\agent.jsonl |
 For a task timeline without content fields:
 
 ```powershell
-Get-Content .localcode\logs\agent.jsonl |
+Get-Content .shelracode\logs\agent.jsonl |
   ForEach-Object { $_ | ConvertFrom-Json } |
   Where-Object { $_.context.taskId -eq "task-id-here" } |
   Select-Object timestamp, level, event, context, data
@@ -129,7 +129,7 @@ Useful questions and the evidence to find:
 ## Retention and safety
 
 Logs may reveal repository paths, model identifiers, command names, and timing.
-Keep them local, add `.localcode/logs/` to ignore rules for any test fixture,
+Keep them local, add `.shelracode/logs/` to ignore rules for any test fixture,
 and remove them before sharing a repository or support bundle. Do not paste a
 whole log file into an external provider. Use `logs:inspect` or a filtered
 event subset first. Log rotation is currently an operator responsibility;

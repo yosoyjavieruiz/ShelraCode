@@ -46,6 +46,7 @@ import {
 } from "../agent/subagents/coordinator.js";
 import {
   createTaskRuntimeSnapshot,
+  revalidateTaskRuntimeDriverReference,
   type TaskInFlightMarker,
   type TaskRuntimeRehydration,
   type TaskRuntimeSnapshot,
@@ -71,8 +72,15 @@ import {
 import { repositorySnapshotMemoryFacts } from "../context/repository-snapshot.js";
 import { createTaskEpisodeMemoryFact } from "../shared/memory.js";
 import { AppEventBus } from "../shared/events.js";
+import { workspaceRootsMatch } from "../shared/workspace-paths.js";
 import { CircuitBreaker } from "../providers/circuit-breaker.js";
 import { persistRepositorySettings } from "../config/settings.js";
+import { PRODUCT_NAME, readProductEnv } from "../product/identity.js";
+import { createExecutionBroker } from "../security/execution-broker.js";
+import {
+  capabilityClassNeedsExecutableProbe,
+  exactModelIdentityFromCandidate,
+} from "../agent/capability-probe.js";
 import {
   createUICommands,
   rankUICommands,
@@ -336,6 +344,7 @@ export function AppShell(
   props: {
     onExit?: () => void;
     onActionReady?: (run: (id: string) => void) => void;
+    onTaskStateChange?: (active: boolean) => void;
     onActivityToggle?: (id: string) => void;
     initialScreen?: "conversation" | "setup";
     fixture?: UIFixtureKind;
@@ -904,7 +913,7 @@ export function AppShell(
         }
         if (target === "rollback" && !lastCheckpointId) {
           show("rollback", [
-            "No LocalCode checkpoint is available for rollback.",
+            `No ${PRODUCT_NAME} checkpoint is available for rollback.`,
           ]);
           setNotice("Nothing to roll back");
           return;
@@ -913,7 +922,7 @@ export function AppShell(
           show("checkpoint", [
             lastCheckpointId
               ? `Last checkpoint  ${lastCheckpointId}`
-              : "No LocalCode checkpoint has been created yet.",
+              : `No ${PRODUCT_NAME} checkpoint has been created yet.`,
             "Created automatically before the first mutation.",
             "Rollback refuses to overwrite an external change.",
           ]);
@@ -934,7 +943,7 @@ export function AppShell(
             `Restored    ${result.restored.join(", ") || "none"}`,
             `Conflicts   ${result.conflicts.map((conflict) => `${conflict.path} (${conflict.reason})`).join(", ") || "none"}`,
             result.conflicts.length === 0
-              ? "LocalCode-owned changes were restored."
+              ? `${PRODUCT_NAME}-owned changes were restored.`
               : "Rollback stopped for conflicting external changes.",
           ]);
           setNotice(
@@ -1203,7 +1212,9 @@ export function AppShell(
   );
   const [diffHunkIndex, setDiffHunkIndex] = createSignal(0);
   const [diffView, setDiffView] = createSignal<"unified" | "split">(
-    process.env.LOCALCODE_UI_DIFF_VIEW === "split" ? "split" : "unified",
+    readProductEnv(process.env, "UI_DIFF_VIEW") === "split"
+      ? "split"
+      : "unified",
   );
 
   const runTask = async (
@@ -1216,6 +1227,7 @@ export function AppShell(
     const taskRoot = path.resolve(repositoryRoot);
     const taskAbort = new AbortController();
     activeTaskAbort = taskAbort;
+    props.onTaskStateChange?.(true);
     setTaskBusy(true);
     beginBusyClock();
     setNotice("Preparing response…");
@@ -1266,6 +1278,7 @@ export function AppShell(
       let unsubscribeEvents: (() => void) | undefined;
       let presentationEventBuffer:
         ReturnType<typeof createPresentationEventBuffer> | undefined;
+      let resumeChangedPaths: string[] = [];
       if (!controlPlane.db.sessionExists(sessionId))
         controlPlane.db.createSession(sessionId, taskRoot, objective);
       controlPlane.db.appendMessage(sessionId, "user", objective);
@@ -1310,14 +1323,20 @@ export function AppShell(
               searchBackend: "not_needed" as const,
             };
         if (resumeRuntime) {
-          const expectedRoot = path
-            .resolve(resumeRuntime.repositoryRoot)
-            .toLowerCase();
-          const currentRoot = taskRoot.toLowerCase();
-          if (expectedRoot !== currentRoot)
+          if (
+            resumeRuntime.checkpointId &&
+            !controlPlane.db.checkpointExists(
+              resumeRuntime.checkpointId,
+              resumeRuntime.taskId,
+            )
+          )
             throw new Error(
-              "Cannot resume this task from a different repository root.",
+              `Cannot resume because checkpoint ${resumeRuntime.checkpointId} is missing from the current runtime store.`,
             );
+          // Repository-identity is verified by the sole caller that supplies
+          // resumeRuntime (resumeSelectedSession) before it invokes runTask
+          // with taskRoot === resumeRuntime.repositoryRoot; re-checking it
+          // here would only ever compare a value against itself.
           const currentRevision = routingContext.snapshot?.revision;
           const resumeWorkspace = assessResumeWorkspace({
             savedRepositoryRevision: resumeRuntime.repositoryRevision,
@@ -1326,14 +1345,14 @@ export function AppShell(
               resumeRuntime.repositoryWorkingTreeRevision,
             currentWorkingTreeRevision:
               routingContext.snapshot?.workingTreeRevision,
-            currentWorkingTreePaths:
-              routingContext.snapshot?.workingTreePaths,
+            currentWorkingTreePaths: routingContext.snapshot?.workingTreePaths,
             taskPaths: resumeRuntime.ledger.filesChanged,
             inFlightTarget: resumeRuntime.inFlight?.target,
           });
           if (resumeWorkspace.status === "blocked")
             throw new Error(resumeWorkspace.reason);
           if (resumeWorkspace.status === "task_changes_detected") {
+            resumeChangedPaths = resumeWorkspace.changedPaths;
             taskLogger.warn("tui.task.resume.task_changes_detected", {
               changedPaths: resumeWorkspace.changedPaths,
             });
@@ -1448,6 +1467,9 @@ export function AppShell(
           ),
           {
             probeLocalCapabilities: turnPolicy.repositoryRead,
+            probeLocalExecutableCapabilities:
+              turnMode === "coding" &&
+              capabilityClassNeedsExecutableProbe(requiredCapability),
             probeFreeCloudCapabilities:
               turnMode === "coding" &&
               controlPlane.settings.privacy !== "local_only",
@@ -1566,7 +1588,64 @@ export function AppShell(
           containsHighConfidenceSecret:
             routingContext.containsHighConfidenceSecret,
         };
-        const decision = selectRoute(routeRequest, taskLogger);
+        let effectiveRouteRequest = routeRequest;
+        let effectiveDiscoveryExecution = discoveryExecution;
+        let effectiveProgressiveExecution = progressiveExecution;
+        let effectiveRouteCapability = routeCapability;
+        let decision = selectRoute(effectiveRouteRequest, taskLogger);
+        // Definitive capability fallback: if the direct/progressive admission
+        // produced STOP solely because no candidate met advanced_coding_agent
+        // (or coding_agent) but a host-scaffolded discovery is still local-safe,
+        // retry as discovery before surfacing STOP. This is the user-visible
+        // fix for "al seleccionar un modelo a veces me sale STOP".
+        const isCapabilityStop =
+          !decision.selected &&
+          decision.rejections.some((item) =>
+            item.reasons.some(
+              (reason) =>
+                reason.includes("capability") &&
+                (reason.includes("below required") ||
+                  reason.includes("evidence is unavailable")),
+            ),
+          );
+        if (
+          isCapabilityStop &&
+          turnMode === "coding" &&
+          !effectiveDiscoveryExecution &&
+          executableCandidates.some((candidate) => candidate.source === "local")
+        ) {
+          const discoveryRequest = {
+            ...routeRequest,
+            task: { ...effectiveTask, toolNeed: false },
+            execution: { strategy: "discovery" as const },
+          };
+          const discoveryDecision = selectRoute(discoveryRequest, taskLogger);
+          if (discoveryDecision.selected) {
+            taskLogger.info("tui.task.discovery_fallback", {
+              originalReason: decision.explanation.slice(0, 200),
+              discoveryCandidateId: discoveryDecision.selected.candidate.id,
+            });
+            trace.record({
+              taskId: turnId,
+              type: "route.selected",
+              phase: "frame",
+              data: {
+                selected: discoveryDecision.selected.candidate.id,
+                provider: discoveryDecision.selected.candidate.providerId,
+                requiredCapability: effectiveTask.requiredCapability,
+                admissionCapability: "chat_only",
+                executionStrategy: "discovery",
+                boundedScopeCount: 0,
+                reason: "capability_fallback_to_discovery",
+              },
+            });
+            decision = discoveryDecision;
+            effectiveRouteRequest = discoveryRequest;
+            effectiveDiscoveryExecution = true;
+            effectiveProgressiveExecution = false;
+            effectiveRouteCapability = "chat_only";
+          }
+        }
         trace.record({
           taskId: turnId,
           type: "route.selected",
@@ -1575,10 +1654,10 @@ export function AppShell(
             selected: decision.selected?.candidate.id ?? "STOP",
             provider: decision.selected?.candidate.providerId ?? "none",
             requiredCapability: effectiveTask.requiredCapability,
-            admissionCapability: routeCapability,
-            executionStrategy: discoveryExecution
+            admissionCapability: effectiveRouteCapability,
+            executionStrategy: effectiveDiscoveryExecution
               ? "discovery"
-              : progressiveExecution
+              : effectiveProgressiveExecution
                 ? "progressive"
                 : "direct",
             boundedScopeCount: verifiedProgressiveTargets.length,
@@ -1614,9 +1693,9 @@ export function AppShell(
         );
         const runSelectedAgent = async (
           selected: (typeof executableCandidates)[number],
-          strategy: RouteExecutionStrategy = discoveryExecution
+          strategy: RouteExecutionStrategy = effectiveDiscoveryExecution
             ? "discovery"
-            : progressiveExecution
+            : effectiveProgressiveExecution
               ? "progressive"
               : "direct",
           boundedScope: readonly string[] = verifiedProgressiveTargets,
@@ -1735,6 +1814,46 @@ export function AppShell(
           });
           const runtimeTaskId = resumeRuntime?.taskId ?? turnId;
           let runtimeRevision = resumeRuntime?.updatedRevision ?? 0;
+          const resumedDriverReference = resumeRuntime?.route?.driverProfileId
+            ? revalidateTaskRuntimeDriverReference(
+                resumeRuntime.route,
+                controlPlane.db.getModelDriverProfile(
+                  resumeRuntime.route.driverProfileId,
+                ),
+                selected,
+                // The current route builder does not yet expose a
+                // cryptographically versioned runtime configuration digest.
+                // Omit the exact reference rather than inheriting stale
+                // authority until that host fact is available.
+                undefined,
+              )
+            : undefined;
+          // resumedDriverReference only ever exists on a resumed task with a
+          // previously-recorded route. A fresh task -- the overwhelmingly
+          // common case -- never resumes anything, so without this fallback
+          // activeDriverProfile was unconditionally undefined even when the
+          // selected candidate already holds a valid, unexpired certified
+          // profile: every write from a brand-new task session failed with
+          // "requires a current certified Driver profile" regardless of how
+          // capable the model actually was, since certification (once it
+          // exists at all -- see driverProfileFromCapabilityProbe) was only
+          // ever looked up on the resume path.
+          const freshDriverProfile = resumedDriverReference
+            ? undefined
+            : (() => {
+                try {
+                  return controlPlane.db.getModelDriverProfileForIdentity(
+                    exactModelIdentityFromCandidate(selected),
+                  );
+                } catch {
+                  return undefined;
+                }
+              })();
+          const activeDriverProfile = resumedDriverReference
+            ? controlPlane.db.getModelDriverProfile(
+                resumedDriverReference.driverProfileId,
+              )
+            : freshDriverProfile;
           const runtimeRoute = {
             candidateId: selected.id,
             providerId: selected.providerId,
@@ -1745,6 +1864,11 @@ export function AppShell(
             ...(selected.agentProbe?.agentCapabilityClass
               ? { capability: selected.agentProbe.agentCapabilityClass }
               : {}),
+            // A persisted reference is copied only after host-side exact
+            // profile/configuration revalidation. At present the TUI has no
+            // current configuration digest, so resume safely downgrades to a
+            // route with unknown exact authority.
+            ...(resumedDriverReference ?? {}),
           };
           const runtimeContextAnchor = {
             sourceIds: [
@@ -1807,7 +1931,37 @@ export function AppShell(
                         agentContext.snapshot.workingTreePaths,
                     }
                   : {}),
+                // The current host-selected route is authoritative. The
+                // exact Driver fields are copied into runtimeRoute only when
+                // the resumed candidate/provider still match, so a reroute
+                // cannot inherit stale write authority.
                 route: runtimeRoute,
+                ...((rehydration?.checkpointId ??
+                resumeRuntime?.checkpointId ??
+                lastCheckpointId)
+                  ? {
+                      checkpointId:
+                        rehydration?.checkpointId ??
+                        resumeRuntime?.checkpointId ??
+                        lastCheckpointId,
+                    }
+                  : {}),
+                ...((rehydration?.recoveryHistory ??
+                resumeRuntime?.recoveryHistory)
+                  ? {
+                      recoveryHistory:
+                        rehydration?.recoveryHistory ??
+                        resumeRuntime?.recoveryHistory,
+                    }
+                  : {}),
+                ...((rehydration?.acceptanceEvidence ??
+                resumeRuntime?.acceptanceEvidence)
+                  ? {
+                      acceptanceEvidence:
+                        rehydration?.acceptanceEvidence ??
+                        resumeRuntime?.acceptanceEvidence,
+                    }
+                  : {}),
                 contextAnchor: {
                   ...runtimeContextAnchor,
                   ...(rehydration?.contextAnchor ?? {}),
@@ -1891,6 +2045,7 @@ export function AppShell(
                   : "not_required"
                 : "not_required",
             ...(resumeRuntime ? { runtimeSnapshot: resumeRuntime } : {}),
+            ...(resumeChangedPaths.length > 0 ? { resumeChangedPaths } : {}),
             maxTurns:
               executionMode === "coding"
                 ? Math.max(16, Math.ceil(analyzedTask.complexity * 32))
@@ -1905,6 +2060,47 @@ export function AppShell(
             permissionMode: currentTask.permissionMode,
             signal,
             network: executionPolicy.network,
+            // A local coding task with no certified Driver profile is treated as
+            // HOST-authorized (the user explicitly launched it), which grants
+            // bounded write authority without a profile. This MUST match the
+            // broker's writeAuthority below or executionBrokerFor() rejects the
+            // mismatch as "grants mutation authority to an unverified model".
+            modelAuthority:
+              !activeDriverProfile &&
+              executionMode === "coding" &&
+              selected.source === "local"
+                ? "host"
+                : "model",
+            ...(activeDriverProfile
+              ? { driverProfile: activeDriverProfile }
+              : {}),
+            executionBroker: createExecutionBroker({
+              root: currentTask.root,
+              networkMode: executionPolicy.network ? "allow" : "strict-zero",
+              allowUnverifiedProcesses: false,
+              defaultTestCommand: verificationPlan.find(
+                (item) => item.stage === "test",
+              )?.command,
+              // Local-first write fallback. The coding-path Driver certification
+              // keeps failing to produce/cache a profile in the real product:
+              // the executable capability probe runs during discovery under the
+              // pre-route "chat_only" capability, so a "coding_agent" profile is
+              // never certified/cached, and every local write then hard-blocked
+              // with PERMISSION_DENIED ("requires a current certified Driver
+              // profile"). For a LOCAL model on a coding task, degrade to bounded
+              // write authority instead of denying outright — safety is still
+              // enforced by pre-mutation checkpoints, the workspace-root
+              // boundary, the permission mode, and host verification. Non-local
+              // (paid/cloud) or non-coding routes keep the strict gate.
+              ...(activeDriverProfile
+                ? { driverProfile: activeDriverProfile }
+                : {
+                    writeAuthority:
+                      executionMode === "coding" && selected.source === "local"
+                        ? ("bounded" as const)
+                        : ("none" as const),
+                  }),
+            }),
             osIsolation:
               controlPlane.settings.permissionMode === "AUTO"
                 ? "required"
@@ -1973,6 +2169,7 @@ export function AppShell(
                   type: "approval.requested",
                   description: request.description,
                   risk: request.risk,
+                  ...(request.preview ? { preview: request.preview } : {}),
                 });
               });
             },
@@ -2124,7 +2321,7 @@ export function AppShell(
           };
         };
         const routeExecution = await runWithRouteFallback(
-          routeRequest,
+          effectiveRouteRequest,
           async (selected) => {
             const outcome = await runSelectedAgent(selected);
             if (!outcome)
@@ -2173,13 +2370,13 @@ export function AppShell(
                 reason,
               });
               controlPlane.db.recordRoute(sessionId, next.id, nextDecision);
-              setNotice(`Route fallback Â· ${next.displayName}`);
+              setNotice(`Route fallback · ${next.displayName}`);
             },
           },
         );
         let finalRouteExecution = routeExecution;
         let preparationHadNoScope = false;
-        if (discoveryExecution) {
+        if (effectiveDiscoveryExecution) {
           const preparationResult = routeExecution.outcome?.result;
           const preparationCandidates = [
             ...(preparationResult?.ledger.filesRead ?? []),
@@ -2205,10 +2402,10 @@ export function AppShell(
             },
           });
           if (discoveredTargets.length > 0) {
-            setNotice(`Scope verified Â· selecting a local coding routeâ€¦`);
+            setNotice(`Scope verified · selecting a local coding route…`);
             const progressiveRouteRequest = {
-              ...routeRequest,
-              task: { ...routeRequest.task, toolNeed: true },
+              ...effectiveRouteRequest,
+              task: { ...effectiveRouteRequest.task, toolNeed: true },
               execution: {
                 strategy: "progressive" as const,
                 boundedScope: discoveredTargets,
@@ -2282,7 +2479,7 @@ export function AppShell(
                     reason,
                   });
                   controlPlane.db.recordRoute(sessionId, next.id, nextDecision);
-                  setNotice(`Route fallback Â· ${next.displayName}`);
+                  setNotice(`Route fallback · ${next.displayName}`);
                 },
               },
             );
@@ -2298,7 +2495,7 @@ export function AppShell(
             "The selected model did not produce an execution result.",
             "Refresh Models or connect the runtime.",
           );
-          setNotice("Task stopped Â· no execution result");
+          setNotice("Task stopped · no execution result");
           return;
         }
         controlPlane.db.appendMessage(sessionId, "assistant", result.text);
@@ -2326,7 +2523,7 @@ export function AppShell(
         });
         if (preparationHadNoScope)
           setNotice(
-            "Local preparation paused Â· no verified mutation scope was found",
+            "Local preparation paused · no verified mutation scope was found",
           );
         else if (result.status === "cancelled") setNotice("Task cancelled");
         else if (result.status === "completed" && result.verified)
@@ -2346,13 +2543,19 @@ export function AppShell(
         });
         presentationEventBuffer?.dispose();
         unsubscribeEvents?.();
-        if (activeTaskAbort === taskAbort) activeTaskAbort = undefined;
+        if (activeTaskAbort === taskAbort) {
+          activeTaskAbort = undefined;
+          props.onTaskStateChange?.(false);
+        }
         setTaskBusy(false);
         endBusyClock();
         controlPlane.close();
       }
     } catch (error) {
-      if (activeTaskAbort === taskAbort) activeTaskAbort = undefined;
+      if (activeTaskAbort === taskAbort) {
+        activeTaskAbort = undefined;
+        props.onTaskStateChange?.(false);
+      }
       setTaskBusy(false);
       endBusyClock();
       throw error;
@@ -2408,8 +2611,10 @@ export function AppShell(
         return;
       }
       if (
-        path.resolve(runtimeResult.snapshot.repositoryRoot).toLowerCase() !==
-        sessionRoot.toLowerCase()
+        !workspaceRootsMatch(
+          path.resolve(runtimeResult.snapshot.repositoryRoot),
+          sessionRoot,
+        )
       ) {
         appendError(
           "Task resume refused: saved task repository does not match the session repository.",
@@ -2546,7 +2751,7 @@ export function AppShell(
         PERMISSIONS_COMMAND_USAGE,
         "Shell commands remain exact-command approvals from the ASK dialog.",
       ]);
-      setNotice("Permissions Â· usage shown");
+      setNotice("Permissions · usage shown");
       return;
     }
     if (command.kind === "revoke") {
@@ -2554,7 +2759,7 @@ export function AppShell(
         (candidate) => candidate.id === command.id,
       );
       if (!grant) {
-        setNotice(`Permission rule not found Â· ${command.id}`);
+        setNotice(`Permission rule not found · ${command.id}`);
         return;
       }
       removePermissionRule(grant);
@@ -2576,8 +2781,8 @@ export function AppShell(
       );
       setNotice(
         command.family === "workspace-read"
-          ? "Session authorization saved Â· workspace reads"
-          : "Session authorization saved Â· workspace writes",
+          ? "Session authorization saved · workspace reads"
+          : "Session authorization saved · workspace writes",
       );
       return;
     }
@@ -2590,13 +2795,13 @@ export function AppShell(
       setPermissionRules(nextRules);
       setNotice(
         command.family === "workspace-read"
-          ? "Project authorization saved Â· workspace reads"
-          : "Project authorization saved Â· workspace writes",
+          ? "Project authorization saved · workspace reads"
+          : "Project authorization saved · workspace writes",
       );
     } catch (error) {
       setNotice(
         error instanceof Error
-          ? `Permission authorization failed Â· ${error.message}`
+          ? `Permission authorization failed · ${error.message}`
           : "Permission authorization failed",
       );
     }
@@ -3291,7 +3496,7 @@ export function AppShell(
     const text = typeof value === "string" ? value.trim() : "";
     if (!text) return;
     if (taskBusy()) {
-      setNotice("Task already running Â· Ctrl+C or Esc to cancel");
+      setNotice("Task already running · Ctrl+C or Esc to cancel");
       return;
     }
     const permissionsCommand = parsePermissionsCommand(text);
@@ -3299,7 +3504,7 @@ export function AppShell(
       void runPermissionsCommand(permissionsCommand).catch((error: unknown) => {
         setNotice(
           error instanceof Error
-            ? `Permissions command failed Â· ${error.message}`
+            ? `Permissions command failed · ${error.message}`
             : "Permissions command failed",
         );
       });
@@ -3590,7 +3795,7 @@ export function AppShell(
         return (
           <GenericCenterView
             theme={theme}
-            title="LocalCode center"
+            title={`${PRODUCT_NAME} center`}
             lines={lines()}
           />
         );
@@ -3622,7 +3827,8 @@ export function AppShell(
       }
       if (activeFixture === "palette") {
         setTimeout(
-          () => openPalette(process.env.LOCALCODE_UI_FIXTURE_QUERY ?? ""),
+          () =>
+            openPalette(readProductEnv(process.env, "UI_FIXTURE_QUERY") ?? ""),
           0,
         );
       }
@@ -4085,13 +4291,14 @@ export function AppShell(
             ) : (
               <ApprovalDialog
                 theme={theme}
-                width={width()}
-                height={height()}
-                action={activeApproval()?.description}
-                impact={activeApproval()?.impact}
-                scopeDescription={activeApproval()?.scopeDescription}
-                busy={approvalBusy()}
-                selectedIndex={approvalIndex()}
+                width={width}
+                height={height}
+                action={() => activeApproval()?.description}
+                impact={() => activeApproval()?.impact}
+                scopeDescription={() => activeApproval()?.scopeDescription}
+                preview={() => activeApproval()?.request?.preview}
+                busy={approvalBusy}
+                selectedIndex={approvalIndex}
                 onDecision={(decision) => {
                   void resolveApproval(decision);
                 }}

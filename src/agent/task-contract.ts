@@ -126,6 +126,14 @@ export interface CompileTaskContractInput {
  * context while still refusing to treat an empty workspace as a valid target
  * for requests such as fixing or migrating existing behavior.
  */
+const GREENFIELD_CREATION_PATTERN =
+  /\b(?:create|build|start|scaffold|bootstrap|generate|implement|write|add|crea|construye|inicia|genera|implementa|escribe|agrega|anade)\b/iu;
+// Deliberately excludes "make": it is so idiomatically overloaded ("make
+// sure", "make it work", "that makes sense") that it collides with common
+// non-creation phrasing far more than it signals from-scratch work.
+const GREENFIELD_FIX_PATTERN =
+  /\b(?:fix|repair|debug|update|modify|change|refactor|migrate|remove|delete|rename|correct|arregla|corrige|actualiza|modifica|cambia|refactoriza|migra|elimina|renombra)\b/iu;
+
 export function isGreenfieldObjective(objective: string): boolean {
   const normalized = objective
     .trim()
@@ -133,15 +141,15 @@ export function isGreenfieldObjective(objective: string): boolean {
     .normalize("NFD")
     .replace(/\p{Diacritic}/gu, "");
   if (!normalized) return false;
-  if (
-    /\b(?:fix|repair|debug|update|modify|change|refactor|migrate|remove|delete|rename|correct|arregla|corrige|actualiza|modifica|cambia|refactoriza|migra|elimina|renombra)\b/iu.test(
-      normalized,
-    )
-  )
-    return false;
-  return /\b(?:create|build|make|start|scaffold|bootstrap|generate|implement|write|add|crea|construye|inicia|genera|implementa|escribe|agrega|anade)\b/iu.test(
-    normalized,
-  );
+  const creation = GREENFIELD_CREATION_PATTERN.exec(normalized);
+  if (!creation) return false;
+  const fix = GREENFIELD_FIX_PATTERN.exec(normalized);
+  // A mixed objective ("scaffold X and correct the registration order") is
+  // still a from-scratch task with a secondary fix mentioned afterward, but
+  // "Fix the bug and add a regression test" is a fix task with a secondary
+  // creation word mentioned afterward. Whichever verb appears first is the
+  // objective's primary action.
+  return !fix || creation.index <= fix.index;
 }
 
 /** Copy caller-owned contract state before the controller adds runtime facts. */
@@ -349,9 +357,7 @@ export function compileTaskContract(
   const coding = input.mode === "coding";
   const score = defaultRisk(input, explicitPaths.length);
   const symbolExpectation =
-    explicitPaths.length === 1
-      ? explicitSymbolExpectation(request)
-      : undefined;
+    explicitPaths.length === 1 ? explicitSymbolExpectation(request) : undefined;
   const artifactExpectations = [
     ...explicitArtifactExpectations(request, explicitPaths.length),
     ...(symbolExpectation ? [symbolExpectation] : []),

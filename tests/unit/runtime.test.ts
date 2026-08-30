@@ -92,10 +92,26 @@ describe("local runtime adapters", () => {
                 type: "llm",
                 key: "qwen2.5-coder-1.5b-instruct",
                 display_name: "Qwen2.5 Coder 1.5B Instruct",
+                publisher: "Qwen",
+                format: "gguf",
+                selected_variant:
+                  "lmstudio-community/qwen2.5-coder-1.5b-instruct@q8_0",
                 quantization: { name: "Q8_0", bits_per_weight: 8 },
                 size_bytes: 1_646_573_056,
                 max_context_length: 32_768,
-                loaded_instances: [{ id: "qwen2.5-coder-1.5b-instruct" }],
+                loaded_instances: [
+                  {
+                    id: "qwen2.5-coder-1.5b-instruct",
+                    config: {
+                      context_length: 16_384,
+                      eval_batch_size: 512,
+                      parallel: 4,
+                      flash_attention: true,
+                      num_experts: 2,
+                      offload_kv_cache_to_gpu: true,
+                    },
+                  },
+                ],
                 capabilities: { trained_for_tool_use: false },
               },
               {
@@ -121,8 +137,25 @@ describe("local runtime adapters", () => {
     expect(model?.modelId).toBe("qwen2.5-coder-1.5b-instruct");
     expect(model?.displayName).toBe("Qwen2.5 Coder 1.5B Instruct");
     expect(model?.local?.quant).toBe("Q8_0");
+    expect(model?.local?.quantizationBitsPerWeight).toBe(8);
     expect(model?.local?.sizeBytes).toBe(1_646_573_056);
     expect(model?.local?.loaded).toBe(true);
+    expect(model?.local?.publisher).toBe("Qwen");
+    expect(model?.local?.format).toBe("gguf");
+    expect(model?.local?.artifactId).toBe(
+      "lmstudio-community/qwen2.5-coder-1.5b-instruct@q8_0",
+    );
+    expect(model?.local?.loadedInstances).toEqual([
+      {
+        id: "qwen2.5-coder-1.5b-instruct",
+        contextLength: 16_384,
+        evalBatchSize: 512,
+        parallel: 4,
+        flashAttention: true,
+        numExperts: 2,
+        offloadKvCacheToGpu: true,
+      },
+    ]);
     expect(model?.local?.trainedForToolUse).toBe(false);
     expect(model?.capabilities.maxContext).toBe(32_768);
   });

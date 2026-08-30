@@ -1,10 +1,18 @@
 import { expect, test } from "bun:test";
 import {
   AGENT_CAPABILITY_PROBE_VERSION,
+  capabilityClassNeedsExecutableProbe,
+  driverProfileFromCapabilityProbe,
+  exactModelIdentityFromCandidate,
   probeAgentCapability,
   probeFreeCloudModelCapabilities,
   probeLocalModelCapabilities,
 } from "../../src/agent/capability-probe.js";
+import type { AgentCapabilityClass } from "../../src/shared/types.js";
+import {
+  driverProfileCanWrite,
+  exactModelIdentityDigest,
+} from "../../src/driver/profile.js";
 import type { ProviderAdapter } from "../../src/providers/types.js";
 import type { ModelCandidate } from "../../src/shared/types.js";
 import { createLogger, type LogRecord } from "../../src/shared/logging.js";
@@ -786,6 +794,29 @@ test("capability probes use deterministic generation settings", async () => {
   );
 });
 
+test("capability probe can measure protocol error recovery without executing disposable edits", async () => {
+  let calls = 0;
+  const provider: ProviderAdapter = {
+    ...fakeHealthQuota("protocol-replay"),
+    async *stream() {
+      calls += 1;
+      yield { type: "text.delta", text: "No tool selected." };
+      yield { type: "done" };
+    },
+  };
+
+  const result = await probeAgentCapability(
+    provider,
+    "protocol-replay-model",
+    new AbortController().signal,
+    { probeErrorRecovery: true },
+  );
+
+  expect(calls).toBe(5);
+  expect(result.execution).toBeUndefined();
+  expect(result.profile?.errorRecovery.status).toBe("fail");
+});
+
 test("capability-aware probes do not claim executable success when the protocol gate skips it", async () => {
   let call = 0;
   const provider: ProviderAdapter = {
@@ -863,4 +894,175 @@ test("capability-aware probes do not claim executable success when the protocol 
   expect(result.profile?.errorRecovery.status).toBe("pass");
   expect(result.profile?.editReliability.status).toBe("fail");
   expect(result.profile?.verificationBehavior.status).toBe("fail");
+});
+
+function driverTestCandidate(): ModelCandidate {
+  return {
+    id: "lm-studio/qwen-driver-test",
+    providerId: "lm-studio",
+    modelId: "qwen-driver-test",
+    displayName: "Qwen Driver Test",
+    source: "local",
+    capabilities: {
+      tools: true,
+      structuredOutput: true,
+      reasoning: false,
+      vision: false,
+      maxContext: 40_960,
+    },
+    free: { status: "verified_free" },
+    privacy: { classification: "local", retentionKnown: true },
+    quality: { confidence: "unknown" },
+    health: { state: "healthy" },
+    local: { runtime: "lm-studio", quant: "Q8_0" },
+  };
+}
+
+// Regression coverage for a bug that made write authority permanently
+// unreachable for every real local model: `driverProfileCanWrite` requires
+// a `status: "certified"` profile, but nothing in the codebase ever
+// produced one -- `saveModelDriverProfile` existed and worked, it was
+// simply never called from anywhere. Every EditFile/WriteFile/CreateFile
+// request failed with "requires a current certified Driver profile" for
+// every model, unconditionally, regardless of how capable that model
+// actually was.
+test("driverProfileFromCapabilityProbe refuses coding_agent evidence with no proven edit", () => {
+  const candidate = driverTestCandidate();
+  expect(
+    driverProfileFromCapabilityProbe(candidate, {
+      probeVersion: AGENT_CAPABILITY_PROBE_VERSION,
+      conversation: true,
+      readTool: true,
+      multiTurnTools: true,
+      agenticCodingEligible: true,
+      agentCapabilityClass: "coding_agent",
+      notes: [],
+    }),
+  ).toBeUndefined();
+});
+
+// Regression: requiring the FULL advanced_coding_agent tier (edit AND
+// test-iteration-recovery AND error-recovery, all measured) for ANY write
+// authority left a model that has proven it can edit -- just not yet proven
+// it recovers from a failing test -- permanently unable to write anything.
+// Confirmed live against a real local model (Qwen3-4B, LM Studio): the
+// executable probe measured coding_agent / execution.editApplied === true,
+// and every CreateFile/EditFile still hard-blocked with "Workspace mutation
+// requires a current certified Driver profile" -- while the SAME model
+// editing files was directly demonstrated working through a different
+// harness (LM Studio's own), proving the model was never the bottleneck.
+// The router (src/tui/app.tsx directCodingExecution/emptyGreenfieldExecution)
+// already treats coding_agent as sufficient to admit direct execution; the
+// driver-profile gate must not be strictly narrower than that.
+test("driverProfileFromCapabilityProbe certifies coding_agent evidence with a proven edit, at a lower tier", () => {
+  const candidate = driverTestCandidate();
+  const profile = driverProfileFromCapabilityProbe(candidate, {
+    probeVersion: AGENT_CAPABILITY_PROBE_VERSION,
+    conversation: true,
+    readTool: true,
+    multiTurnTools: true,
+    agenticCodingEligible: true,
+    agentCapabilityClass: "coding_agent",
+    execution: { editApplied: true, testIteration: false, notes: [] },
+    notes: [],
+  });
+
+  expect(profile).toBeDefined();
+  if (!profile) return;
+  expect(profile.status).toBe("certified");
+  expect(driverProfileCanWrite(profile)).toBe(true);
+  // Matches src/agent/dynamic-capabilities.ts's mayExecute floor -- a lower
+  // capabilityLevel here would just move this exact block to that separate
+  // gate instead of fixing it.
+  expect(profile.capabilityLevel).toBe("C3");
+  // Thinner evidence than the advanced tier: shorter leash, shorter life.
+  expect(profile.maxCertifiedActionHorizon).toBeLessThan(16);
+  expect(profile.expiresAt).toBeDefined();
+  expect(new Date(profile.expiresAt as string).getTime()).toBeLessThan(
+    Date.now() + 24 * 60 * 60 * 1000,
+  );
+});
+
+test("driverProfileFromCapabilityProbe produces a profile driverProfileCanWrite actually accepts", () => {
+  const candidate = driverTestCandidate();
+  const profile = driverProfileFromCapabilityProbe(candidate, {
+    probeVersion: AGENT_CAPABILITY_PROBE_VERSION,
+    conversation: true,
+    readTool: true,
+    multiTurnTools: true,
+    agenticCodingEligible: true,
+    agentCapabilityClass: "advanced_coding_agent",
+    execution: { editApplied: true, testIteration: true, notes: [] },
+    notes: [],
+  });
+
+  expect(profile).toBeDefined();
+  if (!profile) return;
+  expect(profile.status).toBe("certified");
+  // Certification grants the ABILITY to write, not unrestricted authority
+  // -- checkpoints, permission mode, and every other host-owned control
+  // still apply on top of this.
+  expect(profile.writeAuthority).toBe("bounded");
+  expect(driverProfileCanWrite(profile)).toBe(true);
+
+  // The identity a fresh (non-resumed) task looks up by must match the
+  // identity this profile was actually certified under, or the lookup
+  // silently never finds it -- exercised end-to-end in src/tui/app.tsx's
+  // freshDriverProfile fallback.
+  const lookupIdentity = exactModelIdentityFromCandidate(candidate);
+  expect(exactModelIdentityDigest(lookupIdentity)).toBe(profile.identityDigest);
+});
+
+test("driverProfileFromCapabilityProbe never grants unrestricted write authority", () => {
+  const candidate = driverTestCandidate();
+  const profile = driverProfileFromCapabilityProbe(candidate, {
+    probeVersion: AGENT_CAPABILITY_PROBE_VERSION,
+    conversation: true,
+    readTool: true,
+    multiTurnTools: true,
+    agenticCodingEligible: true,
+    agentCapabilityClass: "advanced_coding_agent",
+    execution: { editApplied: true, testIteration: true, notes: [] },
+    notes: [],
+  });
+  expect(profile?.writeAuthority).not.toBe("autonomous");
+  expect(profile?.networkAuthority).toBe("none");
+});
+
+// Regression: the caller that decides whether to run the disposable
+// executable probe at all (src/tui/app.tsx) only did so for
+// requiredCapability === "advanced_coding_agent", while
+// driverProfileFromCapabilityProbe was independently widened to also
+// certify "coding_agent" evidence. Those two decisions drifted apart --
+// confirmed live: a real task routed with requiredCapability "coding_agent"
+// (the common case) never ran the executable probe at all, so
+// execution.editApplied evidence never existed, so certification could
+// never fire no matter how permissive the tier logic became. Every
+// AgentCapabilityClass driverProfileFromCapabilityProbe can certify MUST
+// have capabilityClassNeedsExecutableProbe return true, or certification
+// for that class is permanently unreachable in the real app.
+test("every capability class driverProfileFromCapabilityProbe can certify triggers the executable probe", () => {
+  const candidate = driverTestCandidate();
+  const classes: AgentCapabilityClass[] = [
+    "chat_only",
+    "workspace_reader",
+    "coding_agent",
+    "advanced_coding_agent",
+  ];
+  for (const agentCapabilityClass of classes) {
+    const profile = driverProfileFromCapabilityProbe(candidate, {
+      probeVersion: AGENT_CAPABILITY_PROBE_VERSION,
+      conversation: true,
+      readTool: true,
+      multiTurnTools: true,
+      agenticCodingEligible: true,
+      agentCapabilityClass,
+      execution: { editApplied: true, testIteration: true, notes: [] },
+      notes: [],
+    });
+    if (profile !== undefined)
+      expect(capabilityClassNeedsExecutableProbe(agentCapabilityClass)).toBe(
+        true,
+      );
+  }
 });

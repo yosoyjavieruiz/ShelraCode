@@ -464,6 +464,137 @@ test("recovers an invalid initial LLM plan through a new planner proposal", asyn
   }
 });
 
+// Regression: a weak local planner that never returns a parseable
+// ProposeTaskPlan call (plain prose every time, not even malformed JSON)
+// exhausted the initial attempt plus both recovery attempts and hard-failed
+// the entire task with "The LLM planner did not produce an acceptable
+// plan", even though the same objective is trivially executable through the
+// ordinary host-driven graph. The host must degrade to compatibility
+// planning instead of failing outright once every LLM-authored attempt is
+// exhausted.
+test("degrades to host-driven planning when the LLM planner never returns a usable proposal", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-planner-degrade-"),
+  );
+  const objective = "Create marker.txt with a concise verified marker.";
+  const unusablePlanTurn = [
+    { type: "text.delta" as const, text: "I can't help with that." },
+    { type: "done" as const },
+  ];
+  const provider = createScriptedProvider(
+    [
+      unusablePlanTurn, // initial plan request
+      unusablePlanTurn, // recovery attempt 1
+      unusablePlanTurn, // recovery attempt 2 -- recovery is now exhausted
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "write-marker-degraded",
+            name: "WriteFile",
+            arguments: JSON.stringify({
+              path: "marker.txt",
+              content: "verified\n",
+            }),
+          },
+        },
+        { type: "done" },
+      ],
+      [
+        {
+          type: "text.delta",
+          text: "marker.txt has been created and verified.",
+        },
+        { type: "done" },
+      ],
+    ],
+    { stopAfter: true },
+  );
+  const db = new LocalCodeDatabase(":memory:");
+  const checkpoint = new CheckpointService(db, root);
+  try {
+    const result = await runAgent(
+      {
+        id: "planner-degrade-task",
+        objective,
+        root,
+        candidate: fakeAgentCandidate,
+        repositoryPolicy: "private",
+        permissionMode: "EDIT",
+        mode: "coding",
+        context: "The host verified the workspace root as the creation parent.",
+        contextEvidenceState: "INSUFFICIENT",
+        executionProfile: "structured",
+        planningMode: "model",
+        repositoryState: "empty",
+        greenfieldIntent: true,
+        // A real caller (app.tsx) resolves an explicit mutation scope before
+        // ever reaching the agent loop, regardless of planningMode -- mirror
+        // that here so the degraded compatibility graph has the same staged
+        // target a live run would have, instead of the host's bare
+        // no-known-target discovery graph.
+        greenfieldCreationPaths: ["marker.txt"],
+        stagedPaths: ["marker.txt"],
+        enforceTaskContract: true,
+        successCriteria: ["marker.txt is created"],
+        verificationPolicy: "not_required",
+        maxTurns: 4,
+      },
+      {
+        provider,
+        tools: workspaceTools,
+        toolChoice: "auto",
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "EDIT",
+          signal: new AbortController().signal,
+          checkpoint,
+        }),
+        reviewFinalDiff: () => true,
+        verifySuccessCriteria: async (_task, ledger) => {
+          const exists = await Bun.file(path.join(root, "marker.txt")).exists();
+          return {
+            pass: exists,
+            issues: exists ? [] : ["marker.txt is missing."],
+            nextActions: exists ? [] : ["Write marker.txt."],
+            nextPaths: exists ? [] : ["marker.txt"],
+            satisfiedCriterionIds: exists
+              ? ledger.successCriteria.map((criterion) => criterion.id)
+              : [],
+          };
+        },
+        independentVerifier: async () => ({
+          pass: true,
+          confidence: 1,
+          issues: [],
+        }),
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.ledger.taskGraph?.planSource).toBe("compatibility");
+    // The persisted ledger field, not just the in-run local variable, must
+    // flip too -- a resumed run re-derives its planningMode from this exact
+    // field (`restoredLedger?.planningMode ?? ...`). Leaving it stale at
+    // "model" makes a resumed run re-enter the LLM planner against a
+    // taskGraph that is actually compatibility-shaped, oscillating between
+    // the two planning paradigms on every resume.
+    expect(result.ledger.planningMode).toBe("compatibility");
+    expect(
+      result.ledger.evidence.some(
+        (item) =>
+          item.kind === "decision" &&
+          item.summary.includes("Falling back to host-driven execution"),
+      ),
+    ).toBe(true);
+    expect(await Bun.file(path.join(root, "marker.txt")).text()).toBe(
+      "verified\n",
+    );
+  } finally {
+    db.close();
+  }
+});
+
 test("executes dependent LLM plan nodes in order and keeps the plan authoritative", async () => {
   const root = await mkdtemp(
     path.join(os.tmpdir(), "localcode-planner-order-"),
@@ -2342,6 +2473,180 @@ test("asks the LLM planner for a monotonic repair after mutation churn", async (
         ),
       ),
     ).toHaveLength(2);
+  } finally {
+    db.close();
+  }
+});
+
+test("asks the LLM planner for a different strategy instead of aborting on a repeated identical call", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-planner-repeated-call-"),
+  );
+  const objective = "Create the requested output artifact.";
+  const initialProposal = {
+    schemaVersion: 1,
+    proposalId: "llm-plan-repeat-1",
+    objective,
+    nodes: [
+      {
+        id: "produce-output",
+        objective: "Create the requested output artifact.",
+        dependencies: [],
+        scope: {
+          candidateFiles: ["a.txt", "b.txt", "c.txt", "d.txt"],
+          allowedTools: ["WriteFile"],
+        },
+        acceptance: ["The requested output artifact is produced."],
+      },
+    ],
+  };
+  const recoveryProposal = {
+    schemaVersion: 1,
+    proposalId: "llm-plan-repeat-2",
+    objective,
+    summary: "Stop repeating the same write and produce the real content.",
+    supersedes: ["produce-output"],
+    nodes: [
+      {
+        id: "produce-output-repair",
+        objective:
+          "Create the output artifact with the actual final content instead of repeating the same write.",
+        dependencies: [],
+        scope: {
+          candidateFiles: ["final.txt"],
+          allowedTools: ["WriteFile"],
+        },
+        acceptance: ["final.txt is the requested output artifact."],
+      },
+    ],
+  };
+  const identicalWrite = () => ({
+    type: "tool.call" as const,
+    call: {
+      id: "write-same",
+      name: "WriteFile",
+      arguments: JSON.stringify({ path: "a.txt", content: "same\n" }),
+    },
+  });
+  const provider = createScriptedProvider(
+    [
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "plan-repeat-1",
+            name: "ProposeTaskPlan",
+            arguments: JSON.stringify(initialProposal),
+          },
+        },
+        { type: "done" },
+      ],
+      [identicalWrite(), { type: "done" }],
+      [identicalWrite(), { type: "done" }],
+      [identicalWrite(), { type: "done" }],
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "plan-repeat-2",
+            name: "ProposeTaskPlan",
+            arguments: JSON.stringify(recoveryProposal),
+          },
+        },
+        { type: "done" },
+      ],
+      [
+        {
+          type: "tool.call",
+          call: {
+            id: "write-final",
+            name: "WriteFile",
+            arguments: JSON.stringify({
+              path: "final.txt",
+              content: "final content\n",
+            }),
+          },
+        },
+        { type: "done" },
+      ],
+    ],
+    { stopAfter: true },
+  );
+  const db = new LocalCodeDatabase(":memory:");
+  const checkpoint = new CheckpointService(db, root);
+  try {
+    const result = await runAgent(
+      {
+        id: "planner-repeated-call-task",
+        objective,
+        root,
+        candidate: fakeAgentCandidate,
+        repositoryPolicy: "private",
+        permissionMode: "EDIT",
+        mode: "coding",
+        executionProfile: "structured",
+        planningMode: "model",
+        repositoryState: "empty",
+        greenfieldIntent: true,
+        enforceTaskContract: true,
+        verificationPolicy: "not_required",
+        maxTurns: 8,
+      },
+      {
+        provider,
+        tools: workspaceTools.filter((tool) => tool.name === "WriteFile"),
+        toolChoice: "auto",
+        createExecutionContext: async () => ({
+          root,
+          permissionMode: "EDIT",
+          signal: new AbortController().signal,
+          checkpoint,
+        }),
+        reviewFinalDiff: () => true,
+        verifySuccessCriteria: async (_task, ledger) => {
+          const finalExists = await Bun.file(
+            path.join(root, "final.txt"),
+          ).exists();
+          return {
+            pass: finalExists,
+            issues: finalExists
+              ? []
+              : ["The final output artifact is missing."],
+            nextActions: finalExists
+              ? []
+              : ["Produce the final output artifact."],
+            nextPaths: finalExists ? [] : ["final.txt"],
+            satisfiedCriterionIds: finalExists
+              ? ledger.successCriteria.map((criterion) => criterion.id)
+              : [],
+          };
+        },
+        independentVerifier: async () => ({
+          pass: true,
+          confidence: 1,
+          issues: [],
+        }),
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.verified).toBe(true);
+    expect(
+      result.ledger.taskGraph?.nodes.map((node) => [node.id, node.status]),
+    ).toEqual([
+      ["produce-output", "superseded"],
+      ["produce-output-repair", "passed"],
+    ]);
+    expect(result.ledger.recoveryContracts).toContainEqual(
+      expect.objectContaining({
+        cause: "NO_PROGRESS_REPEATED_CALL",
+        supersedeNodeId: "produce-output",
+        proposedRecovery: "replan",
+      }),
+    );
+    expect(await Bun.file(path.join(root, "final.txt")).text()).toBe(
+      "final content\n",
+    );
   } finally {
     db.close();
   }

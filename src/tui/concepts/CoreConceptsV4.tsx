@@ -1,5 +1,6 @@
 import type { ThemeTokens } from "../theme/tokens.js";
 import { getTheme, themeColor } from "../theme/tokens.js";
+import { PRODUCT_NAME } from "../../product/identity.js";
 
 export type CoreConceptKind = "editorial" | "timeline" | "command-canvas";
 export type CoreConceptState = "home" | "conversation";
@@ -31,7 +32,7 @@ function Header(props: { theme: ThemeTokens; width: number }) {
     <box width="100%" height={1} paddingX={1} flexDirection="row">
       <text fg={themeColor(props.theme, colors.purple[500])}>◆</text>
       <text fg={themeColor(props.theme, colors.text.primary)}>
-        <strong> LocalCode</strong>
+        <strong> {PRODUCT_NAME}</strong>
       </text>
       <text fg={themeColor(props.theme, colors.text.tertiary)}>
         {props.width >= 58 ? "   ~/shelra · main" : "  shelra"}
@@ -130,7 +131,7 @@ function Composer(props: {
         backgroundColor={themeColor(props.theme, colors.background.surface)}
       >
         <text fg={themeColor(props.theme, colors.text.tertiary)}>
-          Ask LocalCode…
+          Ask {PRODUCT_NAME}…
         </text>
         <box flexGrow={1} />
         <text fg={themeColor(props.theme, colors.text.muted)}>{meta}</text>
@@ -150,7 +151,7 @@ function Composer(props: {
         borderColor={themeColor(props.theme, colors.purple[500])}
       >
         <text fg={themeColor(props.theme, colors.text.tertiary)}>
-          Ask LocalCode…
+          Ask {PRODUCT_NAME}…
         </text>
         <box flexGrow={1} />
         <text fg={themeColor(props.theme, colors.text.muted)}>{meta}</text>
@@ -170,7 +171,7 @@ function Composer(props: {
       backgroundColor={themeColor(props.theme, colors.background.surface)}
     >
       <text fg={themeColor(props.theme, colors.text.tertiary)}>
-        Ask LocalCode…
+        Ask {PRODUCT_NAME}…
       </text>
       <box flexGrow={1} />
       <text fg={themeColor(props.theme, colors.text.muted)}>{meta}</text>
@@ -233,7 +234,7 @@ function Home(props: {
           >
             <text fg={themeColor(props.theme, colors.purple[500])}>◆</text>
             <text fg={themeColor(props.theme, colors.text.primary)}>
-              <strong>LocalCode</strong>
+              <strong>{PRODUCT_NAME}</strong>
             </text>
             <text fg={themeColor(props.theme, colors.text.secondary)}>
               Your models. Your code.
@@ -273,7 +274,7 @@ function Home(props: {
             <box alignItems="center" flexDirection="column">
               <text fg={themeColor(props.theme, colors.purple[500])}>◆</text>
               <text fg={themeColor(props.theme, colors.text.primary)}>
-                <strong>LocalCode</strong>
+                <strong>{PRODUCT_NAME}</strong>
               </text>
               <text fg={themeColor(props.theme, colors.text.secondary)}>
                 Your models. Your code.
@@ -319,7 +320,7 @@ function Home(props: {
         >
           <text fg={themeColor(props.theme, colors.purple[500])}>◆</text>
           <text fg={themeColor(props.theme, colors.text.primary)}>
-            <strong>LocalCode</strong>
+            <strong>{PRODUCT_NAME}</strong>
           </text>
           <text fg={themeColor(props.theme, colors.text.secondary)}>
             Your models. Your code.
@@ -366,7 +367,9 @@ function EditorialConversation(props: { theme: ThemeTokens; width: number }) {
         Fix the token refresh race condition and run the auth tests.
       </text>
       <box height={1} />
-      <text fg={themeColor(props.theme, colors.text.tertiary)}>LocalCode</text>
+      <text fg={themeColor(props.theme, colors.text.tertiary)}>
+        {PRODUCT_NAME}
+      </text>
       <text fg={themeColor(props.theme, colors.text.primary)}>
         I’ll trace the refresh lifecycle, make the smallest safe change, then
         verify it.
@@ -413,7 +416,7 @@ function TimelineConversation(props: { theme: ThemeTokens; width: number }) {
         </text>
         <box flexDirection="column" flexGrow={1} gap={1}>
           <text fg={themeColor(props.theme, colors.text.tertiary)}>
-            LocalCode
+            {PRODUCT_NAME}
           </text>
           <text fg={themeColor(props.theme, colors.text.primary)}>
             I’ll inspect the session lifecycle and verify the repair.

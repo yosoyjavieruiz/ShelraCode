@@ -16,6 +16,7 @@ import type {
   ToolDefinition,
   ToolExecutionContext,
 } from "../../tools/types.js";
+import { createExecutionBroker } from "../../security/execution-broker.js";
 import {
   prepareIsolatedSubagentWorkspace,
   type IsolatedSubagentWorkspace,
@@ -210,6 +211,22 @@ export class ForegroundSubagentCoordinator implements SubagentCoordinator {
           root: childRoot,
           permissionMode: "PLAN",
           signal: parent.signal,
+          // Explicit writeAuthority, not inherited: a delegate only ever
+          // receives risk:"read" tools (enforced above, "the current
+          // child runtime permits read-only tools only"), so it never
+          // needs write authority. Leaving this to the constructor's own
+          // "bounded" default mismatched executionBrokerFor's validation,
+          // which derives "none" from the inherited modelAuthority:"model"
+          // + an uncertified/undefined parent driverProfile -- the
+          // mismatch made every delegated tool call, including plain
+          // reads, throw PERMISSION_DENIED whenever the parent task had
+          // no certified Driver profile (the default case for a new task).
+          executionBroker: createExecutionBroker({
+            root: childRoot,
+            networkMode: "strict-zero",
+            allowUnverifiedProcesses: false,
+            writeAuthority: "none",
+          }),
           checkpoint: undefined,
           checkpointId: undefined,
           allowExistingFileOverwrite: false,

@@ -6,6 +6,7 @@ import {
   type ControlPlane,
 } from "./control-plane.js";
 import { persistRepositorySettings } from "../config/settings.js";
+import { PRODUCT_NAME } from "../product/identity.js";
 import type {
   AgentCapabilityClass,
   CapabilityResult,
@@ -66,7 +67,7 @@ export function agentDoctorLines(models: readonly ModelCandidate[]): string[] {
   )[0];
   if (!local)
     return [
-      "LocalCode Agent Diagnostics",
+      `${PRODUCT_NAME} Agent Diagnostics`,
       "",
       "Model                         NOT FOUND",
       "Autonomous coding             NOT READY",
@@ -93,7 +94,7 @@ export function agentDoctorLines(models: readonly ModelCandidate[]): string[] {
     (model) => doctorCapabilityClass(model) === "advanced_coding_agent",
   ).length;
   return [
-    "LocalCode Agent Diagnostics",
+    `${PRODUCT_NAME} Agent Diagnostics`,
     "",
     `Model                         ${local.displayName}`,
     `Model ID                     ${local.modelId ?? local.displayName}`,
@@ -161,7 +162,7 @@ export async function runDoctor(root = process.cwd()): Promise<void> {
       ),
     );
     const healthByProvider = new Map(providerHealth);
-    console.log("LocalCode Doctor\n");
+    console.log(`${PRODUCT_NAME} Doctor\n`);
     console.log(
       `Terminal     ${process.stdout.isTTY ? "interactive" : "non-interactive"} (${process.stdout.columns ?? "?"} columns)`,
     );
@@ -203,7 +204,7 @@ export async function runModels(root = process.cwd()): Promise<void> {
     const result = await controlPlane.discoverModels(
       AbortSignal.timeout(2_000),
     );
-    console.log("LocalCode Models\n");
+    console.log(`${PRODUCT_NAME} Models\n`);
     console.log("Recommended for coding");
     if (result.recommendations.length === 0)
       console.log(
@@ -238,7 +239,7 @@ export async function runModels(root = process.cwd()): Promise<void> {
 export async function runProviders(root = process.cwd()): Promise<void> {
   const controlPlane = await openControlPlane(root);
   try {
-    console.log("LocalCode Providers\n");
+    console.log(`${PRODUCT_NAME} Providers\n`);
     for (const provider of controlPlane.providers.statuses) {
       console.log(
         `${provider.configured ? "[ok]" : "[ ]"} ${provider.displayName}`,
@@ -266,7 +267,7 @@ export async function runProviders(root = process.cwd()): Promise<void> {
 export async function runConfig(root = process.cwd()): Promise<void> {
   const controlPlane = await openControlPlane(root);
   try {
-    console.log("LocalCode Configuration\n");
+    console.log(`${PRODUCT_NAME} Configuration\n`);
     console.log(`privacy          ${controlPlane.settings.privacy}`);
     console.log(`routing          ${controlPlane.settings.routingMode}`);
     console.log(`permission       ${controlPlane.settings.permissionMode}`);
@@ -323,7 +324,7 @@ export async function runSetup(
       useCase: "coding",
       limit: 3,
     });
-    console.log("LocalCode Setup\n");
+    console.log(`${PRODUCT_NAME} Setup\n`);
     console.log("Scanning this machine...\n");
     console.log("System");
     console.log(`  OS                ${hardware.profile.os}`);

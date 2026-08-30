@@ -6,8 +6,9 @@ export type ShellRisk = "read" | "execute" | "destructive";
 export type ToolRisk = "read" | "write" | "execute" | "destructive";
 
 const workspaceEscapePatterns = [
-  /(?:^|[;&|])\s*(?:cd|pushd|set-location|sl)\s+(?:\.\.|[a-z]:[\\/]|[\\/])/i,
-  /(?:>|>>|2>|2>>)\s*(?:\.\.[\\/]|[a-z]:[\\/]|[\\/])/i,
+  /(?:^|[;&|])\s*(?:cd|pushd|push-location|set-location|sl)\s+(?:(?:-path|-literalpath)\s+)?["']?(?:\.\.|[a-z]:[\\/]|[\\/])/i,
+  /(?:>|>>|2>|2>>)\s*["']?(?:\.\.[\\/]|[a-z]:[\\/]|[\\/])/i,
+  /(?:[\s"'=])(?:\.\.[\\/]|[a-z]:[\\/])/i,
 ];
 
 export function shellCommandEscapesWorkspace(command: string): boolean {
@@ -15,8 +16,8 @@ export function shellCommandEscapesWorkspace(command: string): boolean {
 }
 
 const destructivePatterns = [
-  /\bgit\s+(?:reset\s+--hard|clean\s+-[a-z]*f|push\s+--force)/i,
-  /\b(?:rm|rmdir|del|remove-item)\b[^\r\n]*(?:-rf|-recurse|-force|\/s|\/q)/i,
+  /\bgit\s+(?:reset\s+--hard|clean\s+-[a-z]*f|push\b[^;&|\r\n]*(?:--force\b|-f\b))/i,
+  /\b(?:rm|rmdir|del|remove-item)\b[^;&|\r\n]*(?:-rf|-recurse|-force|\/s|\/q)/i,
   /\b(?:sudo|runas)\b/i,
   /\b(?:curl|wget|irm|invoke-webrequest)\b[^\r\n]*\|\s*(?:sh|bash|pwsh|powershell|iex|invoke-expression)\b/i,
   /\b(?:npm|pnpm|yarn|bun)\s+publish\b/i,
@@ -24,7 +25,7 @@ const destructivePatterns = [
 ];
 
 const readPatterns = [
-  /^(?:git\s+(?:status|diff|log|show|branch)|(?:ls|dir|pwd|cat|type|get-content|rg|grep)\b)/i,
+  /^(?:git\s+(?:status|diff|log|show|branch|rev-parse|ls-files)|(?:ls|dir|pwd|cat|type|get-content|rg|grep)\b)/i,
 ];
 const safeExecutePatterns = [
   /^(?:bun|npm|pnpm|yarn)\s+(?:test|run\s+(?:typecheck|lint|format:check)|x\s+tsc)\b/i,
@@ -39,6 +40,24 @@ export function classifyShellCommand(command: string): ShellRisk {
   if (safeExecutePatterns.some((pattern) => pattern.test(normalized)))
     return "execute";
   return "execute";
+}
+
+/**
+ * True only when the command matches an explicit safe read/execute
+ * pattern. Unlike `classifyShellCommand`, which falls back to `"execute"`
+ * for any unrecognized command, this never returns true for one -- it's
+ * the single source of truth `src/security/execution-broker.ts`'s
+ * strict-zero local process allowlist builds on, instead of maintaining a
+ * second, independently-drifting "safe command" pattern set.
+ */
+export function isKnownSafeShellCommand(command: string): boolean {
+  const normalized = command.trim();
+  if (destructivePatterns.some((pattern) => pattern.test(normalized)))
+    return false;
+  return (
+    readPatterns.some((pattern) => pattern.test(normalized)) ||
+    safeExecutePatterns.some((pattern) => pattern.test(normalized))
+  );
 }
 
 export interface PermissionCheckInput {
@@ -77,8 +96,7 @@ export function checkPermission(
 
   if (
     input.mode === "PLAN" &&
-    (input.risk === "write" ||
-      input.risk === "execute")
+    (input.risk === "write" || input.risk === "execute")
   ) {
     return {
       allowed: false,

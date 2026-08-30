@@ -79,6 +79,13 @@ export interface NormalizedModelRequest {
   toolChoice?: "none" | "auto" | "required";
   temperature?: number;
   maxOutputTokens?: number;
+  /**
+   * Best-effort hint for backends that support a reasoning/thinking-budget
+   * parameter (e.g. an OpenAI-compatible endpoint serving a reasoning-tuned
+   * model). Adapters that do not support this forward nothing; it must never
+   * cause a request to fail.
+   */
+  reasoningEffort?: "low" | "medium" | "high";
   stream: boolean;
 }
 

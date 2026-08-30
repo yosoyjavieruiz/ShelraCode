@@ -1,4 +1,4 @@
- ◈ LocalCode ~/project · main                                                                        AUTO LOCAL PRIVATE 
+ ◈ ShelraCode ~/project · main                                                                        AUTO LOCAL PRIVATE 
                                                                                                                         
                                                                                                                         
    ◈                                                                                                                    
@@ -7,7 +7,7 @@
                                                                                                                         
    Local · Free · Private                                                                                               
                                                                                                                         
-   PROJECT  localcode · main                                                                                            
+   PROJECT  shelracode · main                                                                                             
    HARDWARE Detecting machine…                                                                                          
                                                                                                                         
    READY PATH                                                                                                           
@@ -33,9 +33,8 @@
                                                                                                                         
                                                                                                                         
  ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ 
- │ Ask LocalCode anything…                                                                                            │ 
+ │ Ask ShelraCode anything…                                                                                            │ 
  │                                                                                                                    │ 
  │                                                                                                                    │ 
  └─@─context─AUTO─LOCAL-FIRST────────────────────────────────────────────Enter─send─·─Shift+Enter─newline─·─Esc─clear─┘ 
  ● Ready · local-first · strict-zero                                           LOCAL · ctx 0/32k · $0 · private  Ctrl+P 
-

@@ -47,7 +47,7 @@ session, always allow in the current project, deny, and cancel the turn.
 Shell and RunTests rules match an exact normalized command, while file rules
 are scoped to the approved tool/risk. Session rules are memory-only and
 project rules are validated and persisted by `src/config/settings.ts` in
-`.localcode/config.json`. `/permissions` is the only canonical slash command
+`.shelracode/config.json`. `/permissions` is the only canonical slash command
 and opens the backed permissions center, where rules can be revoked or all
 project rules cleared.
 
@@ -179,7 +179,7 @@ previous implementation and is not the current runtime policy.
   returning it (the exact "false Done" failure mode) — the fix in this pass
   only removes one _cause_ of an ungrounded answer (unrecoverable tool
   errors), it does not add a structural gate that would catch other causes.
-- `localcode doctor --agent` capability report: not built.
+- `shelra doctor --agent` capability report: not built.
 - Independent verification agent, context compaction, subagents
   (Explore/Research/Verify): not built. The main loop working standalone is
   a stated precondition for subagents in the original brief, and it does —
@@ -194,7 +194,7 @@ previous implementation and is not the current runtime policy.
 3. Completion gate: require a coding-task "Done" to cite which tool results
    it rests on; a workspace-question "Done" without any successful read/
    search tool result should not be returned as an answer.
-4. `localcode doctor --agent`: surface capability-probe results and current
+4. `shelra doctor --agent`: surface capability-probe results and current
    routing eligibility per configured model.
 5. Live model eval report against the actual local runtime, replacing
    assumption with measurement (spec §205).
@@ -530,7 +530,7 @@ file content, shell output, tool JSON, or credentials. See
 The new report command is:
 
 ```text
-bun run logs:inspect -- .localcode/logs/agent.jsonl
+bun run logs:inspect -- .shelracode/logs/agent.jsonl
 ```
 
 The prompt ladder covers conversation, repository questions, plan/review,

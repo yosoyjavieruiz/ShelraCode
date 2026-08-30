@@ -22,3 +22,24 @@ Verified 2026-08-25 from primary sources. These facts are volatile and must be r
 | Ollama tools          | https://docs.ollama.com/capabilities/tool-calling                                                                                                                                               | Ollama's native `/api/chat` uses assistant `tool_calls` plus tool messages identified by `tool_name`; streamed calls are accumulated and returned with the assistant message.                             | Do not claim executable Ollama chat parity through the OpenAI adapter; the current repository remains discovery-only until a native adapter exists.         |
 
 Confidence is high for the cited facts at verification time and low for future availability; catalog records remain timestamped and expire.
+
+## 2026-08-28 Phase 1 refresh — LM Studio identity evidence
+
+Primary source: <https://lmstudio.ai/docs/developer/rest/list> (accessed
+2026-08-28).
+
+The current `GET /api/v1/models` contract exposes more exact local-runtime
+identity than ShelraCode previously retained: `publisher`, `format`, selected
+variant, quantization name and bits-per-weight, size/parameter/architecture
+metadata, and every loaded instance's ID plus applied `context_length`,
+`eval_batch_size`, `parallel`, `flash_attention`, `num_experts`, and
+`offload_kv_cache_to_gpu` values. These fields describe the runtime observation;
+they do not provide an artifact SHA-256, tokenizer, chat/tool template, or LM
+Studio application version.
+
+Implementation consequence: normalize only those documented allowlisted fields
+into local model discovery and persist unavailable identity dimensions as
+explicit `unknown`. Do not infer artifact identity from model name or selected
+variant, and do not grant capability from these metadata alone. Contract tests
+must cover loaded-instance configuration and keep the generic
+OpenAI-compatible fallback usable when the native endpoint is unavailable.

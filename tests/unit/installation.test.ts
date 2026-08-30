@@ -46,9 +46,6 @@ test("installExecutable atomically activates a version and keeps the previous on
     });
 
     expect(await readFile(first.paths.executablePath)).toEqual(firstBytes);
-    expect(await readFile(first.paths.compatibilityShimPath, "utf8")).toContain(
-      '"%~dp0shelra.exe" %*',
-    );
     expect(
       JSON.parse(await readFile(first.paths.manifestPath, "utf8")),
     ).toMatchObject({

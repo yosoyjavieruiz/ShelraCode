@@ -1,4 +1,4 @@
-# LocalCode UI V2 — Obsidian Violet
+# ShelraCode UI V2 — Obsidian Violet
 
 ## Status
 
@@ -94,12 +94,12 @@ existing application service provides the underlying state/action.
 
 - The composer uses OpenTUI `Textarea`; Enter submits and Shift+Enter adds a
   line break.
-- `localcode setup` opens the staged setup view; Enter advances, P cycles
+- `shelra setup` opens the staged setup view; Enter advances, P cycles
   privacy, R cycles routing and the final step persists through existing
   repository/database settings services.
-- Every no-argument `shelra`/`localcode` launch enters the conversation
+- Every no-argument `shelra` launch enters the conversation
   workspace consistently, even when the repository has no persisted policy
-  decisions. `shelra setup`/`localcode setup` opens the setup view explicitly.
+  decisions. `shelra setup` opens the setup view explicitly.
 - Overlays own focus and close highest-first with Escape.
 - Long-running task work continues to use `AbortSignal`.
 - The renderer owns alternate-screen cleanup; the interactive path uses

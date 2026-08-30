@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { inspectRepositorySnapshot } from "../../src/context/repository-snapshot.js";
+import {
+  inspectRepositorySnapshot,
+  listWorkingTreeChangedPaths,
+} from "../../src/context/repository-snapshot.js";
 import { runCommand } from "../../src/shared/process.js";
 
 test("repository snapshot detects manifests, languages, source/test roots, and scoped instructions", async () => {
@@ -90,5 +93,40 @@ test("repository snapshot fingerprints staged, unstaged and untracked content", 
   const untrackedChanged = await inspectRepositorySnapshot(root);
   expect(untrackedChanged.workingTreeRevision).not.toBe(
     untracked.workingTreeRevision,
+  );
+});
+
+test("listWorkingTreeChangedPaths reports tracked and untracked changes without hashing content", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "localcode-snapshot-paths-"),
+  );
+  const git = async (...args: string[]): Promise<void> => {
+    const result = await runCommand("git", args, {
+      cwd: root,
+      intent: "execute",
+      network: "deny",
+      isolation: "best_effort",
+      allowWeakIsolation: true,
+      timeoutMs: 10_000,
+    });
+    if (result.exitCode !== 0)
+      throw new Error(result.stderr || result.stdout || args.join(" "));
+  };
+
+  await writeFile(path.join(root, "app.ts"), "export const value = 1;\n");
+  await git("init", "-q");
+  await git("config", "user.name", "Shelra snapshot test");
+  await git("config", "user.email", "snapshot@shelra.invalid");
+  await git("add", ".");
+  await git("commit", "-qm", "baseline");
+
+  expect(await listWorkingTreeChangedPaths(root)).toEqual([]);
+
+  await writeFile(path.join(root, "app.ts"), "export const value = 2;\n");
+  expect(await listWorkingTreeChangedPaths(root)).toEqual(["app.ts"]);
+
+  await writeFile(path.join(root, "notes.txt"), "first\n");
+  expect(await listWorkingTreeChangedPaths(root)).toEqual(
+    expect.arrayContaining(["app.ts", "notes.txt"]),
   );
 });
