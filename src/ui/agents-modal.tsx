@@ -1,6 +1,6 @@
 import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { type RefObject, useEffect, useRef } from "react";
-import { MODELS } from "../grok/models";
+import type { ModelInfo } from "../types/index";
 import type { CustomSubagentConfig } from "../utils/settings";
 import { formatSubagentName } from "../utils/subagent-display";
 import type { Theme } from "./theme";
@@ -64,7 +64,7 @@ export function SubagentsBrowserModal({
   const contentHeight = itemCount + 8;
   const panelHeight = Math.min(contentHeight, Math.floor(height * 0.6));
   const panelWidth = Math.min(60, width - 6);
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
 
   return (
     <box
@@ -80,7 +80,9 @@ export function SubagentsBrowserModal({
       <box
         width={panelWidth}
         height={panelHeight}
-        backgroundColor={t.backgroundPanel}
+        backgroundColor={t.surface}
+        border={["top", "right", "bottom", "left"]}
+        borderColor={t.borderStrong}
         paddingTop={1}
         paddingBottom={1}
         flexDirection="column"
@@ -144,6 +146,7 @@ export function SubagentEditorModal({
   draft,
   focusedField,
   modelIndex,
+  models,
   error,
   title,
   nameRef,
@@ -157,6 +160,7 @@ export function SubagentEditorModal({
   draft: { name: string; instruction: string };
   focusedField: SubagentEditorField;
   modelIndex: number;
+  models: ModelInfo[];
   error: string | null;
   title: string;
   nameRef: RefObject<TextareaRenderable | null>;
@@ -164,10 +168,10 @@ export function SubagentEditorModal({
   onSubmit: () => void;
   showRemoveHint?: boolean;
 }) {
-  const model = MODELS[modelIndex] ?? MODELS[0];
+  const model = models[modelIndex];
   const panelWidth = Math.min(68, width - 6);
   const panelHeight = Math.min(28, Math.floor(height * 0.75));
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
 
   useEffect(() => {
     syncRef(nameRef, draft.name);
@@ -188,7 +192,9 @@ export function SubagentEditorModal({
       <box
         width={panelWidth}
         height={panelHeight}
-        backgroundColor={t.backgroundPanel}
+        backgroundColor={t.surface}
+        border={["top", "right", "bottom", "left"]}
+        borderColor={t.borderStrong}
         paddingTop={1}
         paddingBottom={1}
         flexDirection="column"
@@ -221,7 +227,9 @@ export function SubagentEditorModal({
           <box paddingBottom={1}>
             <text fg={focusedField === "model" ? t.primary : t.textMuted}>
               {"Model - "}
-              <span style={{ fg: t.text }}>{`${model.name} (${model.id})`}</span>
+              <span style={{ fg: t.text }}>
+                {model ? `${model.name} (${model.id})` : "No model catalog discovered"}
+              </span>
             </text>
             {focusedField === "model" ? <text fg={t.textMuted}>{"up/down or left/right to change model"}</text> : null}
           </box>

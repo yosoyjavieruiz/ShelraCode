@@ -26,6 +26,39 @@ export function PlanView({ plan, t }: PlanViewProps) {
       <box paddingLeft={2} marginBottom={1}>
         <text fg={t.textMuted}>{plan.summary}</text>
       </box>
+      {plan.goal ? (
+        <box paddingLeft={2} marginBottom={1} flexDirection="column">
+          <text fg={t.planStepTitle}>
+            <b>{"Goal"}</b>
+          </text>
+          <text fg={t.planStepDesc}>{plan.goal}</text>
+        </box>
+      ) : null}
+      {plan.requirements?.length ? (
+        <box paddingLeft={2} marginBottom={1} flexDirection="column">
+          <text fg={t.planStepTitle}>
+            <b>{"Requirements"}</b>
+          </text>
+          {plan.requirements.map((requirement, index) => (
+            <text key={`requirement-${requirement}`} fg={t.planStepDesc}>{`R${index + 1}. ${requirement}`}</text>
+          ))}
+        </box>
+      ) : null}
+      {plan.acceptanceCriteria?.length ? (
+        <box paddingLeft={2} marginBottom={1} flexDirection="column">
+          <text fg={t.planStepTitle}>
+            <b>{"Acceptance criteria"}</b>
+          </text>
+          {plan.acceptanceCriteria.map((criterion) => (
+            <box key={criterion.id} flexDirection="column">
+              <text fg={t.planStepDesc}>{`${criterion.id}. ${criterion.description}`}</text>
+              <box paddingLeft={2}>
+                <text fg={t.textMuted}>{`verify: ${criterion.verification}`}</text>
+              </box>
+            </box>
+          ))}
+        </box>
+      ) : null}
       {plan.steps.map((step, i) => (
         <box key={`step-${step.title}`} paddingLeft={2} marginBottom={0} flexDirection="column">
           <text>
@@ -49,6 +82,11 @@ export function PlanView({ plan, t }: PlanViewProps) {
               </text>
             </box>
           )}
+          {step.satisfies?.length ? (
+            <box paddingLeft={3}>
+              <text fg={t.textMuted}>{`satisfies: ${step.satisfies.join(", ")}`}</text>
+            </box>
+          ) : null}
         </box>
       ))}
     </box>

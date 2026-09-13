@@ -1,6 +1,21 @@
 # Source files (only include built dist/)
 src/
+scripts/
 tsconfig.json
+vitest.config.ts
+biome.json
+
+# Nested migration reference checkout — never publish this
+ShelraCode/
+
+# Repo-only tooling / config
+.gitattributes
+.husky/
+.cursor/
+.agents/
+AGENTS.md
+install.sh
+tmp-runtime-smoke/
 
 # Lock files from other package managers
 yarn.lock

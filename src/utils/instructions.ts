@@ -1,8 +1,8 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import { executeEventHooks } from "../hooks/index";
 import type { InstructionsLoadedHookInput } from "../hooks/types";
+import { getLegacyUserDir, getProductUserDir } from "../product/identity";
 import { findGitRoot } from "./git-root";
 
 const instructionsHookFiredFor = new Set<string>();
@@ -36,7 +36,9 @@ function directoryChain(fromRoot: string, toCwd: string): string[] {
 function loadAgentsSegments(canonicalCwd: string): string[] {
   const segments: string[] = [];
 
-  const globalAgents = readNonEmptyFile(path.join(os.homedir(), ".grok", "AGENTS.md"));
+  const globalAgents =
+    readNonEmptyFile(path.join(getProductUserDir(), "AGENTS.md")) ??
+    readNonEmptyFile(path.join(getLegacyUserDir(), "AGENTS.md"));
   if (globalAgents) segments.push(globalAgents);
 
   const root = findGitRoot(canonicalCwd) ?? canonicalCwd;

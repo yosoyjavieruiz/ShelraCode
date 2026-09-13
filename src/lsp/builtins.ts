@@ -1,13 +1,7 @@
 import { access } from "fs/promises";
 import path from "path";
 import { lspNpmWhich } from "./npm-cache";
-import type {
-  LspBuiltInServerId,
-  LspBuiltInServerSettings,
-  LspCustomServerConfig,
-  LspLaunchSpec,
-  NormalizedLspSettings,
-} from "./types";
+import type { LspBuiltInServerId, LspCustomServerConfig, LspLaunchSpec, NormalizedLspSettings } from "./types";
 
 export interface RuntimeLspServerDefinition {
   id: string;

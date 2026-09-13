@@ -29,11 +29,11 @@ const TABLE_OPTIONS = {
   borders: true,
   outerBorder: true,
   borderStyle: "rounded" as const,
-  borderColor: "#333333",
 };
 
 export function Markdown({ content, t }: { content: string; t: Theme }) {
   const syntaxStyle = useMemo(() => buildSyntaxStyle(t), [t]);
+  const tableOptions = useMemo(() => ({ ...TABLE_OPTIONS, borderColor: t.border }), [t.border]);
 
   return (
     <markdown
@@ -42,7 +42,7 @@ export function Markdown({ content, t }: { content: string; t: Theme }) {
       conceal={true}
       // @ts-expect-error MarkdownProps omits inherited Renderable.selectable; needed for TUI text selection
       selectable={true}
-      tableOptions={TABLE_OPTIONS}
+      tableOptions={tableOptions}
       flexShrink={0}
     />
   );

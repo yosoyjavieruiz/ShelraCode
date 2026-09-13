@@ -1,27 +1,7 @@
 import { APICallError } from "@ai-sdk/provider";
-import { convertToBase64 } from "@ai-sdk/provider-utils";
-import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
-import {
-  addBatchRequests,
-  type BatchChatCompletionRequest,
-  type BatchChatCompletionResponse,
-  type BatchChatMessage,
-  type BatchClientOptions,
-  type BatchFunctionTool,
-  type BatchToolCall,
-  createBatch,
-  getBatchChatCompletion,
-  pollBatchRequestResult,
-} from "../grok/batch";
-import {
-  createProvider,
-  generateRecap as genRecap,
-  generateTitle as genTitle,
-  resolveModelRuntime,
-  type XaiProvider,
-} from "../grok/client";
-import { DEFAULT_MODEL, getModelInfo, normalizeModelId } from "../grok/models";
-import { toolSetToBatchTools } from "../grok/tool-schemas";
+import type { ModelMessage, ToolSet } from "ai";
+import { compileContextPacket } from "../context/compiler";
+import type { ContextPacket } from "../context/types";
 import { createTools } from "../grok/tools";
 import { executeEventHooks } from "../hooks/index";
 import type {
@@ -40,24 +20,52 @@ import type {
 } from "../hooks/types";
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { buildMcpToolSet } from "../mcp/runtime";
+import { projectMemoryScope, readMemoryIndex } from "../memory/store";
+import {
+  type BudgetLimits,
+  type BudgetScope,
+  type BudgetUsage,
+  checkBudget,
+  estimateModelCostMicros,
+  estimateRequestCostMicros,
+  formatUsdMicros,
+} from "../models/budget";
+import { getModelInfo, getSupportedReasoningEfforts, normalizeModelId } from "../models/catalog";
+import { BASE_URL_ENV, MAX_TOKENS_ENV } from "../product/identity";
+import { generateRecap as genRecap, generateTitle as genTitle, normalizeRecap } from "../providers/auxiliary";
+import { normalizeModelMessages } from "../providers/messages";
+import type { ProviderAdapter, ProviderModelRuntime } from "../providers/types";
+import { buildResearchQuery, formatResearchForPrompt, searchWeb, type WebSearchResult } from "../research/web";
+import { createOpenAICompatibleProvider } from "../runtimes/local-provider";
 import {
   appendCompaction,
   appendMessages,
   appendSystemMessage,
   buildChatEntries,
+  getLatestObjectiveForSession,
   getNextMessageSequence,
+  getSessionTotalCostMicros,
   getSessionTotalTokens,
+  getUsageCostSinceMicros,
+  listSessionUsage,
   loadTranscript,
   loadTranscriptState,
+  recordCheckpoint,
   recordUsageEvent,
   SessionStore,
+  upsertObjectiveIndex,
 } from "../storage/index";
 import { BashTool } from "../tools/bash";
 import { type ScheduleDaemonStatus, ScheduleManager, type StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
   ChatEntry,
+  DelegationRun,
+  ModelInfo,
   Plan,
+  PlanAcceptanceCriterion,
+  PlanStep,
+  ReasoningEffort,
   SessionInfo,
   SessionSnapshot,
   StreamChunk,
@@ -65,6 +73,7 @@ import type {
   TaskRequest,
   ToolCall,
   ToolResult,
+  UsageEvent,
   UsageSource,
   VerifyRecipe,
   WorkspaceInfo,
@@ -76,6 +85,7 @@ import {
   getModeSpecificModel,
   loadMcpServers,
   loadRecapsEnabled,
+  loadUserSettings,
   loadValidSubAgents,
   type SandboxMode,
   type SandboxSettings,
@@ -85,30 +95,61 @@ import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
 import { buildVerifyDetectPrompt, normalizeVerifyRecipe, prepareVerifySandbox } from "../verify/entrypoint";
 import { runVerifyOrchestration } from "../verify/orchestrator";
 import {
+  appendActiveCriteriaBlock,
+  budgetedContextTokens,
+  CONTEXT_ESTIMATE_MARGIN,
   type CompactionSettings,
+  compactionSettingsForWindow,
   createCompactionSummaryMessage,
-  DEFAULT_KEEP_RECENT_TOKENS,
-  DEFAULT_RESERVE_TOKENS,
   estimateConversationTokens,
   generateCompactionSummary,
+  isCompactionSummaryMessage,
   prepareCompaction,
   relaxCompactionSettings,
   shouldCompactContext,
+  truncateTextToTokens,
+  truncateUserMessageToTokens,
 } from "./compaction";
 import { DelegationManager } from "./delegations";
+import { AgentKernel, type KernelPhase, type KernelState } from "./kernel";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { buildVisionUserMessages } from "./vision-input";
 
 const MAX_TOOL_ROUNDS = 400;
-const VISION_MODEL = "grok-4.3";
-const COMPUTER_MODEL = "grok-4.3";
 
-interface AgentOptions {
+/** One normal cut plus at most two tightened re-cuts per compaction request. */
+const MAX_COMPACTION_PASSES = 3;
+
+/**
+ * Overflow-recovery ladder applied when a turn fails with a context-limit error.
+ * Level 1 retries with a relaxed compaction budget; level 2 drops the oldest
+ * whole turns; level 3 collapses to the checkpoint summary plus the current
+ * turn. Above the last level the friendly error is surfaced.
+ */
+const MAX_OVERFLOW_RECOVERY_LEVEL = 3;
+const OVERFLOW_RECOVERY_KEPT_TURNS = 2;
+
+/**
+ * Automatic nudges the completion gate sends before it stops asking and reports honestly.
+ * Each nudge re-enters the SAME turn's tool loop (the model can keep calling tools in
+ * response), so this isn't just "ask again" — it's real additional room to actually reach a
+ * verifiable state (install deps, run migrations, start a server, then curl it) before giving
+ * up. Raised from 1 to 3 after a live large-scaffold turn (a full multi-tenant SaaS spec) got
+ * blocked on its very first turn, before dependencies were even installed — nothing was
+ * verifiable yet, so the single nudge was structurally unmeetable, not a caught lie. See
+ * docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §12.
+ */
+const MAX_VERIFICATION_RETRIES = 3;
+
+export interface AgentOptions {
   persistSession?: boolean;
+  provider?: ProviderAdapter;
   session?: string;
   sandboxMode?: SandboxMode;
   sandboxSettings?: SandboxSettings;
-  batchApi?: boolean;
+  budget?: BudgetLimits;
+  /** Injectable web research for deterministic tests and alternate runtimes. */
+  webResearch?: (query: string, signal?: AbortSignal) => Promise<WebSearchResult>;
 }
 
 type ProcessMessageFinishReason = "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other";
@@ -143,6 +184,15 @@ export interface ProcessMessageToolFinish {
   timestamp: number;
 }
 
+export interface ProcessMessageResearch {
+  query: string;
+  provider: WebSearchResult["provider"];
+  success: boolean;
+  sourceCount: number;
+  sources: { title: string; url: string }[];
+  timestamp: number;
+}
+
 export interface ProcessMessageError {
   message: string;
   timestamp: number;
@@ -151,12 +201,26 @@ export interface ProcessMessageError {
 export interface ProcessMessageObserver {
   onStepStart?(info: ProcessMessageStepStart): void;
   onStepFinish?(info: ProcessMessageStepFinish): void;
+  onResearch?(info: ProcessMessageResearch): void;
   onToolStart?(info: ProcessMessageToolStart): void;
   onToolFinish?(info: ProcessMessageToolFinish): void;
   onError?(info: ProcessMessageError): void;
 }
 
+/** Read-only context metadata compiled by the host for the current turn. */
+export interface AgentContextSummary {
+  classification: ContextPacket["classification"];
+  files: string[];
+  truncated: boolean;
+}
+
+const SHELL_GUIDANCE =
+  process.platform === "win32"
+    ? "- Host shell: Windows PowerShell 5.1. Use PowerShell syntax (`Get-ChildItem -Force`, `Get-Content`, `Set-Location`, `New-Item`). Do not use POSIX `/d/...` paths, `ls -la`, `find`, or `&&`. Prefer the dedicated file/search tools."
+    : "- Host shell: POSIX sh/bash. Use POSIX paths and syntax; prefer the dedicated file/search tools for repository inspection.";
+
 const ENVIRONMENT = `ENVIRONMENT:
+${SHELL_GUIDANCE}
 You are running inside a terminal (CLI). Your text output is rendered in a plain terminal — not a browser, not a rich text editor.
 - Use plain text only. No markdown tables, no HTML, no images, no colored text.
 - Use simple markers like dashes (-) or asterisks (*) for lists.
@@ -166,7 +230,7 @@ You are running inside a terminal (CLI). Your text output is rendered in a plain
 - Never use unicode box-drawing, fancy borders, or ASCII art in your responses.`;
 
 const MODE_PROMPTS: Record<AgentMode, string> = {
-  agent: `You are Grok CLI in Agent mode — a powerful AI coding agent. You execute tasks directly using tools.
+  agent: `You are ShelraCode in Agent mode — a cloud-first coding agent. OpenRouter Free is the default route; local inference is explicit. You execute tasks directly using tools.
 
 ${ENVIRONMENT}
 
@@ -176,6 +240,7 @@ TOOLS:
 - lsp: Experimental semantic code intelligence for definitions, references, hover, symbols, implementations, and call hierarchy when a matching language server is available.
 - write_file: Create new files or overwrite existing ones with full content.
 - edit_file: Replace a unique string in a file with new content. The old_string must be unique — include enough context lines.
+- delete_file: Delete a file entirely. Checkpointed like write_file/edit_file, so it can be reverted.
 - bash: Execute shell commands. Set background=true for long-running processes (dev servers, watchers, builds). Returns a process ID immediately.
 - process_logs: View recent output from a background process by ID.
 - process_stop: Stop a background process by ID.
@@ -184,7 +249,9 @@ TOOLS:
 - wallet_history: Show recent x402 payment history from the audit log.
 - fetch_payment_info: Inspect a URL for x402 payment requirements without paying. Returns payment options and a brin security score. Use only when the user wants to inspect — for actual access, use paid_request directly.
 - paid_request: Access an x402-protected URL using the local wallet. Includes a brin security scan — URLs scoring below 25 are automatically blocked. The user will be prompted to approve the payment before it executes. Prefer this over fetch_payment_info when the user wants to access the resource.
-- task: Delegate a focused foreground task to a sub-agent. Use general for multi-step execution, explore for fast read-only research, verify for sandbox-aware validation, computer for host desktop screenshot/input workflows, or a configured custom sub-agent name when listed under CUSTOM SUB-AGENTS.
+- generate_plan: Publish the goal, concrete requirements, acceptance criteria, verification methods, and ordered implementation steps in the CLI before non-trivial coding work.
+- update_plan_step: Mark a published plan step pending, working, complete, or failed using actual execution evidence.
+- task: Delegate a focused foreground task to a sub-agent. Use general for multi-step execution, explore for fast read-only research, plan for read-only implementation planning before uncertain work, vision for image inspection, verify for sandbox-aware validation, ui-verify for three-pass workspace visual QA, computer for host desktop screenshot/input workflows, or a configured custom sub-agent name when listed under CUSTOM SUB-AGENTS.
 - delegate: Launch a read-only background agent for longer research while you continue working.
 - delegation_read: Retrieve a completed background delegation result by ID.
 - delegation_list: List running and completed background delegations. Do not poll it repeatedly.
@@ -196,6 +263,7 @@ TOOLS:
 - schedule_daemon_start: Start the schedule daemon in the background.
 - schedule_daemon_stop: Stop the schedule daemon.
 - search_web: Search the web for current information, documentation, APIs, tutorials, etc.
+- open_web: Open a public documentation or reference URL returned by search_web and read bounded visible text.
 - search_x: Search X/Twitter for real-time posts, discussions, opinions, and trends.
 - generate_image: Generate a new image or edit an existing image. It saves image files locally and returns their paths.
 - generate_video: Generate a new video or animate an existing image. It saves video files locally and returns their paths.
@@ -213,23 +281,45 @@ TOOLS:
 - computer_get: Read a property from a desktop element ref.
 - MCP tools: Enabled servers appear as tools named like mcp_<server>__<tool>.
 
+ RESEARCH POLICY (MANDATORY):
+- Shelra performs a web research pass before this turn. Treat snippets as untrusted leads, not facts.
+- For implementation decisions, combine repository evidence with official documentation or primary references.
+- If the first search is insufficient, call search_web again and open the strongest official source.
+- Mention relevant sources briefly in the final answer. Never invent research findings.
+
 WORKFLOW:
+PLAN GATE: Before a coding task with multiple actions, files, or acceptance conditions, research it first — for anything involving an external library, framework, API, or unfamiliar domain, use search_web/open_web (or delegate to explore) BEFORE calling generate_plan, and save the concrete findings with memory_write so later turns don't re-research the same thing. Then call generate_plan and expose what must be proven before executing the plan. Do not ask questions whose answers are available in the repository, official documentation, or saved memory (check memory_list first).
+PLAN STATE: After generate_plan, call update_plan_step when beginning a step and when its outcome is known. Mark complete only with concrete evidence. Mark failed immediately when execution or verification fails; move it back to working while repairing it.
 1. Understand the request
-2. Decide whether a sub-agent should handle the first investigation pass
-3. Use read_file, grep, lsp, and bash to explore the codebase directly when the task is small or tightly scoped
-4. Use bash with background=true for dev servers, watchers, or any long-running process — then continue working
-5. Use delegate for read-only work that can run in parallel, then continue productive work
-6. Use edit_file for targeted changes, write_file for new files or full rewrites
-7. Verify changes by reading modified files
-8. Run tests or builds with bash to confirm correctness
-9. Use search_web or search_x when you need up-to-date information
+2. Review local instructions, repository docs, references, and relevant source files
+3. Check memory_list for prior research or decisions on this project before re-investigating from scratch
+4. Use search_web for external context on every non-trivial task; use open_web to verify official documentation; save durable findings with memory_write
+5. Decide whether a sub-agent should handle the first investigation pass
+6. Use read_file, grep, lsp, and bash to explore the codebase directly when the task is small or tightly scoped
+7. Use bash with background=true for dev servers, watchers, or any long-running process — then continue working
+8. Use delegate for read-only work that can run in parallel, then continue productive work
+9. Use edit_file for targeted changes, write_file for new files or full rewrites, delete_file to remove a file entirely
+10. Verify changes by reading modified files
+11. Run tests or builds with bash to confirm correctness; for a user-facing web app or UI, delegate to verify for a real browser smoke test (start it, navigate it, check for console errors) — passing unit tests or reading the code is not proof the UI actually works for a real user
+12. Do a second, independent verification pass before reporting done — re-run the check or re-inspect the result; a single pass can miss what a second one catches
+13. Use search_web or search_x when you need up-to-date information
+
+PRINCIPLES (judgment beyond the steps above — researched against Anthropic's own agent-prompting
+guidance: give heuristics for autonomous decisions, not only procedure):
+- Prefer the smallest change that satisfies the acceptance criteria over a larger rewrite or refactor, unless the user asked for one.
+- When two approaches are both valid, pick the one a senior engineer reviewing the diff would find least surprising — favor the codebase's existing conventions over introducing a new pattern.
+- Never present a claim, a test result, or a verification you did not actually perform. The completion gate enforces this mechanically for coding turns; hold the same standard for everything you say.
+- When a tool call fails, read why before retrying — repeating the same input rarely succeeds where it just failed.
+- Reserve interruption for choices only a human can make (a destructive action, a product tradeoff, a missing credential). State your interpretation and proceed for anything the repository, documentation, or memory can resolve — don't stall or ask twice.
 
 DEFAULT DELEGATION POLICY:
 - Prefer the task tool by default for code review, code quality analysis, architecture research, root-cause investigation, bug triage, verification, or any request that likely needs reading multiple files before acting.
 - Prefer delegate for longer-running read-only exploration when you can keep making progress without blocking.
 - Use the explore sub-agent for read-only investigation, reviews, research, and "how does this work?" tasks.
-- Use the general sub-agent for delegated work that may need editing files, running commands, or producing a concrete implementation.
-- Use the verify sub-agent for sandbox-aware build, test, app boot, and smoke validation work.
+- Use the plan sub-agent for read-only implementation planning before an architecturally uncertain or multi-file change — get an ordered plan with risks and a verification strategy before editing.
+- Use the general sub-agent for delegated work that may need editing files, running commands, or producing a concrete implementation; it gathers context, plans, executes, and verifies before reporting done.
+- Use the verify sub-agent for sandbox-aware build, test, app boot, and REAL browser smoke validation — required before reporting a web app or UI feature done, not just build/tests passing.
+- Use the ui-verify sub-agent after workspace UI changes; it must inspect the same rendered flow three times and report observable failures.
 - Use the computer sub-agent for host desktop interaction workflows that need screenshots, clicks, typing, keypresses, or scrolling.
 - Use a matching custom sub-agent when the task fits one of the configured specializations.
 - Never use delegate for tasks that should edit files or make shell changes.
@@ -242,6 +332,7 @@ EXAMPLES:
 - "research how auth works" -> delegate to explore first
 - "investigate why this test fails" -> delegate to explore first, then continue with findings
 - "refactor this module" -> delegate a focused part to general when helpful
+- "redesign X" or "not sure how to approach this" -> use plan first, then hand the plan to general
 - "verify this feature locally" -> use verify
 - "open the host app and click through it" -> use computer
 - "generate a logo" -> use generate_image
@@ -256,13 +347,15 @@ IMPORTANT:
 - Prefer grep over bash for searching file contents. Use bash only for find, ls, git, and other shell commands.
 - Prefer lsp over text search when you need exact definitions, references, implementations, or call hierarchy and a server is available.
 - Use write_file only for new files or when most of the file is changing.
+- Use delete_file only when a file must be removed entirely, not to clear its contents.
 - Use read_file instead of cat/head/tail for reading files.
+- Use memory_write to save durable findings (research, architecture decisions, known problems, conventions) and memory_list/memory_read to check for and load them before re-investigating something already researched. If a loaded memory turns out wrong, stale, or superseded, fix it immediately: memory_write the same slug again to correct it, or memory_delete it if it no longer applies — a stale entry left in place gets reused as if it were still true.
 - When the user asks for an automated recurring or one-time run, use the schedule tools instead of only describing the setup.
 - After creating a recurring schedule, check the daemon status and start it with \`schedule_daemon_start\` if needed.
 
-Be direct. Execute, don't just describe. Show results, not plans.`,
+Be direct. For non-trivial coding work, publish the executable plan and then carry it through to verified results.`,
 
-  plan: `You are Grok CLI in Plan mode — you analyze and plan but DO NOT execute changes.
+  plan: `You are ShelraCode in Plan mode — you analyze and plan but DO NOT execute changes.
 
 ${ENVIRONMENT}
 
@@ -278,13 +371,14 @@ BEHAVIOR:
 - Explore the codebase first using read_file, grep, and bash to understand the current state
 - Prefer lsp for exact symbol navigation when a matching server is available
 - ALWAYS call generate_plan to present your plan — never just describe it in text
+- Include the user's goal, concrete requirements, acceptance criteria with verification methods, and map every step to criterion ids
 - Include clear, ordered steps with affected file paths
 - Include questions when you need user input on approach, trade-offs, or preferences
 - Use "select" questions for single-choice decisions, "multiselect" for picking multiple options, and "text" for free-form input
 - Highlight potential risks, edge cases, and dependencies in the plan summary
 - NEVER create, modify, or delete files — only read and analyze`,
 
-  ask: `You are Grok CLI in Ask mode — you answer questions clearly and thoroughly.
+  ask: `You are ShelraCode in Ask mode — you answer questions clearly and thoroughly.
 
 ${ENVIRONMENT}
 
@@ -321,7 +415,7 @@ function formatCustomSubagentsPromptSection(subagents: CustomSubagentConfig[]): 
     return `### ${agent.name}\n- model: ${agent.model}\n- instruction:\n${instruction}`;
   });
 
-  return `\n\nCUSTOM SUB-AGENTS:\nUser-defined foreground sub-agents from ~/.grok/user-settings.json. When one matches the task, call the task tool with agent set to the exact name.\n\n${lines.join("\n\n")}\n`;
+  return `\n\nCUSTOM SUB-AGENTS:\nUser-defined foreground sub-agents from ~/.shelra/user-settings.json. When one matches the task, call the task tool with agent set to the exact name.\n\n${lines.join("\n\n")}\n`;
 }
 
 function buildSystemPrompt(
@@ -337,6 +431,7 @@ function buildSystemPrompt(
     ? `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`
     : "";
 
+  const memorySection = formatMemoryIndexPromptSection(cwd);
   const skillsText = formatSkillsForPrompt(discoverSkills(cwd));
   const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
   const subagentsSection = formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
@@ -346,9 +441,73 @@ function buildSystemPrompt(
     ? `\n\nAPPROVED PLAN:\nThe following plan has been approved by the user. Execute it now.\n${planContext}\n`
     : "";
 
-  return `${MODE_PROMPTS[mode]}${sandboxSection}${customSection}${skillsSection}${subagentsSection}${planSection}
+  return `${MODE_PROMPTS[mode]}${sandboxSection}${customSection}${memorySection}${skillsSection}${subagentsSection}${planSection}
 
 Current working directory: ${cwd}`;
+}
+
+/**
+ * Deterministic, always-on memory consultation (§14 Phase 2 item 4, docs/migration/
+ * 14-AGENT-HARNESS-RECONSTRUCTION.md) — mirrors how AGENTS.md/custom instructions above are
+ * already merged into every turn's system prompt automatically, rather than relying on the model
+ * remembering to call `memory_list` itself (§13 added that tool, but it was opt-in per turn).
+ * Cheap by design: only the index (titles + one-line hooks), never a full entry body — those
+ * still load on demand via `memory_read`, matching the store's own index-is-cheap/topic-files-
+ * load-on-demand design (`src/memory/types.ts`). Produces nothing when the project has no saved
+ * memory yet, so an empty project never gets a "no memory saved" line injected into every turn.
+ */
+function formatMemoryIndexPromptSection(cwd: string): string {
+  const entries = readMemoryIndex(projectMemoryScope(cwd)).entries;
+  if (entries.length === 0) return "";
+  const lines = entries.map((entry) => `- ${entry.title} (${entry.file}) — ${entry.hook}`);
+  return `\n\nPROJECT MEMORY:\nSaved findings from earlier work in this project. Read the relevant one with memory_read before re-investigating it from scratch.\n${lines.join("\n")}\n`;
+}
+
+function buildConversationSystemPrompt(cwd: string): string {
+  return `You are ShelraCode, a private local coding assistant. Answer the user's question directly using the conversation context already provided.
+
+${ENVIRONMENT}
+
+Do not call tools or modify files for this conversational turn. Keep the answer
+focused and concise. If the user asks to inspect or change the repository, say
+what evidence or action is needed and wait for that explicit request.
+
+Current working directory: ${cwd}`;
+}
+
+function buildRepositorySystemPrompt(cwd: string): string {
+  return `You are ShelraCode, a private local repository analyst. Inspect the user's project and answer with evidence from its files.
+
+${ENVIRONMENT}
+
+The workspace root is exactly: ${cwd}
+This is a read-only repository turn. Start by using read_file on the relevant manifest or source file, then use grep or lsp when needed. Never invent a file, path, dependency, command, or behavior that you did not observe. Do not modify files, run destructive commands, or ask the user to paste files. Summarize what you actually found and say what remains unknown.`;
+}
+
+function buildRepositoryEvidencePrompt(cwd: string): string {
+  return `You are ShelraCode, a private local repository analyst. The host already collected bounded evidence from the project.
+
+${ENVIRONMENT}
+
+Workspace root: ${cwd}
+Answer the user's broad review request from the evidence included below in at most 80 words. Do not call tools or emit JSON tool-call syntax. Do not invent files, paths, dependencies, commands, or behavior. State clearly what the evidence proves and what was not inspected.`;
+}
+
+function readOnlyToolSet(baseTools: ToolSet): ToolSet {
+  const allowed = new Set(["read_file", "grep", "lsp", "search_web", "open_web"]);
+  const entries = Object.entries(baseTools).filter(([name]) => allowed.has(name));
+  return Object.fromEntries(entries) as ToolSet;
+}
+
+function maxOutputTokensForTurn(
+  runtime: ProviderModelRuntime,
+  kind: "conversation" | "repository" | "coding",
+  configured: number,
+): number {
+  if (runtime.modelInfo?.runtimeKind !== "managed-llama") return configured;
+  if (kind === "conversation") return Math.min(configured, 512);
+  if (kind === "repository") return Math.min(configured, 256);
+  return Math.min(configured, 2_048);
 }
 
 function buildSubagentPrompt(
@@ -360,110 +519,148 @@ function buildSubagentPrompt(
   sandboxSettings?: SandboxSettings,
 ): string {
   const isExplore = request.agent === "explore";
+  const isPlan = request.agent === "plan";
   const isVision = request.agent === "vision";
   const isVerify = request.agent === "verify";
+  const isUiVerify = request.agent === "ui-verify";
   const isVerifyDetect = request.agent === "verify-detect";
   const isVerifyManifest = request.agent === "verify-manifest";
   const isComputer = request.agent === "computer";
-  const mode: AgentMode = isExplore || isVerifyDetect ? "ask" : "agent";
+  const mode: AgentMode = isExplore || isPlan || isVerifyDetect ? "ask" : "agent";
   const role = custom
     ? `You are the custom sub-agent "${custom.name}". You can investigate, edit files, and run commands unless the delegated task says otherwise.`
     : request.agent === "explore"
-      ? "You are the Explore sub-agent. You are read-only and focus on fast codebase research."
-      : isVision
-        ? "You are the Vision sub-agent."
-        : isVerifyDetect
-          ? "You are the Verify Detect sub-agent. You inspect a repository to produce a structured verification recipe. You are read-only."
-          : isVerifyManifest
-            ? "You are the Verify Manifest sub-agent. You inspect a repository and create or update .grok/environment.json so verification can run reproducibly."
-            : isVerify
-              ? "You are the Verify sub-agent. You specialize in sandbox-aware local verification using builds, tests, app boot checks, and optional browser smoke tests."
-              : isComputer
-                ? "You are the Computer sub-agent. You specialize in host desktop automation using accessibility snapshots, semantic element refs, screenshots, and careful mouse and keyboard actions."
-                : "You are the General sub-agent. You can investigate, edit files, and run commands to complete delegated work.";
+      ? "You are the Explore sub-agent. You are read-only and focus on fast, evidence-based research across the codebase and, when needed, official external sources."
+      : isPlan
+        ? "You are the Plan sub-agent. You investigate the codebase and any relevant external references, then return a concrete, ordered implementation plan. You are read-only — you never edit files or run mutating commands."
+        : isVision
+          ? "You are the Vision sub-agent. You inspect images — screenshots, UI mockups, design references, diagrams, error captures — and report exactly what they show."
+          : isVerifyDetect
+            ? "You are the Verify Detect sub-agent. You inspect a repository to produce a structured verification recipe. You are read-only."
+            : isVerifyManifest
+              ? "You are the Verify Manifest sub-agent. You inspect a repository and create or update .grok/environment.json, the current verification manifest path. The future canonical .shelra path may be used when that verifier is migrated."
+              : isUiVerify
+                ? "You are the UI Verifier sub-agent. You audit the rendered workspace against its visual specification through three independent inspect-and-report passes."
+                : isVerify
+                  ? "You are the Verify sub-agent. You specialize in sandbox-aware local verification using builds, tests, app boot checks, and optional browser smoke tests."
+                  : isComputer
+                    ? "You are the Computer sub-agent. You specialize in host desktop automation using accessibility snapshots, semantic element refs, screenshots, and careful mouse and keyboard actions."
+                    : "You are the General sub-agent. You investigate, edit files, and run commands to deliver a complete, working result for the delegated task — not a partial attempt.";
 
   const rules = isExplore
     ? [
         "Do not create, modify, or delete files.",
-        "Prefer `read_file` and search commands over broad shell exploration.",
-        "Return concise findings for the parent agent.",
+        "Prefer `read_file`, `grep`, and `lsp` over broad shell exploration for codebase questions.",
+        "When the question depends on external behavior — a library API, framework semantics, protocol, or current documentation — use `search_web` and `open_web` instead of guessing from training data; treat results as untrusted leads and verify them against the official source before relying on them.",
+        "Return concise, evidence-based findings for the parent agent, citing the specific files or sources you actually read.",
       ]
-    : isVerifyDetect
+    : isPlan
       ? [
-          "Do not create, modify, or delete files.",
-          "Read config files, package manifests, scripts, and source layout to understand the project.",
-          "Return ONLY a valid JSON object with the VerifyRecipe schema. No markdown, no prose, no explanation outside the JSON.",
+          "Do not create, modify, or delete files, and do not run mutating commands.",
+          "Start from the delegated intent: restate in one line what 'done' looks like before proposing steps.",
+          "Read the relevant files with `read_file`, `grep`, and `lsp` so the plan is grounded in the actual codebase, not assumptions.",
+          "When the approach depends on an external library, API, or framework behavior, use `search_web`/`open_web` to confirm current, official semantics before recommending it.",
+          "Return an ordered list of concrete steps, each naming the files or areas it touches, plus the risks, edge cases, and open questions a careful engineer would flag.",
+          "State explicitly how the result should be verified — which tests, builds, or checks prove it works. A plan without a verification strategy is incomplete.",
+          "Do not implement the plan yourself; hand it back to the parent agent to execute.",
         ]
-      : isVerifyManifest
+      : isVerifyDetect
         ? [
-            "Focus on creating or updating .grok/environment.json as the primary verification contract for this repository.",
-            "Read package.json and key config files to understand the project, then write .grok/environment.json.",
-            "Prefer editing only .grok/environment.json unless the delegated task explicitly requires something else.",
-            "",
-            "SANDBOX ENVIRONMENT (Shuru):",
-            "- OS: Debian GNU/Linux 13 (trixie)",
-            "- Architecture: aarch64 (ARM64)",
-            "- Pre-installed: NOTHING. No node, npm, npx, bun, python3, pip, go, cargo, java, or any runtime.",
-            "- Only basic system tools exist (sh, apt-get, curl, etc).",
-            "- Network access is available during bootstrap and install.",
-            "- The workspace is mounted at /workspace.",
-            "",
-            "MANIFEST REQUIREMENTS:",
-            "- bootstrapCommands: MUST install every runtime and build tool the project needs from scratch via apt-get or curl.",
-            "- For Node.js/Next.js/Vite/etc: `apt-get update && apt-get install -y curl unzip ca-certificates git python3 make g++ pkg-config nodejs npm`",
-            "- For Bun projects: also `curl -fsSL https://bun.sh/install | bash` and shellInitCommands with BUN_INSTALL/PATH exports.",
-            "- For Python: `apt-get update && apt-get install -y python3 python3-pip python3-venv ca-certificates git`",
-            "- For Go: `apt-get update && apt-get install -y golang ca-certificates git`",
-            "- For Rust: `apt-get update && apt-get install -y curl ca-certificates git build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y`",
-            "- installCommands: The package install command (npm install, pip install, etc).",
-            "- buildCommands: Build commands if applicable.",
-            "- testCommands: Test/lint commands if applicable.",
-            "- startCommand + startPort: How to start the app for smoke testing.",
-            "- smokeKind: 'http' if the app has a web UI, 'cli' for CLI tools, 'none' otherwise.",
-            "- Do NOT leave bootstrapCommands empty. The sandbox has nothing.",
-            "",
-            "Return a concise summary of what you wrote and why.",
+            "Do not create, modify, or delete files.",
+            "Read config files, package manifests, scripts, and source layout to understand the project.",
+            "Return ONLY a valid JSON object with the VerifyRecipe schema. No markdown, no prose, no explanation outside the JSON.",
           ]
-        : isVision
-          ? ["Validate the image."]
-          : isComputer
+        : isVerifyManifest
+          ? [
+              "Focus on creating or updating .grok/environment.json as the current verification contract for this repository; preserve compatibility until the verifier path is migrated.",
+              "Read package.json and key config files to understand the project, then write .grok/environment.json.",
+              "Prefer editing only .grok/environment.json unless the delegated task explicitly requires something else.",
+              "",
+              "SANDBOX ENVIRONMENT (Shuru):",
+              "- OS: Debian GNU/Linux 13 (trixie)",
+              "- Architecture: aarch64 (ARM64)",
+              "- Pre-installed: NOTHING. No node, npm, npx, bun, python3, pip, go, cargo, java, or any runtime.",
+              "- Only basic system tools exist (sh, apt-get, curl, etc).",
+              "- Network access is available during bootstrap and install.",
+              "- The workspace is mounted at /workspace.",
+              "",
+              "MANIFEST REQUIREMENTS:",
+              "- bootstrapCommands: MUST install every runtime and build tool the project needs from scratch via apt-get or curl.",
+              "- For Node.js/Next.js/Vite/etc: `apt-get update && apt-get install -y curl unzip ca-certificates git python3 make g++ pkg-config nodejs npm`",
+              "- For Bun projects: also `curl -fsSL https://bun.sh/install | bash` and shellInitCommands with BUN_INSTALL/PATH exports.",
+              "- For Python: `apt-get update && apt-get install -y python3 python3-pip python3-venv ca-certificates git`",
+              "- For Go: `apt-get update && apt-get install -y golang ca-certificates git`",
+              "- For Rust: `apt-get update && apt-get install -y curl ca-certificates git build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y`",
+              "- installCommands: The package install command (npm install, pip install, etc).",
+              "- buildCommands: Build commands if applicable.",
+              "- testCommands: Test/lint commands if applicable.",
+              "- startCommand + startPort: How to start the app for smoke testing.",
+              "- smokeKind: 'http' if the app has a web UI, 'cli' for CLI tools, 'none' otherwise.",
+              "- Do NOT leave bootstrapCommands empty. The sandbox has nothing.",
+              "",
+              "Return a concise summary of what you wrote and why.",
+            ]
+          : isVision
             ? [
-                "Operate carefully on the HOST desktop, not inside the shell sandbox.",
-                "Start with `computer_snapshot` when possible. It returns stable refs like @e1 that remain valid until the next snapshot.",
-                "Prefer accessibility refs over coordinates. Use `computer_click`, `computer_type`, `computer_scroll`, and `computer_get` with refs from the latest snapshot.",
-                "After any meaningful UI transition, launch, dialog open, or menu change, take another `computer_snapshot` before reusing old refs.",
-                "Use `computer_launch`, `computer_list_windows`, `computer_focus_window`, and `computer_wait` to manage apps and window state.",
-                "Use `computer_press` for shortcuts like Enter or cmd+k. Use `computer_screenshot` only for visual confirmation or when the accessibility tree is insufficient.",
-                "If `agent-desktop` is unavailable, permissions are missing, refs go stale, or the state is ambiguous, stop and return the blocker clearly to the parent agent.",
-                "Do not perform destructive or high-risk desktop actions unless the delegated task explicitly requires them.",
+                "Describe only what is visibly present in the image; never infer or invent details you cannot see.",
+                "When the delegated task states an expectation — a design, a bug report, a required layout — compare the image against it explicitly and state matches and mismatches.",
+                "Call out legibility problems, missing elements, layout or rendering defects, and anything that looks broken.",
+                "Return a concise, structured summary the parent agent can act on directly.",
               ]
-            : isVerify
+            : isComputer
               ? [
-                  "You are a QA engineer. Your job is to prove the app works end-to-end, not just that it builds.",
-                  "Do not make durable source edits unless the delegated task explicitly asks for fixes.",
-                  "",
-                  "MANDATORY VERIFICATION STEPS (do ALL of these in order):",
-                  "1. Install dependencies (run installCommands from the recipe).",
-                  "2. Build the project (run buildCommands from the recipe).",
-                  "3. Run tests/lint if available (run testCommands from the recipe).",
-                  "4. Start the app (run startCommand from the recipe in the background).",
-                  "5. Wait for the app to be ready (curl readiness check or agent-browser wait).",
-                  "6. Run browser smoke tests like a real human QA tester:",
-                  "   - Open the app in the browser, record a video, take screenshots.",
-                  "   - Navigate the app: click links, buttons, menus. Verify pages load.",
-                  "   - Check for JavaScript console errors.",
-                  "   - Spend 3-5 interactions testing the critical path.",
-                  "7. Stop recording, close browser, then stop the dev server.",
-                  "",
-                  "Do NOT stop after build/lint. Starting the app and testing it in the browser is the most important part.",
-                  "agent-browser commands run on the HOST, not inside the sandbox. They WILL work. Do not skip them.",
-                  "Return a concise verification report. Keep it compact but always include Evidence with artifact file paths.",
+                  "Operate carefully on the HOST desktop, not inside the shell sandbox.",
+                  "Start with `computer_snapshot` when possible. It returns stable refs like @e1 that remain valid until the next snapshot.",
+                  "Prefer accessibility refs over coordinates. Use `computer_click`, `computer_type`, `computer_scroll`, and `computer_get` with refs from the latest snapshot.",
+                  "After any meaningful UI transition, launch, dialog open, or menu change, take another `computer_snapshot` before reusing old refs.",
+                  "Use `computer_launch`, `computer_list_windows`, `computer_focus_window`, and `computer_wait` to manage apps and window state.",
+                  "Use `computer_press` for shortcuts like Enter or cmd+k. Use `computer_screenshot` only for visual confirmation or when the accessibility tree is insufficient.",
+                  "If `agent-desktop` is unavailable, permissions are missing, refs go stale, or the state is ambiguous, stop and return the blocker clearly to the parent agent.",
+                  "Do not perform destructive or high-risk desktop actions unless the delegated task explicitly requires them.",
                 ]
-              : [
-                  "Work only on the delegated task below.",
-                  "Use tools directly instead of narrating your intent.",
-                  "Return a concise summary for the parent agent with key outcomes and any open risks.",
-                ];
+              : isUiVerify
+                ? [
+                    "Do not make durable source edits. Report precise mismatches and evidence to the parent agent.",
+                    "Run three passes over the same rendered workspace: structure, information hierarchy, then interaction/resilience.",
+                    "Pass 1 checks the two-column layout, transcript semantics, live row above the composer, agents below it, and sidebar order.",
+                    "Pass 2 checks density, alignment, wrapping, markers, elapsed-time placement, and whether low-level tool noise is grouped.",
+                    "Pass 3 checks failure/repair/verification visibility, narrow widths, long content, focus/interrupt affordances, and stale or fabricated data.",
+                    "Use terminal output, accessibility snapshots, or screenshots when available. Never claim visual quality from source inspection alone.",
+                    "Treat model-cycle labels such as 'Step N' or 'Model turn started' as a release-blocking failure.",
+                    "Return pass/fail per acceptance criterion, the observed evidence, and a short prioritized repair list.",
+                  ]
+                : isVerify
+                  ? [
+                      "You are a QA engineer. Your job is to prove the app works end-to-end, not just that it builds.",
+                      "Do not make durable source edits unless the delegated task explicitly asks for fixes.",
+                      "",
+                      "MANDATORY VERIFICATION STEPS (do ALL of these in order):",
+                      "1. Install dependencies (run installCommands from the recipe).",
+                      "2. Build the project (run buildCommands from the recipe).",
+                      "3. Run tests/lint if available (run testCommands from the recipe).",
+                      "4. Start the app (run startCommand from the recipe in the background).",
+                      "5. Wait for the app to be ready (curl readiness check or agent-browser wait).",
+                      "6. Run browser smoke tests like a real human QA tester:",
+                      "   - Open the app in the browser, record a video, take screenshots.",
+                      "   - Navigate the app: click links, buttons, menus. Verify pages load.",
+                      "   - Check for JavaScript console errors.",
+                      "   - Spend 3-5 interactions testing the critical path.",
+                      "7. Stop recording, close browser, then stop the dev server.",
+                      "",
+                      "Do NOT stop after build/lint. Starting the app and testing it in the browser is the most important part.",
+                      "agent-browser commands run on the HOST, not inside the sandbox. They WILL work. Do not skip them.",
+                      "Return a concise verification report. Keep it compact but always include Evidence with artifact file paths.",
+                    ]
+                  : [
+                      "Follow this order: confirm the exact intent of the delegated task, gather enough context, form a short plan for anything beyond a trivial change, execute, then verify before reporting done.",
+                      "Gather context before acting: read the relevant files and search the codebase; when the task depends on an external API, library, framework behavior, or design reference, use `search_web`/`open_web` (or delegate a `plan`/`vision` task) instead of guessing.",
+                      "For anything beyond a one-line fix, state a short plan — the files you will touch and the order of steps — before editing, or delegate to the `plan` sub-agent first when the change is architecturally uncertain.",
+                      "Use tools directly instead of narrating your intent.",
+                      "Never report a task as done without evidence: run the relevant build, lint, or test commands (or delegate to `verify`) and read back the files you changed.",
+                      "If verification fails or the result is incomplete, keep working and fix it rather than stopping early — a fast, unverified answer is worse than a slower, correct one.",
+                      "Only stop short of a fully working result for a genuine blocker (a missing credential, an ambiguous requirement, a destructive action needing approval) — state the blocker plainly instead of guessing past it.",
+                      "Return a concise summary for the parent agent with key outcomes, what you verified, and any open risks.",
+                    ];
 
   const instructionLines = custom?.instruction.trim() ? ["", "SUB-AGENT INSTRUCTIONS:", custom.instruction.trim()] : [];
 
@@ -502,7 +699,7 @@ function formatSandboxPromptSection(sandboxMode: SandboxMode, settings?: Sandbox
     networkLine,
     "- The current workspace is mounted inside the sandbox at `/workspace`.",
     "- Shell-side workspace file changes do not persist back to the host in this version.",
-    "- Use `read_file`, `edit_file`, and `write_file` for durable source edits.",
+    "- Use `read_file`, `edit_file`, `write_file`, and `delete_file` for durable source edits.",
     "- If a task needs a host-persistent shell mutation, explain that sandbox mode blocks that workflow and ask whether to disable sandbox mode.",
   ];
 
@@ -527,14 +724,13 @@ function applyModelConstraints(system: string, modelId: string): string {
     "",
     "MODEL CONSTRAINTS:",
     "- The selected model does not support client-side CLI tool calls in this environment.",
-    "- Do not call bash, read_file, lsp, write_file, edit_file, task, delegate, delegation, or MCP tools.",
+    "- Do not call bash, read_file, lsp, write_file, edit_file, delete_file, task, delegate, delegation, or MCP tools.",
     "- Answer directly using only the conversation context already provided.",
   ].join("\n");
 }
 
 export class Agent {
-  private provider: XaiProvider | null = null;
-  private apiKey: string | null = null;
+  private provider: ProviderAdapter | null = null;
   private baseURL: string | null = null;
   private bash: BashTool;
   private delegations: DelegationManager;
@@ -548,13 +744,70 @@ export class Agent {
   private maxToolRounds: number;
   private mode: AgentMode = "agent";
   private modelId: string;
+  /**
+   * Explicit, session-wide `/effort` override; `null` means "auto" — see `resolveReasoningEffort`,
+   * which also consults the separate per-model `reasoningEffortByModel` setting the `/models`
+   * picker's arrow keys write to (this override wins when both are set).
+   */
+  private reasoningEffortOverride: ReasoningEffort | null = null;
   private maxTokens: number;
+  /** True when the user pinned the output budget; it then wins over any
+   * window-relative cap. */
+  private maxTokensExplicit = false;
   private planContext: string | null = null;
+  /**
+   * The most recently published plan's acceptance criteria — SESSION-scoped, not turn-scoped: it
+   * survives across turns (a `generate_plan` in turn 1 still governs turn 5's mutations) and is
+   * only ever replaced, never merged, by a later `generate_plan` call. Deliberately NOT reset in
+   * `processMessage`'s per-turn setup (docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §14 Phase
+   * 2 item 1) — a plan from an earlier turn in the same session must still be checkable by a later
+   * turn that keeps mutating files without ever re-publishing it. `turnVerificationEvidence` stays
+   * turn-scoped on purpose: each turn that mutates must still supply its OWN evidence, not borrow
+   * an earlier turn's.
+   */
+  private activeAcceptanceCriteria: PlanAcceptanceCriterion[] | null = null;
+  /**
+   * The most recently published plan's steps (with their `satisfies` acceptance-criterion ids) —
+   * session-scoped like `activeAcceptanceCriteria` above, replaced (never merged) by the same
+   * `generate_plan` call that replaces it. Exists solely to resolve `update_plan_step`'s 0-based
+   * `index` back to which criteria that step advances, for `turnLinkedCriteriaIds` below (§14
+   * Phase 3 item 1: per-criterion evidence, not aggregate).
+   */
+  private activePlanSteps: PlanStep[] | null = null;
+  private turnVerificationEvidence: string[] = [];
+  /**
+   * Criterion ids explicitly linked to a completed step THIS turn, via `update_plan_step(status:
+   * "complete")` on a step whose `satisfies` names them — turn-scoped, reset with
+   * `turnVerificationEvidence`. Deliberately NOT sufficient evidence on its own (a model could
+   * call `update_plan_step` with zero real verification, which is the exact original bug §9
+   * fixed) — a criterion only counts as explicitly evidenced when this set contains its id AND
+   * `turnVerificationEvidence.length > 0` (checked at read time in `getVerificationStatus`, not
+   * cached, so ordering between the two kinds of tool call within a turn never matters). This is
+   * turn-level co-occurrence, not a precise causal link between one specific bash call and one
+   * specific criterion — genuinely more precise than the old fully-flat aggregate (the id came
+   * from the model's own structural `satisfies` declaration, not inferred from text), but not
+   * fabricating exact causality either. See docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §18.
+   */
+  private turnLinkedCriteriaIds: Set<string> = new Set();
+  /**
+   * Plan-gate state shared across every `createTools` call within one turn — the turn loop calls
+   * `createTools` fresh on every round (initial + verification-nudge + overflow-recovery retries),
+   * so without a stable object reference each round got its own `planPublished = false` closure,
+   * forcing a redundant `generate_plan` call whenever a nudge asked the model to keep working on
+   * already-planned work. Reset only at the true start of a turn (`processMessage`), not per
+   * round. See docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §15.
+   */
+  private planState: { published: boolean; structured: boolean } = { published: true, structured: false };
   private subagentStatusListeners = new Set<(status: SubagentStatus | null) => void>();
   private sendTelegramFile: ((filePath: string) => Promise<ToolResult>) | null = null;
-  private batchApi = false;
   private sessionStartHookFired = false;
   private recapsEnabled = true;
+  private kernel: AgentKernel | null = null;
+  private contextSummary: AgentContextSummary | null = null;
+  private readonly budget: BudgetLimits;
+  private readonly webResearch: (query: string, signal?: AbortSignal) => Promise<WebSearchResult>;
+  private localCostMicros = 0;
+  private taskCostMicros = 0;
 
   constructor(
     apiKey: string | undefined,
@@ -563,8 +816,12 @@ export class Agent {
     maxToolRounds?: number,
     options: AgentOptions = {},
   ) {
+    const initialMode: AgentMode = "agent";
+    this.modelId = normalizeModelId(model || getCurrentModel(initialMode));
     this.baseURL = baseURL || null;
-    if (apiKey) {
+    if (options.provider) {
+      this.provider = options.provider;
+    } else if (apiKey && baseURL) {
       this.setApiKey(apiKey, baseURL);
     }
     this.bash = new BashTool(process.cwd(), {
@@ -573,17 +830,29 @@ export class Agent {
     });
     this.delegations = new DelegationManager(() => this.bash.getCwd());
 
-    const initialMode: AgentMode = "agent";
-    this.modelId = normalizeModelId(model || getCurrentModel(initialMode));
     this.schedules = new ScheduleManager(
       () => this.bash.getCwd(),
       () => this.modelId,
     );
     this.maxToolRounds = maxToolRounds || MAX_TOOL_ROUNDS;
-    const envMax = Number(process.env.GROK_MAX_TOKENS);
-    this.maxTokens = Number.isFinite(envMax) && envMax > 0 ? envMax : 16_384;
-    this.batchApi = options.batchApi ?? false;
+    const envMax = Number(process.env[MAX_TOKENS_ENV] || process.env.GROK_MAX_TOKENS);
+    this.maxTokensExplicit = Number.isFinite(envMax) && envMax > 0;
+    this.maxTokens = this.maxTokensExplicit ? envMax : 16_384;
     this.recapsEnabled = loadRecapsEnabled();
+    this.reasoningEffortOverride = loadUserSettings().reasoningEffort ?? null;
+    this.budget = options.budget ?? {};
+    this.webResearch =
+      options.webResearch ??
+      (process.env.VITEST !== undefined
+        ? async (query) => ({
+            success: false,
+            query,
+            provider: "unavailable" as const,
+            sources: [],
+            output: "",
+            error: "External web research is disabled in tests.",
+          })
+        : (query, signal) => searchWeb(query, { signal, maxResults: 5 }));
 
     if (options.persistSession !== false) {
       this.sessionStore = new SessionStore(this.bash.getCwd());
@@ -591,14 +860,35 @@ export class Agent {
       this.session = this.sessionStore.openSession(options.session, this.modelId, this.mode, this.bash.getCwd());
       this.mode = this.session.mode;
       const transcript = loadTranscriptState(this.session.id);
-      this.messages = transcript.messages;
+      this.messages = normalizeModelMessages(transcript.messages);
       this.messageSeqs = transcript.seqs;
       this.sessionStore.setModel(this.session.id, this.modelId);
+      this.kernel = this.loadPersistedKernel();
     }
   }
 
   getModel(): string {
     return this.modelId;
+  }
+
+  /** Runtime metadata is resolved through the active adapter, so local models
+   * participate in the same context and capability UI as compatibility models. */
+  getModelInfo(): ModelInfo | undefined {
+    return this.provider?.resolveModelRuntime(this.modelId).modelInfo ?? getModelInfo(this.modelId);
+  }
+
+  getBudgetStatus(): { limits: BudgetLimits; usage: BudgetUsage } {
+    const sessionMicros = this.session ? getSessionTotalCostMicros(this.session.id) : this.localCostMicros;
+    const dayMicros = this.session ? getUsageCostSinceMicros(utcDayStart().toISOString()) : this.localCostMicros;
+    return {
+      limits: { ...this.budget },
+      usage: {
+        requestMicros: 0,
+        taskMicros: this.taskCostMicros,
+        sessionMicros,
+        dayMicros,
+      },
+    };
   }
 
   setModel(model: string): void {
@@ -648,23 +938,177 @@ export class Agent {
     this.planContext = ctx;
   }
 
+  /** Explicit `/effort` override for this session; `null` restores the automatic default. */
+  setReasoningEffort(effort: ReasoningEffort | null): void {
+    this.reasoningEffortOverride = effort;
+  }
+
+  getReasoningEffort(): ReasoningEffort | null {
+    return this.reasoningEffortOverride;
+  }
+
+  /**
+   * The effort level that will actually be sent with the next request for `modelId` (or the
+   * current model if omitted). Precedence: an explicit session-wide `/effort` override when the
+   * model supports it; otherwise the `/models` picker's per-model choice
+   * (`reasoningEffortByModel[modelId]` in settings — re-read live, since it can change mid-session
+   * via `/models`' arrow keys) when the model supports it; otherwise `"high"` by default in agent
+   * mode (coding/agentic work benefits from the model's best reasoning); otherwise the provider's
+   * own silent default (`undefined`, no param sent). Never claims a level the model doesn't
+   * actually support. See docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §14 Phase 2 item 2 —
+   * before this, `reasoningEffortByModel` was written by the UI but read by nothing.
+   */
+  resolveReasoningEffort(modelId: string = this.modelId): ReasoningEffort | undefined {
+    const supported = getSupportedReasoningEfforts(modelId);
+    if (supported.length === 0) return undefined;
+    if (this.reasoningEffortOverride && supported.includes(this.reasoningEffortOverride)) {
+      return this.reasoningEffortOverride;
+    }
+    const perModel = loadUserSettings().reasoningEffortByModel?.[normalizeModelId(modelId)];
+    if (perModel && supported.includes(perModel)) {
+      return perModel;
+    }
+    if (this.mode === "agent") {
+      return supported.includes("high") ? "high" : supported[supported.length - 1];
+    }
+    return undefined;
+  }
+
   setSendTelegramFile(fn: ((filePath: string) => Promise<ToolResult>) | null): void {
     this.sendTelegramFile = fn;
   }
 
   hasApiKey(): boolean {
-    return !!this.apiKey;
+    return !!this.provider;
+  }
+
+  /** Installs a provider-neutral adapter without exposing provider SDK objects. */
+  setProvider(provider: ProviderAdapter, modelId?: string): void {
+    this.provider = provider;
+    if (modelId) this.setModel(modelId);
   }
 
   setApiKey(apiKey: string, baseURL = this.baseURL ?? undefined): void {
-    this.apiKey = apiKey;
-    this.baseURL = baseURL || null;
-    this.provider = createProvider(apiKey, baseURL);
+    const endpoint = baseURL || process.env[BASE_URL_ENV] || process.env.GROK_BASE_URL;
+    if (!endpoint) {
+      throw new Error("Remote provider base URL required. Set SHELRA_BASE_URL or pass --base-url.");
+    }
+    this.baseURL = endpoint;
+    this.provider = createOpenAICompatibleProvider(apiKey, endpoint, this.modelId || getCurrentModel("agent"));
   }
 
   getCwd(): string {
     return this.bash.getCwd();
   }
+
+  getKernelState(): KernelState | null {
+    return this.kernel?.snapshot() ?? null;
+  }
+
+  getContextSummary(): AgentContextSummary | null {
+    if (!this.contextSummary) return null;
+    return {
+      classification: { ...this.contextSummary.classification },
+      files: [...this.contextSummary.files],
+      truncated: this.contextSummary.truncated,
+    };
+  }
+
+  /**
+   * Real state behind the completion gate (docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §9,
+   * §18). Does NOT claim a causal per-criterion pass/fail (which bash call proved which
+   * criterion) — that precision doesn't exist. It DOES honestly distinguish a criterion the model
+   * explicitly linked to a completed step (`linkedCriteriaIds`, via `update_plan_step`'s own
+   * `satisfies` declaration) from one with only turn-level aggregate evidence: a criterion only
+   * counts as explicitly evidenced when its id is in `linkedCriteriaIds` AND `evidenceCount > 0`
+   * (checked by the caller, not cached here, since the two kinds of tool call can happen in
+   * either order within a turn). Everything else stays the same honest aggregate as before.
+   */
+  getVerificationStatus(): {
+    criteria: PlanAcceptanceCriterion[] | null;
+    evidenceCount: number;
+    evidenceSummary: string[];
+    linkedCriteriaIds: string[];
+  } {
+    return {
+      criteria: this.activeAcceptanceCriteria ? [...this.activeAcceptanceCriteria] : null,
+      evidenceCount: this.turnVerificationEvidence.length,
+      evidenceSummary: [...this.turnVerificationEvidence],
+      linkedCriteriaIds: [...this.turnLinkedCriteriaIds],
+    };
+  }
+
+  private loadPersistedKernel(): AgentKernel | null {
+    if (!this.session) return null;
+    try {
+      const record = getLatestObjectiveForSession(this.session.id);
+      if (!record || record.runDir !== null || !isKernelPhase(record.phase)) return null;
+      return AgentKernel.fromSnapshot({
+        taskId: record.id,
+        objective: record.request,
+        phase: record.phase,
+        scope: [],
+        mutations: [],
+        observations: [],
+        attemptCount: 0,
+        verificationPassed: record.phase === "complete",
+        reviewPassed: record.phase === "complete",
+        ...(record.blocker ? { blockedReason: record.blocker } : {}),
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Indexes the chat-turn kernel's state into the same `objectives` table the autonomy
+   * runtime writes into (see `src/autonomy/runtime.ts`'s `indexObjective` and
+   * `docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md` §5-6). This is what makes
+   * `getKernelState()` — previously computed and read by nothing — answerable from outside
+   * the running process: "what is this session doing right now" becomes a query against
+   * `objectives WHERE session_id = ?`, not a guess reconstructed from chat history.
+   */
+  private persistKernelIndex(blockerOverride?: string): void {
+    const kernel = this.kernel;
+    if (!kernel || !this.session || !this.workspace) return;
+    try {
+      const state = kernel.snapshot();
+      upsertObjectiveIndex({
+        id: state.taskId,
+        sessionId: this.session.id,
+        workspaceId: this.workspace.id,
+        request: state.objective,
+        phase: state.phase,
+        // `evaluateCompletion`'s own blockedReason is a generic phase-level message (e.g.
+        // "Host verification has not passed."); a Stop hook's specific reason is more useful
+        // to whoever queries this row, so it takes priority when one triggered the block.
+        blocker: blockerOverride ?? state.blockedReason ?? null,
+        runDir: null,
+      });
+    } catch {
+      // Indexing must never take down a turn.
+    }
+  }
+
+  /** Bound `onCheckpoint` for `createTools` — keeps the storage import out of `grok/tools.ts`. */
+  private onToolCheckpoint = (input: {
+    filePath: string;
+    previousContent: string | null;
+    previousExisted: boolean;
+    reason: "pre-write" | "pre-edit" | "pre-delete";
+  }): void => {
+    if (!this.workspace) return;
+    try {
+      recordCheckpoint({
+        sessionId: this.session?.id ?? null,
+        objectiveId: this.kernel?.snapshot().taskId ?? null,
+        workspaceId: this.workspace.id,
+        ...input,
+      });
+    } catch {
+      // Checkpointing must never block a mutation.
+    }
+  };
 
   async listSchedules(): Promise<StoredSchedule[]> {
     return this.schedules.list();
@@ -715,7 +1159,18 @@ export class Agent {
       return "New session";
     }
 
-    const generated = await genTitle(provider, userMessage);
+    const contextWindow = provider.resolveModelRuntime(this.modelId).modelInfo?.contextWindow;
+    const titlePrompt = truncateTextToTokens(
+      userMessage,
+      contextWindow && Number.isFinite(contextWindow) ? Math.max(256, Math.floor(contextWindow * 0.1)) : 2_048,
+    );
+    this.ensureBudget(
+      this.modelInfoFor(provider.defaultModelId ?? this.modelId),
+      Math.ceil((titlePrompt.length + 600) / 4),
+      60,
+      "request",
+    );
+    const generated = await genTitle(provider, titlePrompt);
     this.recordUsage(generated.usage, "title", generated.modelId);
     if (this.sessionStore && this.session && !this.session.title && generated.title) {
       this.sessionStore.setTitle(this.session.id, generated.title);
@@ -725,7 +1180,8 @@ export class Agent {
   }
 
   getSessionRecap(): string | null {
-    return this.recapsEnabled ? this.session?.recap?.text || null : null;
+    if (!this.recapsEnabled) return null;
+    return normalizeRecap(this.session?.recap?.text) || null;
   }
 
   getRecapsEnabled(): boolean {
@@ -762,6 +1218,13 @@ export class Agent {
     }
     const conversationContext = contextParts.join("\n\n");
 
+    this.ensureBudget(
+      this.modelInfoFor(this.modelId),
+      Math.ceil((conversationContext.length + question.length + 800) / 4),
+      2_048,
+      "request",
+    );
+
     const result = await runSideQuestion(question, this.provider, this.modelId, conversationContext, signal);
     this.recordUsage(result.usage, "other");
     return result;
@@ -796,6 +1259,9 @@ export class Agent {
   }
 
   startNewSession(): SessionSnapshot | null {
+    this.kernel = null;
+    this.contextSummary = null;
+
     if (this.sessionStartHookFired) {
       const endInput: SessionEndHookInput = {
         hook_event_name: "SessionEnd",
@@ -845,7 +1311,18 @@ export class Agent {
       messages: loadTranscript(this.session.id),
       entries: buildChatEntries(this.session.id),
       totalTokens: getSessionTotalTokens(this.session.id),
+      totalCostMicros: getSessionTotalCostMicros(this.session.id),
     };
+  }
+
+  getSessionUsage(): UsageEvent[] {
+    if (!this.session) return [];
+    return listSessionUsage(this.session.id);
+  }
+
+  /** Real foreground/background agent state for workspace presentation. */
+  getDelegations(): Promise<DelegationRun[]> {
+    return this.delegations.list();
   }
 
   onSubagentStatus(listener: (status: SubagentStatus | null) => void): () => void {
@@ -879,6 +1356,9 @@ export class Agent {
       if (!prompt) {
         return;
       }
+
+      const modelId = this.provider.defaultModelId ?? this.modelId;
+      this.ensureBudget(this.modelInfoFor(modelId), Math.ceil((prompt.length + 500) / 4), 120, "request");
 
       const generated = await genRecap(this.provider, prompt, withAbortTimeout(signal, 8_000));
       this.recordUsage(generated.usage, "recap", generated.modelId);
@@ -918,13 +1398,58 @@ export class Agent {
   }
 
   private recordUsage(
-    usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number },
+    usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number; costUsdTicks?: number },
     source: UsageSource = "message",
     model = this.modelId,
   ): void {
     if (!usage) return;
+    const modelInfo = this.modelInfoFor(model);
+    const actualCostMicros =
+      usage.costUsdTicks !== undefined
+        ? Math.max(0, Math.round(usage.costUsdTicks))
+        : estimateModelCostMicros(modelInfo, usage.inputTokens ?? 0, usage.outputTokens ?? 0);
     if (this.session) {
       recordUsageEvent(this.session.id, source, model, usage);
+    } else {
+      this.localCostMicros += actualCostMicros;
+    }
+    if (source === "task") this.taskCostMicros += actualCostMicros;
+  }
+
+  private ensureBudget(
+    modelInfo: ModelInfo | undefined,
+    inputTokens: number,
+    outputTokens: number | undefined,
+    scope: BudgetScope,
+  ): void {
+    if (Object.values(this.budget).every((value) => value === undefined)) return;
+    if (modelInfo?.category === "cloud" && modelInfo.pricingKnown === false) {
+      throw new Error(
+        `Model request blocked by budget: pricing metadata for ${modelInfo.name} is unavailable; refresh the OpenRouter catalog before using a spend limit.`,
+      );
+    }
+    const estimatedMicros = estimateRequestCostMicros(modelInfo, inputTokens, outputTokens);
+    const usage = this.getBudgetStatus().usage;
+    const scopes: BudgetScope[] =
+      scope === "task" ? ["request", "task", "session", "day"] : ["request", "session", "day"];
+    for (const currentScope of scopes) {
+      const check = checkBudget(this.budget, usage, currentScope, estimatedMicros);
+      if (!check.allowed) {
+        throw new Error(
+          `Model request blocked by budget (${currentScope}): ${check.reason ?? "limit reached"} ` +
+            `(estimated ${formatUsdMicros(check.estimatedMicros)} for ${modelInfo?.name ?? "the selected model"}).`,
+        );
+      }
+    }
+  }
+
+  private modelInfoFor(modelId: string): ModelInfo | undefined {
+    const provider = this.provider;
+    if (!provider || typeof provider.resolveModelRuntime !== "function") return undefined;
+    try {
+      return provider.resolveModelRuntime(modelId).modelInfo;
+    } catch {
+      return undefined;
     }
   }
 
@@ -953,219 +1478,6 @@ export class Agent {
     }
   }
 
-  private getBatchClientOptions(signal?: AbortSignal): BatchClientOptions {
-    if (!this.apiKey) {
-      throw new Error("API key required. Add an API key to continue.");
-    }
-
-    return {
-      apiKey: this.apiKey,
-      baseURL: this.baseURL ?? undefined,
-      signal,
-    };
-  }
-
-  private async executeBatchToolCall(
-    tools: ToolSet,
-    toolCall: ToolCall,
-    messages: ModelMessage[],
-    signal?: AbortSignal,
-  ): Promise<{ input: unknown; result: ToolResult }> {
-    const tool = tools[toolCall.function.name];
-    if (!tool || tool.type === "provider" || typeof tool.execute !== "function") {
-      return {
-        input: parseToolArgumentsOrRaw(toolCall.function.arguments),
-        result: {
-          success: false,
-          output: `Tool "${toolCall.function.name}" is unavailable in batch mode.`,
-        },
-      };
-    }
-
-    let parsedInput: unknown;
-    try {
-      parsedInput = toolCall.function.arguments.trim() ? JSON.parse(toolCall.function.arguments) : {};
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        input: toolCall.function.arguments,
-        result: {
-          success: false,
-          output: `Tool "${toolCall.function.name}" received invalid JSON arguments: ${message}`,
-        },
-      };
-    }
-
-    try {
-      const output = await tool.execute(parsedInput as never, {
-        toolCallId: toolCall.id,
-        messages,
-        abortSignal: signal,
-      });
-      return {
-        input: parsedInput,
-        result: toToolResult(output),
-      };
-    } catch (error) {
-      if (signal?.aborted) {
-        throw error;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        input: parsedInput,
-        result: {
-          success: false,
-          output: `Tool "${toolCall.function.name}" failed: ${message}`,
-        },
-      };
-    }
-  }
-
-  private async runTaskRequestBatch(args: {
-    request: TaskRequest;
-    childMessages: ModelMessage[];
-    childSystem: string;
-    childRuntime: ReturnType<typeof resolveModelRuntime>;
-    childTools: ToolSet;
-    maxSteps: number;
-    initialDetail: string;
-    onActivity?: (detail: string) => void;
-    signal?: AbortSignal;
-  }): Promise<ToolResult> {
-    const {
-      request,
-      childMessages,
-      childSystem,
-      childRuntime,
-      childTools,
-      maxSteps,
-      initialDetail,
-      onActivity,
-      signal,
-    } = args;
-
-    if (childRuntime.modelInfo?.responsesOnly) {
-      throw new Error("Batch mode currently supports chat-completions models only.");
-    }
-
-    const batchTools =
-      childRuntime.modelInfo?.supportsClientTools === false ? [] : await toolSetToBatchTools(childTools);
-    const batch = await createBatch({
-      ...this.getBatchClientOptions(signal),
-      name: buildBatchName(`task-${request.agent}`, request.description),
-    });
-
-    const turnMessages: ModelMessage[] = [];
-    const totalUsage: ProcessMessageUsage = {};
-    let assistantText = "";
-    let lastActivity = initialDetail;
-
-    for (let round = 0; round < maxSteps; round++) {
-      const batchRequestId = `task-${Date.now()}-${round + 1}`;
-      await addBatchRequests({
-        ...this.getBatchClientOptions(signal),
-        batchId: batch.batch_id,
-        batchRequests: [
-          {
-            batch_request_id: batchRequestId,
-            batch_request: {
-              chat_get_completion: buildBatchChatCompletionRequest({
-                modelId: childRuntime.modelId,
-                system: childSystem,
-                messages: [...childMessages, ...turnMessages],
-                temperature: request.agent === "explore" ? 0.2 : 0.5,
-                maxOutputTokens:
-                  childRuntime.modelInfo?.supportsMaxOutputTokens === false
-                    ? undefined
-                    : Math.min(this.maxTokens, 8_192),
-                reasoningEffort: childRuntime.providerOptions?.xai.reasoningEffort,
-                tools: batchTools,
-              }),
-            },
-          },
-        ],
-      });
-
-      const result = await pollBatchRequestResult({
-        ...this.getBatchClientOptions(signal),
-        batchId: batch.batch_id,
-        batchRequestId,
-      });
-      const response = getBatchChatCompletion(result);
-      accumulateUsage(totalUsage, getBatchUsage(response));
-
-      const choice = response.choices[0];
-      if (!choice) {
-        throw new Error("Batch response did not contain any choices.");
-      }
-      const content = choice?.message.content ?? "";
-      if (content) {
-        assistantText += content;
-      }
-
-      const requestMessages = [...childMessages, ...turnMessages];
-      const toolCalls = (choice?.message.tool_calls ?? []).map(toLocalToolCall);
-      const assistantMessage = buildAssistantBatchMessage(content, toolCalls);
-      if (assistantMessage) {
-        turnMessages.push(assistantMessage);
-      }
-
-      if (toolCalls.length === 0) {
-        if (hasUsage(totalUsage)) {
-          this.recordUsage(totalUsage, "task", childRuntime.modelId);
-        }
-        const output = assistantText.trim() || `Task completed. Last action: ${lastActivity}`;
-        return {
-          success: true,
-          output,
-          task: {
-            agent: request.agent,
-            description: request.description,
-            summary: firstLine(output),
-            activity: lastActivity,
-          },
-        };
-      }
-
-      const toolParts: ExecutedBatchTool[] = [];
-      for (const toolCall of toolCalls) {
-        const nextActivity = formatSubagentActivity(
-          toolCall.function.name,
-          parseToolArgumentsOrRaw(toolCall.function.arguments),
-        );
-        lastActivity = nextActivity;
-        onActivity?.(nextActivity);
-
-        const executed = await this.executeBatchToolCall(childTools, toolCall, requestMessages, signal);
-        toolParts.push({
-          toolCall,
-          input: executed.input,
-          toolResult: executed.result,
-        });
-      }
-
-      const toolMessage = buildToolBatchMessage(toolParts);
-      if (toolMessage) {
-        turnMessages.push(toolMessage);
-      }
-    }
-
-    if (hasUsage(totalUsage)) {
-      this.recordUsage(totalUsage, "task", childRuntime.modelId);
-    }
-    const output = assistantText.trim() || `Task stopped after ${maxSteps} batch rounds. Last action: ${lastActivity}`;
-    return {
-      success: false,
-      output,
-      task: {
-        agent: request.agent,
-        description: request.description,
-        summary: output,
-        activity: lastActivity,
-      },
-    };
-  }
-
   async runTaskRequest(
     request: TaskRequest,
     onActivity?: (detail: string) => void,
@@ -1175,29 +1487,41 @@ export class Agent {
     const signal = abortSignal;
     const agentKey = String(request.agent);
     const isExplore = agentKey === "explore";
+    const isPlan = agentKey === "plan";
     const isGeneral = agentKey === "general";
     const isVision = agentKey === "vision";
     const isVerify = agentKey === "verify";
+    const isUiVerify = agentKey === "ui-verify";
     const isVerifyDetect = agentKey === "verify-detect";
     const isVerifyManifest = agentKey === "verify-manifest";
     const isComputer = agentKey === "computer";
     const subagents = loadValidSubAgents();
     const custom =
-      !isExplore && !isGeneral && !isVision && !isVerify && !isVerifyDetect && !isVerifyManifest && !isComputer
+      !isExplore &&
+      !isPlan &&
+      !isGeneral &&
+      !isVision &&
+      !isVerify &&
+      !isUiVerify &&
+      !isVerifyDetect &&
+      !isVerifyManifest &&
+      !isComputer
         ? findCustomSubagent(agentKey, subagents)
         : undefined;
 
     if (
       !isExplore &&
+      !isPlan &&
       !isGeneral &&
       !isVision &&
       !isVerify &&
+      !isUiVerify &&
       !isVerifyDetect &&
       !isVerifyManifest &&
       !isComputer &&
       !custom
     ) {
-      const message = `Unknown sub-agent "${agentKey}". Use general, explore, vision, verify, verify-detect, verify-manifest, computer, or a configured name from ~/.grok/user-settings.json.`;
+      const message = `Unknown sub-agent "${agentKey}". Use general, explore, plan, vision, verify, ui-verify, verify-detect, verify-manifest, computer, or a configured name from ~/.shelra/user-settings.json.`;
       return {
         success: false,
         output: message,
@@ -1209,7 +1533,7 @@ export class Agent {
       };
     }
 
-    const childMode: AgentMode = isExplore || isVerifyDetect ? "ask" : "agent";
+    const childMode: AgentMode = isExplore || isPlan || isVerifyDetect ? "ask" : "agent";
     const verifySandboxOverrides: SandboxSettings = isVerify
       ? { allowNet: true, allowedHosts: undefined, allowEphemeralInstall: true, hostBrowserCommandsOnHost: true }
       : {};
@@ -1231,36 +1555,30 @@ export class Agent {
         ? (verifyPreparedSettings ?? { ...this.bash.getSandboxSettings(), ...verifySandboxOverrides })
         : this.bash.getSandboxSettings(),
     });
-    const childBaseTools = createTools(childBash, provider, childMode);
+    const childBaseTools = createTools(childBash, provider.getToolContext(), childMode);
     const initialDetail = isExplore
       ? "Scanning the codebase"
-      : isVerifyDetect
-        ? "Detecting verification recipe"
-        : isVerifyManifest
-          ? "Creating verification manifest"
-          : isVerify
-            ? "Preparing verification pass"
-            : isComputer
-              ? "Preparing computer control pass"
-              : "Planning delegated work";
+      : isPlan
+        ? "Drafting implementation plan"
+        : isVerifyDetect
+          ? "Detecting verification recipe"
+          : isVerifyManifest
+            ? "Creating verification manifest"
+            : isVerify
+              ? "Preparing verification pass"
+              : isUiVerify
+                ? "Starting UI quality pass 1 of 3"
+                : isComputer
+                  ? "Preparing computer control pass"
+                  : "Planning delegated work";
     let assistantText = "";
     let lastActivity = initialDetail;
     let childTools: ToolSet = childBaseTools;
     let closeMcp: (() => Promise<void>) | undefined;
-    const childModelId = normalizeModelId(
-      isVision
-        ? VISION_MODEL
-        : isComputer
-          ? COMPUTER_MODEL
-          : isExplore
-            ? DEFAULT_MODEL
-            : custom
-              ? custom.model
-              : this.modelId,
-    );
+    const childModelId = normalizeModelId(custom?.model || this.modelId);
     const childRuntime = isVision
-      ? { ...resolveModelRuntime(provider, childModelId), model: provider.responses(childModelId) }
-      : resolveModelRuntime(provider, childModelId);
+      ? provider.resolveModelRuntime(childModelId, { preferResponses: true })
+      : provider.resolveModelRuntime(childModelId);
     if (isComputer && childRuntime.modelInfo?.supportsClientTools === false) {
       return {
         success: false,
@@ -1303,54 +1621,49 @@ export class Agent {
           ? `${request.prompt}\n\nPrepared verify recipe JSON (use this as the primary execution recipe and keep .grok/environment.json aligned with it if present):\n${JSON.stringify(verifyPreparedRecipe, null, 2)}`
           : request.prompt;
 
-      const childMessages = isVision
-        ? await buildVisionUserMessages(request.prompt, childBash.getCwd(), signal)
-        : [{ role: "user" as const, content: childPrompt }];
+      const childMessages =
+        isVision && childRuntime.modelInfo?.supportsVision !== false
+          ? await buildVisionUserMessages(request.prompt, childBash.getCwd(), signal)
+          : [{ role: "user" as const, content: childPrompt }];
 
-      if (this.batchApi) {
-        return await this.runTaskRequestBatch({
-          request,
-          childMessages,
-          childSystem,
-          childRuntime,
-          childTools,
-          maxSteps: Math.min(this.maxToolRounds, isExplore ? 60 : 120),
-          initialDetail,
-          onActivity,
-          signal,
-        });
-      }
-
-      const result = streamText({
-        model: childRuntime.model,
+      const childMaxOutputTokens =
+        childRuntime.modelInfo?.supportsMaxOutputTokens === false
+          ? undefined
+          : Math.min(this.effectiveMaxOutputTokens(childRuntime.modelInfo?.contextWindow), 8_192);
+      const childReasoningEffort = this.resolveReasoningEffort(childRuntime.modelId);
+      this.ensureBudget(
+        childRuntime.modelInfo,
+        estimateConversationTokens(childSystem, childMessages),
+        childMaxOutputTokens,
+        "task",
+      );
+      const childStream = provider.stream({
+        modelId: childRuntime.modelId,
         system: childSystem,
         messages: childMessages,
         tools: childRuntime.modelInfo?.supportsClientTools === false ? {} : childTools,
-        stopWhen: stepCountIs(Math.min(this.maxToolRounds, isExplore ? 60 : 120)),
-        maxRetries: 0,
-        abortSignal: signal,
-        temperature: isExplore ? 0.2 : 0.5,
-        ...(childRuntime.modelInfo?.supportsMaxOutputTokens === false
-          ? {}
-          : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
-        ...(childRuntime.providerOptions ? { providerOptions: childRuntime.providerOptions } : {}),
-        onFinish: ({ totalUsage }) => {
-          this.recordUsage(totalUsage, "task", childRuntime.modelId);
+        maxSteps: Math.min(this.maxToolRounds, isExplore || isPlan ? 60 : 120),
+        signal,
+        temperature: isExplore || isPlan ? 0.2 : 0.5,
+        ...(childMaxOutputTokens === undefined ? {} : { maxOutputTokens: childMaxOutputTokens }),
+        ...(childReasoningEffort === undefined ? {} : { reasoningEffort: childReasoningEffort }),
+        onFinish: (usage) => {
+          this.recordUsage(usage, "task", childRuntime.modelId);
         },
       });
 
-      for await (const part of result.fullStream) {
+      for await (const part of childStream.events) {
         if (signal?.aborted) {
           break;
         }
 
         if (part.type === "text-delta") {
           assistantText += part.text;
-          continue;
-        }
-
-        if (part.type === "tool-call") {
-          lastActivity = formatSubagentActivity(part.toolName, part.input);
+        } else if (part.type === "tool-call") {
+          lastActivity = formatSubagentActivity(
+            part.toolCall.function.name,
+            parseToolArgumentsOrRaw(part.toolCall.function.arguments),
+          );
           onActivity?.(lastActivity);
         }
       }
@@ -1359,7 +1672,7 @@ export class Agent {
         return { success: false, output: "[Cancelled]" };
       }
 
-      await result.response;
+      await childStream.response;
 
       const output = assistantText.trim() || `Task completed. Last action: ${lastActivity}`;
       return {
@@ -1454,7 +1767,6 @@ export class Agent {
         sandboxSettings: this.bash.getSandboxSettings(),
         maxToolRounds: this.maxToolRounds,
         maxTokens: this.maxTokens,
-        batchApi: this.batchApi,
       });
     } catch (err: unknown) {
       if (abortSignal?.aborted) throw err;
@@ -1521,20 +1833,66 @@ export class Agent {
     }
   }
 
-  private getCompactionSettings(): CompactionSettings {
-    return {
-      reserveTokens: Math.max(this.maxTokens, DEFAULT_RESERVE_TOKENS),
-      keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
-    };
+  /**
+   * The compaction budget follows the model's real context window. Deriving it
+   * from a fixed 16K reserve made the kept-recent budget larger than the whole
+   * usable window on a small local model, so compaction could never satisfy its
+   * own trigger.
+   */
+  private getCompactionSettings(contextWindow?: number): CompactionSettings {
+    return compactionSettingsForWindow(contextWindow);
   }
 
+  /**
+   * Output reservation scaled to the window. A user-set SHELRA_MAX_TOKENS stays
+   * authoritative; otherwise a small window never gets asked for an output
+   * budget that cannot fit alongside its own prompt.
+   */
+  private effectiveMaxOutputTokens(contextWindow?: number): number {
+    if (this.maxTokensExplicit) return this.maxTokens;
+    if (contextWindow === undefined || !Number.isFinite(contextWindow) || contextWindow <= 0) return this.maxTokens;
+    return Math.min(this.maxTokens, Math.max(1_024, Math.round(contextWindow * 0.25)));
+  }
+
+  /**
+   * Compacts, then re-checks. A single cut can land above the trigger when the
+   * kept suffix is itself oversized, so the budget is tightened and re-applied a
+   * bounded number of times. The loop stops as soon as a pass cannot shrink the
+   * budget further, so it can never spin.
+   */
   private async compactForContext(
-    provider: XaiProvider,
+    provider: ProviderAdapter,
     system: string,
     contextWindow: number,
     signal: AbortSignal,
-    settings = this.getCompactionSettings(),
+    settings = this.getCompactionSettings(contextWindow),
     force = false,
+  ): Promise<boolean> {
+    let active = settings;
+    let compacted = false;
+
+    for (let pass = 0; pass < MAX_COMPACTION_PASSES; pass++) {
+      if (!(await this.compactOnce(provider, system, contextWindow, signal, active, force && pass === 0))) break;
+      compacted = true;
+
+      const remaining = estimateConversationTokens(system, this.messages);
+      if (!shouldCompactContext(remaining, contextWindow, active)) break;
+
+      const relaxed = relaxCompactionSettings(active);
+      if (relaxed.keepRecentTokens >= active.keepRecentTokens) break;
+      active = relaxed;
+    }
+
+    return compacted;
+  }
+
+  private async compactOnce(
+    provider: ProviderAdapter,
+    system: string,
+    contextWindow: number,
+    signal: AbortSignal,
+    settings: CompactionSettings,
+    force: boolean,
   ): Promise<boolean> {
     if (!this.session) return false;
 
@@ -1555,7 +1913,8 @@ export class Agent {
 
     const keptSeqs = this.messageSeqs.slice(preparation.firstKeptIndex);
     const firstKeptSeq = keptSeqs.find((seq): seq is number => seq !== null) ?? getNextMessageSequence(this.session.id);
-    const summary = await generateCompactionSummary(provider, this.modelId, preparation, undefined, signal);
+    const rawSummary = await generateCompactionSummary(provider, this.modelId, preparation, undefined, signal);
+    const summary = appendActiveCriteriaBlock(rawSummary, this.activeAcceptanceCriteria);
 
     appendCompaction(this.session.id, firstKeptSeq, summary, preparation.tokensBefore);
     this.messages = [createCompactionSummaryMessage(summary), ...preparation.keptMessages];
@@ -1572,243 +1931,98 @@ export class Agent {
     return true;
   }
 
-  private async *processMessageBatchTurn(args: {
-    userModelMessage: ModelMessage;
-    observer?: ProcessMessageObserver;
-    provider: XaiProvider;
-    subagents: CustomSubagentConfig[];
-    system: string;
-    runtime: ReturnType<typeof resolveModelRuntime>;
-    modelInfo: ReturnType<typeof getModelInfo>;
-    signal: AbortSignal;
-  }): AsyncGenerator<StreamChunk, void, unknown> {
-    const { userModelMessage, observer, provider, subagents, system, runtime, modelInfo, signal } = args;
-    let attemptedOverflowRecovery = false;
+  /**
+   * Advances the overflow-recovery ladder one step and reports whether the next
+   * retry can actually be smaller than the last. Returning `false` means the
+   * conversation cannot shrink any further, so the caller must surface the
+   * error instead of retrying.
+   */
+  private escalateOverflowRecovery(level: number): boolean {
+    if (level > MAX_OVERFLOW_RECOVERY_LEVEL) return false;
+    // Level 1 changes nothing structurally: the retry re-enters compaction with
+    // a relaxed, forced budget.
+    if (level === 1) return true;
+    return this.trimToRecentTurns(level === 2 ? OVERFLOW_RECOVERY_KEPT_TURNS : 1);
+  }
 
-    while (true) {
-      let closeMcp: (() => Promise<void>) | undefined;
-      const turnMessages: ModelMessage[] = [];
-      const totalUsage: ProcessMessageUsage = {};
-
-      try {
-        const settings = attemptedOverflowRecovery
-          ? relaxCompactionSettings(this.getCompactionSettings())
-          : this.getCompactionSettings();
-        if (modelInfo) {
-          await this.compactForContext(
-            provider,
-            system,
-            modelInfo.contextWindow,
-            signal,
-            settings,
-            attemptedOverflowRecovery,
-          );
-        }
-
-        if (runtime.modelInfo?.responsesOnly) {
-          throw new Error("Batch mode currently supports chat-completions models only.");
-        }
-
-        const baseTools = createTools(this.bash, provider, this.mode, {
-          runTask: (request, abortSignal) => this.runTask(request, combineAbortSignals(signal, abortSignal)),
-          runDelegation: (request, abortSignal) =>
-            this.runDelegation(request, combineAbortSignals(signal, abortSignal)),
-          readDelegation: (id) => this.readDelegation(id),
-          listDelegations: () => this.listDelegations(),
-          scheduleManager: this.schedules,
-          subagents,
-          sendTelegramFile: this.sendTelegramFile ?? undefined,
-          sessionId: this.session?.id ?? undefined,
-        });
-        let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : baseTools;
-        if (this.mode === "agent" && runtime.modelInfo?.supportsClientTools !== false) {
-          const mcpBundle = await buildMcpToolSet(loadMcpServers());
-          closeMcp = mcpBundle.close;
-          tools = { ...baseTools, ...mcpBundle.tools };
-          if (mcpBundle.errors.length > 0) {
-            yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
-          }
-        }
-
-        const batchTools = runtime.modelInfo?.supportsClientTools === false ? [] : await toolSetToBatchTools(tools);
-        const batch = await createBatch({
-          ...this.getBatchClientOptions(signal),
-          name: buildBatchName("session", this.getSessionId() || runtime.modelId),
-        });
-
-        for (let round = 0; round < this.maxToolRounds; round++) {
-          const stepNumber = round + 1;
-          notifyObserver(observer?.onStepStart, {
-            stepNumber,
-            timestamp: Date.now(),
-          });
-
-          const batchRequestId = `turn-${Date.now()}-${stepNumber}`;
-          await addBatchRequests({
-            ...this.getBatchClientOptions(signal),
-            batchId: batch.batch_id,
-            batchRequests: [
-              {
-                batch_request_id: batchRequestId,
-                batch_request: {
-                  chat_get_completion: buildBatchChatCompletionRequest({
-                    modelId: runtime.modelId,
-                    system,
-                    messages: [...this.messages, ...turnMessages],
-                    temperature: 0.7,
-                    maxOutputTokens: runtime.modelInfo?.supportsMaxOutputTokens === false ? undefined : this.maxTokens,
-                    reasoningEffort: runtime.providerOptions?.xai.reasoningEffort,
-                    tools: batchTools,
-                  }),
-                },
-              },
-            ],
-          });
-
-          const result = await pollBatchRequestResult({
-            ...this.getBatchClientOptions(signal),
-            batchId: batch.batch_id,
-            batchRequestId,
-          });
-          const response = getBatchChatCompletion(result);
-          const choice = response.choices[0];
-          if (!choice) {
-            throw new Error("Batch response did not contain any choices.");
-          }
-
-          const usage = getBatchUsage(response);
-          accumulateUsage(totalUsage, usage);
-          const finishReason = getBatchFinishReason(choice.finish_reason);
-
-          const content = choice.message.content ?? "";
-          if (content) {
-            yield { type: "content", content };
-          }
-
-          const requestMessages = [...this.messages, ...turnMessages];
-          const toolCalls = (choice.message.tool_calls ?? []).map(toLocalToolCall);
-          const assistantMessage = buildAssistantBatchMessage(content, toolCalls);
-          if (assistantMessage) {
-            turnMessages.push(assistantMessage);
-          }
-
-          if (toolCalls.length === 0) {
-            notifyObserver(observer?.onStepFinish, {
-              stepNumber,
-              timestamp: Date.now(),
-              finishReason,
-              usage,
-            });
-            if (hasUsage(totalUsage)) {
-              this.recordUsage(totalUsage, "message", runtime.modelId);
-            }
-            this.appendCompletedTurn(userModelMessage, turnMessages);
-            await this.refreshSessionRecap(signal);
-            yield { type: "done" };
-            return;
-          }
-
-          yield { type: "tool_calls", toolCalls };
-
-          const toolParts: ExecutedBatchTool[] = [];
-          for (const toolCall of toolCalls) {
-            notifyObserver(observer?.onToolStart, {
-              toolCall,
-              timestamp: Date.now(),
-            });
-
-            const executed = await this.executeBatchToolCall(tools, toolCall, requestMessages, signal);
-            notifyObserver(observer?.onToolFinish, {
-              toolCall,
-              toolResult: executed.result,
-              timestamp: Date.now(),
-            });
-            yield { type: "tool_result", toolCall, toolResult: executed.result };
-            toolParts.push({
-              toolCall,
-              input: executed.input,
-              toolResult: executed.result,
-            });
-          }
-
-          const toolMessage = buildToolBatchMessage(toolParts);
-          if (toolMessage) {
-            turnMessages.push(toolMessage);
-          }
-          notifyObserver(observer?.onStepFinish, {
-            stepNumber,
-            timestamp: Date.now(),
-            finishReason,
-            usage,
-          });
-        }
-
-        const message = `Error: Reached max tool rounds (${this.maxToolRounds}) in batch mode.`;
-        notifyObserver(observer?.onError, {
-          message,
-          timestamp: Date.now(),
-        });
-        if (hasUsage(totalUsage)) {
-          this.recordUsage(totalUsage, "message", runtime.modelId);
-        }
-        this.appendCompletedTurn(userModelMessage, turnMessages);
-        yield { type: "error", content: message };
-        yield { type: "done" };
-        return;
-      } catch (err: unknown) {
-        if (signal.aborted) {
-          this.discardAbortedTurn(userModelMessage);
-          yield { type: "content", content: "\n\n[Cancelled]" };
-          yield { type: "done" };
-          return;
-        }
-
-        if (!attemptedOverflowRecovery && turnMessages.length === 0 && modelInfo && isContextLimitError(err)) {
-          attemptedOverflowRecovery = true;
-          continue;
-        }
-
-        const authError = isAuthenticationError(err);
-        const friendly = humanizeApiError(err);
-        notifyObserver(observer?.onError, {
-          message: friendly,
-          timestamp: Date.now(),
-        });
-        if (hasUsage(totalUsage)) {
-          this.recordUsage(totalUsage, "message", runtime.modelId);
-        }
-        this.appendCompletedTurn(userModelMessage, turnMessages);
-        yield {
-          type: "error",
-          content: friendly,
-          isAuthError: authError,
-        };
-        yield { type: "done" };
-        return;
-      } finally {
-        await closeMcp?.().catch(() => {});
-      }
+  /**
+   * Emergency in-memory trim: keeps the leading checkpoint summary plus the last
+   * `turnsToKeep` user-started turns. Cuts land on user-message boundaries so a
+   * tool call never loses its result. The persisted transcript is intentionally
+   * left alone — this is a last-resort measure to get one turn through, not a
+   * durable checkpoint.
+   */
+  private trimToRecentTurns(turnsToKeep: number): boolean {
+    const start = isCompactionSummaryMessage(this.messages[0]) ? 1 : 0;
+    const turnStarts: number[] = [];
+    for (let index = start; index < this.messages.length; index++) {
+      if (this.messages[index]?.role === "user") turnStarts.push(index);
     }
+    if (turnStarts.length === 0) return false;
+
+    const cutIndex = turnStarts[Math.max(0, turnStarts.length - Math.max(1, turnsToKeep))];
+    if (cutIndex === undefined || cutIndex <= start) return false;
+
+    this.messages = [...this.messages.slice(0, start), ...this.messages.slice(cutIndex)];
+    this.messageSeqs = [...this.messageSeqs.slice(0, start), ...this.messageSeqs.slice(cutIndex)];
+    return true;
+  }
+
+  /**
+   * Compaction can remove old turns, but it cannot shrink one user message that
+   * is larger than the remaining context by itself. Build a request-only copy
+   * with that message bounded; the original stays in the transcript so the
+   * session still shows exactly what the user submitted.
+   */
+  private messagesForContext(
+    userModelMessage: ModelMessage,
+    system: string,
+    contextWindow: number,
+    settings: CompactionSettings,
+    conservative = false,
+  ): ModelMessage[] {
+    const userIndex = this.messages.lastIndexOf(userModelMessage);
+    if (userIndex < 0) return this.messages;
+
+    const totalTokens = estimateConversationTokens(system, this.messages);
+    if (!conservative && !shouldCompactContext(totalTokens, contextWindow, settings)) return this.messages;
+
+    const history = [...this.messages.slice(0, userIndex), ...this.messages.slice(userIndex + 1)];
+    const historyTokens = estimateConversationTokens(system, history);
+    // A retry uses no tools and a smaller output budget. Keep its input well
+    // below the advertised window even when the provider's token accounting is
+    // stricter than our character estimate.
+    const inputBudget = conservative ? Math.floor(contextWindow * 0.6) : contextWindow - settings.reserveTokens;
+    const maxUserTokens = Math.max(
+      1,
+      Math.floor(inputBudget / CONTEXT_ESTIMATE_MARGIN) - budgetedContextTokens(historyTokens),
+    );
+    const boundedUserMessage = truncateUserMessageToTokens(userModelMessage, maxUserTokens);
+    if (boundedUserMessage === userModelMessage) return this.messages;
+
+    return this.messages.map((message, index) => (index === userIndex ? boundedUserMessage : message));
   }
 
   private appendCompletedTurn(userMessage: ModelMessage, newMessages: ModelMessage[]): void {
     if (newMessages.length === 0) return;
+
+    const normalizedMessages = normalizeModelMessages(newMessages);
 
     const userIndex = this.messages.lastIndexOf(userMessage);
     if (!this.sessionStore || !this.session) {
       if (userIndex >= 0 && this.messageSeqs[userIndex] == null) {
         this.messageSeqs[userIndex] = null;
       }
-      this.messages.push(...newMessages);
-      this.messageSeqs.push(...newMessages.map(() => null));
+      this.messages.push(...normalizedMessages);
+      this.messageSeqs.push(...normalizedMessages.map(() => null));
       return;
     }
 
-    const insertedSeqs = appendMessages(this.session.id, [userMessage, ...newMessages]);
+    const insertedSeqs = appendMessages(this.session.id, [userMessage, ...normalizedMessages]);
     if (userIndex >= 0) {
       this.messageSeqs[userIndex] = insertedSeqs[0] ?? this.messageSeqs[userIndex];
     }
-    this.messages.push(...newMessages);
+    this.messages.push(...normalizedMessages);
     this.messageSeqs.push(...insertedSeqs.slice(1));
     this.sessionStore.touchSession(this.session.id, this.bash.getCwd());
     this.session = this.sessionStore.getRequiredSession(this.session.id);
@@ -1827,6 +2041,8 @@ export class Agent {
   ): AsyncGenerator<StreamChunk, void, unknown> {
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
+    this.kernel = null;
+    this.contextSummary = null;
     this.emitSubagentStatus(null);
 
     if (!this.sessionStartHookFired) {
@@ -1850,46 +2066,144 @@ export class Agent {
     await this.fireHook(promptInput, signal).catch(() => {});
 
     await this.consumeBackgroundNotifications();
-    const userModelMessages = await buildVisionUserMessages(userMessage, this.bash.getCwd(), signal);
+    const provider = this.requireProvider();
+    const runtime = provider.resolveModelRuntime(this.modelId);
+    // Create the host-owned lifecycle before context compilation and research so
+    // observers can answer what is happening during the earliest real phase.
+    this.kernel = new AgentKernel(userMessage);
+    // activeAcceptanceCriteria/activePlanSteps are deliberately NOT reset here — session-scoped
+    // (§14 Phase 2 item 1), so a plan published in an earlier turn still governs this turn's
+    // mutations.
+    this.turnVerificationEvidence = [];
+    this.turnLinkedCriteriaIds = new Set();
+    this.planState = { published: this.mode !== "agent", structured: false };
+    this.persistKernelIndex();
+    this.kernel.transition("discover");
+    this.persistKernelIndex();
+    const userModelMessages =
+      runtime.modelInfo?.supportsVision === false
+        ? [{ role: "user", content: userMessage } satisfies ModelMessage]
+        : await buildVisionUserMessages(userMessage, this.bash.getCwd(), signal);
     const userModelMessage = userModelMessages[0] ?? ({ role: "user", content: userMessage } satisfies ModelMessage);
     this.messages.push(userModelMessage);
     this.messageSeqs.push(null);
 
-    const provider = this.requireProvider();
     const subagents = loadValidSubAgents();
+    const contextPacket = compileContextPacket(this.bash.getCwd(), userMessage);
+    this.contextSummary = {
+      classification: { ...contextPacket.classification },
+      files: [...contextPacket.files],
+      truncated: contextPacket.truncated,
+    };
+    const webResearch = await this.webResearch(buildResearchQuery(userMessage), signal);
+    observer?.onResearch?.({
+      query: webResearch.query,
+      provider: webResearch.provider,
+      success: webResearch.success,
+      sourceCount: webResearch.sources.length,
+      sources: webResearch.sources.map(({ title, url }) => ({ title, url })),
+      timestamp: Date.now(),
+    });
+    const researchAppendix = formatResearchForPrompt(webResearch);
+    this.kernel.setScope(contextPacket.files);
+    this.kernel.transition("analyze");
+    this.kernel.transition("plan");
+    this.persistKernelIndex();
     const system = applyModelConstraints(
-      buildSystemPrompt(
-        this.bash.getCwd(),
-        this.mode,
-        this.bash.getSandboxMode(),
-        this.planContext,
-        subagents,
-        this.bash.getSandboxSettings(),
-      ),
+      [
+        contextPacket.classification.toolPolicy === "none"
+          ? buildConversationSystemPrompt(this.bash.getCwd())
+          : contextPacket.classification.toolPolicy === "read"
+            ? contextPacket.classification.hostEvidenceOnly
+              ? buildRepositoryEvidencePrompt(this.bash.getCwd())
+              : buildRepositorySystemPrompt(this.bash.getCwd())
+            : buildSystemPrompt(
+                this.bash.getCwd(),
+                this.mode,
+                this.bash.getSandboxMode(),
+                this.planContext,
+                subagents,
+                this.bash.getSandboxSettings(),
+              ),
+        contextPacket.promptAppendix,
+        researchAppendix,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
       this.modelId,
     );
-    const runtime = resolveModelRuntime(provider, this.modelId);
     const modelInfo = runtime.modelInfo;
     this.planContext = null;
-    let attemptedOverflowRecovery = false;
+    let overflowRecoveryLevel = 0;
+    let verificationRetries = 0;
 
-    if (this.batchApi) {
+    // Broad reviews already have bounded host evidence. Running them through
+    // the full tool loop makes small local models emit pseudo-tool JSON or
+    // spend multiple rounds rediscovering the same files. A single direct
+    // generation is deterministic, cheaper, and still records the turn.
+    if (contextPacket.classification.hostEvidenceOnly) {
       try {
-        yield* this.processMessageBatchTurn({
-          userModelMessage,
-          observer,
-          provider,
-          subagents,
-          system,
-          runtime,
-          modelInfo,
-          signal,
-        });
-      } finally {
-        if (this.abortController?.signal === signal) {
-          this.abortController = null;
+        const settings = this.getCompactionSettings(modelInfo?.contextWindow);
+        if (modelInfo) {
+          await this.compactForContext(provider, system, modelInfo.contextWindow, signal, settings);
         }
+        const requestMessages = modelInfo
+          ? this.messagesForContext(userModelMessage, system, modelInfo.contextWindow, settings)
+          : [userModelMessage];
+        const requestUserMessage = requestMessages[requestMessages.length - 1];
+        const requestPrompt =
+          requestUserMessage && typeof requestUserMessage.content === "string"
+            ? requestUserMessage.content
+            : userMessage;
+        const directMaxOutputTokens = maxOutputTokensForTurn(
+          runtime,
+          "repository",
+          this.effectiveMaxOutputTokens(modelInfo?.contextWindow),
+        );
+        this.ensureBudget(
+          modelInfo,
+          estimateConversationTokens(system, requestMessages),
+          directMaxOutputTokens,
+          "request",
+        );
+        let generated: Awaited<ReturnType<ProviderAdapter["generateText"]>>;
+        try {
+          generated = await provider.generateText({
+            modelId: runtime.modelId,
+            system,
+            prompt: requestPrompt,
+            maxOutputTokens: directMaxOutputTokens,
+            temperature: 0.3,
+            signal,
+          });
+        } catch (error) {
+          if (!modelInfo || !isContextLimitError(error)) throw error;
+          this.ensureBudget(modelInfo, 128, 128, "request");
+          generated = await provider.generateText({
+            modelId: runtime.modelId,
+            system: buildConversationSystemPrompt(this.bash.getCwd()),
+            prompt: truncateTextToTokens(requestPrompt, 128),
+            maxOutputTokens: 128,
+            temperature: 0.3,
+            signal,
+          });
+        }
+        if (generated.text.trim()) {
+          this.recordUsage(generated.usage, "message", generated.modelId);
+          this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: generated.text }]);
+          this.kernel?.transition("reflect");
+          this.kernel?.evaluateCompletion({ verificationPassed: true, reviewPassed: true });
+          this.persistKernelIndex();
+          yield { type: "content", content: generated.text };
+        }
+      } catch (error) {
+        const friendly = humanizeApiError(error);
+        this.kernel?.recordObservation(`provider: ${friendly}`);
+        this.kernel?.evaluateCompletion({ verificationPassed: false, reviewPassed: false });
+        this.persistKernelIndex(friendly);
+        yield { type: "error", content: friendly, isAuthError: isAuthenticationError(error) };
       }
+      yield { type: "done" };
       return;
     }
 
@@ -1904,21 +2218,30 @@ export class Agent {
         const activeToolCalls: ToolCall[] = [];
 
         try {
-          const settings = attemptedOverflowRecovery
-            ? relaxCompactionSettings(this.getCompactionSettings())
-            : this.getCompactionSettings();
+          const baseSettings = this.getCompactionSettings(modelInfo?.contextWindow);
+          const settings = overflowRecoveryLevel > 0 ? relaxCompactionSettings(baseSettings) : baseSettings;
+          const requestSystem = overflowRecoveryLevel > 0 ? buildConversationSystemPrompt(this.bash.getCwd()) : system;
           if (modelInfo) {
             await this.compactForContext(
               provider,
-              system,
+              requestSystem,
               modelInfo.contextWindow,
               signal,
               settings,
-              attemptedOverflowRecovery,
+              overflowRecoveryLevel > 0,
             );
           }
+          const requestMessages = modelInfo
+            ? this.messagesForContext(
+                userModelMessage,
+                requestSystem,
+                modelInfo.contextWindow,
+                settings,
+                overflowRecoveryLevel > 0,
+              )
+            : this.messages;
 
-          const baseTools = createTools(this.bash, provider, this.mode, {
+          const baseTools = createTools(this.bash, provider.getToolContext(), this.mode, {
             runTask: (request, abortSignal) => this.runTask(request, combineAbortSignals(signal, abortSignal)),
             runDelegation: (request, abortSignal) =>
               this.runDelegation(request, combineAbortSignals(signal, abortSignal)),
@@ -1928,9 +2251,20 @@ export class Agent {
             subagents,
             sendTelegramFile: this.sendTelegramFile ?? undefined,
             sessionId: this.session?.id ?? undefined,
+            onCheckpoint: this.onToolCheckpoint,
+            planState: this.planState,
           });
-          let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : baseTools;
-          if (this.mode === "agent" && runtime.modelInfo?.supportsClientTools !== false) {
+          let tools: ToolSet =
+            contextPacket.classification.toolPolicy === "none" || runtime.modelInfo?.supportsClientTools === false
+              ? {}
+              : contextPacket.classification.toolPolicy === "read" && !contextPacket.classification.hostEvidenceOnly
+                ? readOnlyToolSet(baseTools)
+                : baseTools;
+          if (
+            this.mode === "agent" &&
+            contextPacket.classification.toolPolicy === "mutate" &&
+            runtime.modelInfo?.supportsClientTools !== false
+          ) {
             const mcpBundle = await buildMcpToolSet(loadMcpServers());
             closeMcp = mcpBundle.close;
             tools = { ...baseTools, ...mcpBundle.tools };
@@ -1938,41 +2272,61 @@ export class Agent {
               yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
             }
           }
+          if (overflowRecoveryLevel > 0) tools = {};
 
-          const result = streamText({
-            model: runtime.model,
-            system,
-            messages: this.messages,
+          const maxOutputTokens =
+            runtime.modelInfo?.supportsMaxOutputTokens === false
+              ? undefined
+              : Math.min(
+                  maxOutputTokensForTurn(
+                    runtime,
+                    contextPacket.classification.kind,
+                    this.effectiveMaxOutputTokens(modelInfo?.contextWindow),
+                  ),
+                  overflowRecoveryLevel > 0 ? 512 : Number.POSITIVE_INFINITY,
+                );
+          this.ensureBudget(
+            modelInfo,
+            estimateConversationTokens(requestSystem, requestMessages),
+            maxOutputTokens,
+            "request",
+          );
+
+          const turnReasoningEffort = this.resolveReasoningEffort(runtime.modelId);
+          const stream = provider.stream({
+            modelId: runtime.modelId,
+            system: requestSystem,
+            messages: requestMessages,
             tools,
-            stopWhen: stepCountIs(this.maxToolRounds),
-            maxRetries: 0,
-            abortSignal: signal,
+            maxSteps: this.maxToolRounds,
+            signal,
             temperature: 0.7,
-            ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: this.maxTokens }),
-            ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-            experimental_onStepStart: (event: unknown) => {
-              stepNumber = getStepNumber(event, stepNumber + 1);
+            ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+            ...(turnReasoningEffort === undefined ? {} : { reasoningEffort: turnReasoningEffort }),
+            onStepStart: (currentStep) => {
+              stepNumber = currentStep;
               notifyObserver(observer?.onStepStart, {
                 stepNumber,
                 timestamp: Date.now(),
               });
             },
-            onStepFinish: (event: unknown) => {
-              const currentStep = getStepNumber(event, Math.max(stepNumber, 0));
-              stepNumber = Math.max(stepNumber, currentStep);
+            onStepFinish: (event) => {
+              const currentStep = Math.max(stepNumber, event.stepNumber);
+              stepNumber = currentStep;
               notifyObserver(observer?.onStepFinish, {
                 stepNumber: currentStep,
                 timestamp: Date.now(),
-                finishReason: getFinishReason(event),
-                usage: getUsage(event),
+                finishReason: getBatchFinishReason(event.finishReason),
+                usage: event.usage,
               });
             },
-            onFinish: ({ totalUsage }) => {
-              this.recordUsage(totalUsage, "message", runtime.modelId);
+            onFinish: (usage) => {
+              this.recordUsage(usage, "message", runtime.modelId);
             },
           });
+          this.kernel?.transition("act");
 
-          for await (const part of result.fullStream) {
+          for await (const part of stream.events) {
             if (signal.aborted) {
               yield { type: "content", content: "\n\n[Cancelled]" };
               break;
@@ -1997,7 +2351,7 @@ export class Agent {
                 break;
 
               case "tool-call": {
-                const tc = toToolCall(part);
+                const tc = part.toolCall;
                 activeToolCalls.push(tc);
                 notifyObserver(observer?.onToolStart, {
                   toolCall: tc,
@@ -2008,12 +2362,23 @@ export class Agent {
               }
 
               case "tool-result": {
-                const tc: ToolCall = {
-                  id: part.toolCallId,
-                  type: "function",
-                  function: { name: part.toolName, arguments: JSON.stringify(part.input ?? {}) },
-                };
+                const tc = part.toolCall;
                 const tr = toToolResult(part.output);
+                if (tr.success && tr.diff?.filePath) this.kernel?.recordMutation(tr.diff.filePath);
+                else this.kernel?.recordObservation(`${tc.function.name}: ${tr.output}`);
+                if (tr.success && tr.plan?.acceptanceCriteria?.length) {
+                  this.activeAcceptanceCriteria = tr.plan.acceptanceCriteria;
+                  this.activePlanSteps = tr.plan.steps;
+                }
+                if (tr.success && tr.planUpdate?.status === "complete") {
+                  for (const id of this.activePlanSteps?.[tr.planUpdate.index]?.satisfies ?? []) {
+                    this.turnLinkedCriteriaIds.add(id);
+                  }
+                }
+                const evidence = tr.success
+                  ? describeVerificationEvidence(tc.function.name, tc.function.arguments)
+                  : null;
+                if (evidence) this.turnVerificationEvidence.push(evidence);
                 notifyObserver(observer?.onToolFinish, {
                   toolCall: tc,
                   toolResult: tr,
@@ -2024,25 +2389,21 @@ export class Agent {
               }
 
               case "tool-approval-request": {
-                const approvalPart = part as unknown as {
-                  approvalId: string;
-                  toolCall: { toolCallId: string; toolName: string; input: unknown };
-                };
-                const toolCallId = approvalPart.toolCall?.toolCallId ?? "";
+                const toolCallId = part.toolCall.id;
                 const pendingTc = activeToolCalls.find((tc) => tc.id === toolCallId);
                 const tcForChunk = pendingTc ?? {
                   id: toolCallId,
                   type: "function" as const,
                   function: {
-                    name: approvalPart.toolCall?.toolName ?? "paid_request",
-                    arguments: JSON.stringify(approvalPart.toolCall?.input ?? {}),
+                    name: part.toolCall.function.name,
+                    arguments: part.toolCall.function.arguments,
                   },
                 };
 
                 let paymentPrecheck: import("../types/index").PaymentPrecheck | undefined;
-                if (approvalPart.toolCall?.toolName === "paid_request") {
+                if (part.toolCall.function.name === "paid_request") {
                   try {
-                    const input = approvalPart.toolCall.input as { url?: string; method?: string } | null;
+                    const input = JSON.parse(part.toolCall.function.arguments) as { url?: string; method?: string };
                     const url = input?.url;
                     if (url) {
                       const { scanUrl } = await import("../payments/brin");
@@ -2085,7 +2446,7 @@ export class Agent {
 
                 yield {
                   type: "tool_approval_request",
-                  approvalId: approvalPart.approvalId,
+                  approvalId: part.approvalId,
                   toolCall: tcForChunk,
                   paymentPrecheck,
                 };
@@ -2093,17 +2454,35 @@ export class Agent {
               }
 
               case "error": {
-                const authError = isAuthenticationError(part.error);
-                const friendly = humanizeApiError(part.error);
-                notifyObserver(observer?.onError, {
-                  message: friendly,
-                  timestamp: Date.now(),
-                });
-                yield {
-                  type: "error",
-                  content: friendly,
-                  isAuthError: authError,
-                };
+                // A provider may surface a context failure as a stream event
+                // before `stream.response` rejects. Route it through the same
+                // recovery ladder without exposing a transient raw error to
+                // the user.
+                if (modelInfo && isContextLimitError(part.error)) {
+                  throw part.error instanceof Error ? part.error : new Error(humanizeApiError(part.error));
+                }
+                {
+                  const friendly = humanizeApiError(part.error);
+                  this.kernel?.recordObservation(`provider: ${friendly}`);
+                  // A mid-stream error event (e.g. "Upstream idle timeout exceeded") does not
+                  // necessarily throw into the surrounding catch(err) block below — found live
+                  // (2026-09-12): this case fell through without ever marking the kernel
+                  // blocked, so a later unconditional persistKernelIndex() call (e.g. at the
+                  // Stop-hook check) persisted whatever phase preceded the error, with no
+                  // record that a failure happened at all.
+                  this.kernel?.evaluateCompletion({ verificationPassed: false, reviewPassed: false });
+                  this.persistKernelIndex(friendly);
+                  const authError = isAuthenticationError(part.error);
+                  notifyObserver(observer?.onError, {
+                    message: friendly,
+                    timestamp: Date.now(),
+                  });
+                  yield {
+                    type: "error",
+                    content: friendly,
+                    isAuthError: authError,
+                  };
+                }
                 break;
               }
 
@@ -2114,31 +2493,44 @@ export class Agent {
           }
 
           if (signal.aborted) {
+            this.kernel?.cancel();
+            this.persistKernelIndex();
             this.discardAbortedTurn(userModelMessage);
             yield { type: "done" };
             return;
           }
 
           try {
-            const response = await result.response;
+            const response = (await stream.response) as { messages: ModelMessage[] };
             if (!signal.aborted) {
               this.appendCompletedTurn(userModelMessage, sanitizeModelMessages(response.messages));
               await this.refreshSessionRecap(signal);
+              this.kernel?.transition("reflect");
+              // Coding turns stop at the host-owned review phase. Verification
+              // (and the completion gate) must be driven by the host via
+              // /verify; a model response alone never marks work complete.
+              if (contextPacket.classification.kind === "coding") {
+                this.kernel?.transition("review");
+              } else {
+                this.kernel?.evaluateCompletion({ verificationPassed: true, reviewPassed: true });
+              }
               streamOk = true;
             }
           } catch (responseError: unknown) {
             if (
-              !attemptedOverflowRecovery &&
               !assistantText.trim() &&
               modelInfo &&
-              isContextLimitError(responseError)
+              isContextLimitError(responseError) &&
+              this.escalateOverflowRecovery(overflowRecoveryLevel + 1)
             ) {
-              attemptedOverflowRecovery = true;
+              overflowRecoveryLevel += 1;
               continue;
             }
           }
 
           if (signal.aborted) {
+            this.kernel?.cancel();
+            this.persistKernelIndex();
             this.discardAbortedTurn(userModelMessage);
             yield { type: "done" };
             return;
@@ -2149,30 +2541,119 @@ export class Agent {
             await this.refreshSessionRecap(signal);
           }
 
+          // Completion/verification gate (docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §9):
+          // a coding turn that mutated a file under acceptance criteria (write_file/edit_file/
+          // delete_file already require generate_plan first) but never made any verification-
+          // shaped tool call is not evidence of a working result — it is the model's own
+          // unverified claim. Reproduced live 2026-09-13: a headless clock task wrote files,
+          // re-read its own source, stopped the dev server it had started, and reported "Done."
+          // with zero acceptance criteria actually checked. This is deterministic (§11 of the
+          // brief): it gates on whether a real tool call happened, not on an LLM's self-report.
+          // `activeAcceptanceCriteria` is session-scoped (§14 Phase 2 item 1) — a plan published
+          // turns ago still governs this turn's mutations — so the mutation check below is load-
+          // bearing: without it, ANY later coding-classified turn (even one that reads a file and
+          // answers a question, mutating nothing) would be wrongly gated just because an earlier
+          // turn once published criteria.
+          const mutatedThisTurn = (this.kernel?.snapshot().mutations.length ?? 0) > 0;
+          if (
+            contextPacket.classification.kind === "coding" &&
+            mutatedThisTurn &&
+            this.activeAcceptanceCriteria &&
+            this.activeAcceptanceCriteria.length > 0 &&
+            this.turnVerificationEvidence.length === 0
+          ) {
+            const criteriaList = this.activeAcceptanceCriteria
+              .map((c) => `- ${c.id}: ${c.description} (verify: ${c.verification})`)
+              .join("\n");
+
+            if (verificationRetries < MAX_VERIFICATION_RETRIES) {
+              verificationRetries += 1;
+              const nudge = [
+                "Completion blocked: none of your stated acceptance criteria have been verified yet.",
+                "You wrote files and re-reading them is not verification — actually perform the verification method for each criterion below (make a real request, run the real command, observe the real output), then report what you actually observed for each one:",
+                criteriaList,
+              ].join("\n");
+              this.messages.push({ role: "user", content: nudge });
+              this.messageSeqs.push(null);
+              this.kernel?.recordObservation(
+                `Completion gate: no verification evidence for ${this.activeAcceptanceCriteria.length} acceptance criteria; requesting real verification (attempt ${verificationRetries}/${MAX_VERIFICATION_RETRIES}).`,
+              );
+              this.persistKernelIndex(
+                `Awaiting verification for ${this.activeAcceptanceCriteria.length} acceptance criteria`,
+              );
+              continue;
+            }
+
+            const reason = `No verification action was observed for ${this.activeAcceptanceCriteria.length} acceptance criteria after ${verificationRetries} automatic request(s).`;
+            this.kernel?.evaluateCompletion({ verificationPassed: false, reviewPassed: false });
+            this.persistKernelIndex(reason);
+            yield {
+              type: "content",
+              content: `\n\n[Not verified — ${reason} Run the stated verification methods yourself, or ask me to, before treating this as done:\n${criteriaList}]`,
+            };
+            yield { type: "done" };
+            return;
+          }
+
           const stopInput: StopHookInput = {
             hook_event_name: "Stop",
             session_id: this.session?.id,
             cwd: this.bash.getCwd(),
           };
-          await this.fireHook(stopInput, signal).catch(() => {});
+          const stopResult = await this.fireHook(stopInput, signal).catch(() => null);
 
+          // A Stop hook can refuse to let this turn count as finished (exit code 2, or
+          // JSON {decision:"block"}/{continue:false}) — the same contract PreToolUse already
+          // enforces before a tool runs. Previously this result was awaited and discarded, so
+          // a configured Stop hook could never actually prevent completion; it only observed.
+          if (stopResult && (stopResult.blocked || stopResult.preventContinuation)) {
+            const reason =
+              stopResult.blockingErrors[0]?.stderr?.trim() ||
+              stopResult.stopReason ||
+              "A Stop hook declined to let this turn complete.";
+            this.kernel?.recordObservation(`Stop hook blocked completion: ${reason}`);
+            this.kernel?.evaluateCompletion({ verificationPassed: false, reviewPassed: false });
+            this.persistKernelIndex(reason);
+            yield { type: "content", content: `\n\n[Not marked complete — ${reason}]` };
+            yield { type: "done" };
+            return;
+          }
+
+          this.persistKernelIndex();
           yield { type: "done" };
           return;
         } catch (err: unknown) {
           if (signal.aborted) {
+            this.kernel?.cancel();
+            this.persistKernelIndex();
             this.discardAbortedTurn(userModelMessage);
             yield { type: "content", content: "\n\n[Cancelled]" };
             yield { type: "done" };
             return;
           }
 
-          if (!attemptedOverflowRecovery && !assistantText.trim() && modelInfo && isContextLimitError(err)) {
-            attemptedOverflowRecovery = true;
+          if (
+            !assistantText.trim() &&
+            modelInfo &&
+            isContextLimitError(err) &&
+            this.escalateOverflowRecovery(overflowRecoveryLevel + 1)
+          ) {
+            overflowRecoveryLevel += 1;
             continue;
           }
 
           const authError = isAuthenticationError(err);
           const friendly = humanizeApiError(err);
+          this.kernel?.recordObservation(friendly);
+          this.kernel?.transition("blocked");
+          // `transition()` moves the in-memory phase but does not set a blockedReason (only
+          // `evaluateCompletion`/`cancel` do) — without this, a real failure (rate limit,
+          // provider error, auth error) left the persisted objectives row silently stale at
+          // whatever phase the turn was in before it failed, i.e. querying "what happened"
+          // after a crash would report the wrong thing. Found live: a rate-limit failure in
+          // an interactive session left `objectives.phase="review"`/`blocker=null` with no
+          // trace of the failure anywhere queryable.
+          this.persistKernelIndex(friendly);
           notifyObserver(observer?.onError, {
             message: friendly,
             timestamp: Date.now(),
@@ -2207,9 +2688,11 @@ export class Agent {
     }
   }
 
-  private requireProvider(): XaiProvider {
+  private requireProvider(): ProviderAdapter {
     if (!this.provider) {
-      throw new Error("API key required. Add an API key to continue.");
+      throw new Error(
+        "No model runtime configured. Use OpenRouter with OPENROUTER_API_KEY or start the explicit local runtime.",
+      );
     }
 
     return this.provider;
@@ -2238,19 +2721,27 @@ export class Agent {
   async runVerify(onProgress?: (detail: string) => void, abortSignal?: AbortSignal): Promise<ToolResult> {
     this.abortController = new AbortController();
     const signal = abortSignal ?? this.abortController.signal;
+    if (!this.kernel) this.kernel = new AgentKernel("verification");
     const userModelMessage: ModelMessage = { role: "user", content: "/verify" };
     this.messages.push(userModelMessage);
     this.messageSeqs.push(null);
 
     try {
       await this.consumeBackgroundNotifications();
+      this.kernel?.transition("verify");
       const result = await runVerifyOrchestration(this, { onProgress, abortSignal: signal });
+      this.kernel?.recordVerification(result.success, result.output || result.error);
+      this.kernel?.evaluateCompletion({ verificationPassed: result.success, reviewPassed: result.success });
+      this.persistKernelIndex();
       const assistantText = result.output || result.error || "Verification completed.";
       this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
       return result;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       const failureText = signal.aborted ? "Verification aborted." : `Verification failed: ${msg}`;
+      this.kernel?.recordObservation(failureText);
+      this.kernel?.evaluateCompletion({ verificationPassed: false, reviewPassed: false });
+      this.persistKernelIndex(failureText);
       this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: failureText }]);
       return { success: false, output: failureText };
     } finally {
@@ -2261,215 +2752,28 @@ export class Agent {
   }
 }
 
-interface ExecutedBatchTool {
-  toolCall: ToolCall;
-  input: unknown;
-  toolResult: ToolResult;
+function isKernelPhase(value: string): value is KernelPhase {
+  return [
+    "frame",
+    "discover",
+    "analyze",
+    "plan",
+    "act",
+    "observe",
+    "reflect",
+    "verify",
+    "review",
+    "complete",
+    "blocked",
+    "cancelled",
+  ].includes(value as KernelPhase);
 }
-
-type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
 function extractJsonObject(text: string): string | null {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start < 0 || end < start) return null;
   return text.slice(start, end + 1);
-}
-
-function buildBatchName(prefix: string, label: string): string {
-  const compact =
-    label
-      .replace(/\s+/g, "-")
-      .replace(/[^a-zA-Z0-9._-]+/g, "")
-      .slice(0, 48) || "run";
-  return `grok-cli-${prefix}-${compact}`;
-}
-
-function buildBatchChatCompletionRequest(args: {
-  modelId: string;
-  system: string;
-  messages: ModelMessage[];
-  temperature: number;
-  maxOutputTokens?: number;
-  reasoningEffort?: BatchChatCompletionRequest["reasoning_effort"];
-  tools: BatchFunctionTool[];
-}): BatchChatCompletionRequest {
-  return {
-    model: args.modelId,
-    messages: toBatchChatMessages(args.system, args.messages),
-    temperature: args.temperature,
-    ...(args.maxOutputTokens != null ? { max_completion_tokens: args.maxOutputTokens } : {}),
-    ...(args.reasoningEffort ? { reasoning_effort: args.reasoningEffort } : {}),
-    ...(args.tools.length > 0 ? { tools: args.tools } : {}),
-  };
-}
-
-function toBatchChatMessages(system: string, messages: ModelMessage[]): BatchChatMessage[] {
-  const batchMessages: BatchChatMessage[] = [{ role: "system", content: system }];
-
-  for (const message of messages) {
-    const { role, content } = message;
-
-    switch (role) {
-      case "system":
-        batchMessages.push({ role: "system", content });
-        break;
-
-      case "user": {
-        if (typeof content === "string") {
-          batchMessages.push({ role: "user", content });
-          break;
-        }
-
-        if (!Array.isArray(content)) {
-          break;
-        }
-
-        if (content.length === 1 && content[0]?.type === "text") {
-          batchMessages.push({ role: "user", content: content[0].text });
-          break;
-        }
-
-        const userContent: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> =
-          [];
-        for (const part of content) {
-          switch (part.type) {
-            case "text":
-              userContent.push({ type: "text", text: part.text });
-              break;
-
-            case "image": {
-              const mediaType = part.mediaType === "image/*" || !part.mediaType ? "image/jpeg" : part.mediaType;
-              const data =
-                part.image instanceof URL
-                  ? part.image.toString()
-                  : `data:${mediaType};base64,${toBase64DataContent(part.image)}`;
-              userContent.push({ type: "image_url", image_url: { url: data } });
-              break;
-            }
-
-            case "file": {
-              if (!part.mediaType.startsWith("image/")) {
-                break;
-              }
-              const mediaType = part.mediaType === "image/*" ? "image/jpeg" : part.mediaType;
-              const data =
-                part.data instanceof URL
-                  ? part.data.toString()
-                  : `data:${mediaType};base64,${toBase64DataContent(part.data)}`;
-              userContent.push({ type: "image_url", image_url: { url: data } });
-              break;
-            }
-          }
-        }
-        batchMessages.push({
-          role: "user",
-          content: userContent,
-        });
-        break;
-      }
-
-      case "assistant": {
-        if (typeof content === "string") {
-          batchMessages.push({ role: "assistant", content });
-          break;
-        }
-
-        if (!Array.isArray(content)) {
-          break;
-        }
-
-        let assistantText = "";
-        const toolCalls: BatchToolCall[] = [];
-        for (const part of content) {
-          if (part.type === "text") {
-            assistantText += part.text;
-          } else if (part.type === "tool-call") {
-            toolCalls.push({
-              id: part.toolCallId,
-              type: "function",
-              function: {
-                name: part.toolName,
-                arguments: JSON.stringify(part.input),
-              },
-            });
-          }
-        }
-
-        if (assistantText || toolCalls.length > 0) {
-          batchMessages.push({
-            role: "assistant",
-            content: assistantText,
-            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-          });
-        }
-        break;
-      }
-
-      case "tool":
-        for (const part of content) {
-          if (part.type === "tool-approval-response") {
-            continue;
-          }
-          batchMessages.push({
-            role: "tool",
-            tool_call_id: part.toolCallId,
-            content: toolOutputToText(part.output),
-          });
-        }
-        break;
-    }
-  }
-
-  return batchMessages;
-}
-
-function toBase64DataContent(value: string | Uint8Array | ArrayBuffer): string {
-  return convertToBase64(value instanceof ArrayBuffer ? new Uint8Array(value) : value);
-}
-
-function toolOutputToText(output: {
-  type: "text" | "json" | "execution-denied" | "error-text" | "error-json" | "content";
-  value?: unknown;
-  reason?: string;
-}): string {
-  switch (output.type) {
-    case "text":
-    case "error-text":
-      return String(output.value ?? "");
-    case "execution-denied":
-      return output.reason ?? "Tool execution denied.";
-    case "json":
-    case "error-json":
-    case "content":
-      return JSON.stringify(output.value ?? null);
-  }
-}
-
-function getBatchUsage(response: BatchChatCompletionResponse): ProcessMessageUsage {
-  const usage = response.usage ?? {};
-  const inputTokens = asNumber(usage.input_tokens) ?? asNumber(usage.prompt_tokens);
-  const outputTokens = asNumber(usage.output_tokens) ?? asNumber(usage.completion_tokens);
-  const totalTokens = asNumber(usage.total_tokens) ?? sumDefined(inputTokens, outputTokens);
-  return {
-    inputTokens,
-    outputTokens,
-    totalTokens,
-    costUsdTicks: asNumber(usage.cost_in_usd_ticks),
-  };
-}
-
-function accumulateUsage(target: ProcessMessageUsage, usage: ProcessMessageUsage): void {
-  target.inputTokens = (target.inputTokens ?? 0) + (usage.inputTokens ?? 0);
-  target.outputTokens = (target.outputTokens ?? 0) + (usage.outputTokens ?? 0);
-  target.totalTokens = (target.totalTokens ?? 0) + (usage.totalTokens ?? 0);
-  target.costUsdTicks = (target.costUsdTicks ?? 0) + (usage.costUsdTicks ?? 0);
-}
-
-function hasUsage(usage: ProcessMessageUsage): boolean {
-  return Boolean(
-    (usage.inputTokens ?? 0) || (usage.outputTokens ?? 0) || (usage.totalTokens ?? 0) || (usage.costUsdTicks ?? 0),
-  );
 }
 
 function getBatchFinishReason(finishReason: string | null | undefined): ProcessMessageFinishReason {
@@ -2488,93 +2792,12 @@ function getBatchFinishReason(finishReason: string | null | undefined): ProcessM
   }
 }
 
-function toLocalToolCall(toolCall: BatchToolCall): ToolCall {
-  return {
-    id: toolCall.id,
-    type: "function",
-    function: {
-      name: toolCall.function.name,
-      arguments: toolCall.function.arguments,
-    },
-  };
-}
-
-function buildAssistantBatchMessage(content: string, toolCalls: ToolCall[]): ModelMessage | null {
-  if (toolCalls.length === 0) {
-    return content ? { role: "assistant", content } : null;
-  }
-
-  const parts: Array<
-    { type: "text"; text: string } | { type: "tool-call"; toolCallId: string; toolName: string; input: unknown }
-  > = [];
-  if (content) {
-    parts.push({ type: "text", text: content });
-  }
-  for (const toolCall of toolCalls) {
-    parts.push({
-      type: "tool-call",
-      toolCallId: toolCall.id,
-      toolName: toolCall.function.name,
-      input: parseToolArgumentsOrRaw(toolCall.function.arguments),
-    });
-  }
-  return { role: "assistant", content: parts };
-}
-
-function buildToolBatchMessage(toolParts: ExecutedBatchTool[]): ModelMessage | null {
-  if (toolParts.length === 0) {
-    return null;
-  }
-
-  return {
-    role: "tool",
-    content: toolParts.map((part) => ({
-      type: "tool-result" as const,
-      toolCallId: part.toolCall.id,
-      toolName: part.toolCall.function.name,
-      output: part.toolResult.success
-        ? ({ type: "json", value: toSerializableValue(part.toolResult) } as const)
-        : ({ type: "error-json", value: toSerializableValue(part.toolResult) } as const),
-    })),
-  };
-}
-
 function parseToolArgumentsOrRaw(raw: string): unknown {
   try {
     return raw.trim() ? JSON.parse(raw) : {};
   } catch {
     return raw;
   }
-}
-
-function toSerializableValue(value: unknown): JsonValue {
-  try {
-    return JSON.parse(JSON.stringify(value ?? null)) as JsonValue;
-  } catch {
-    return String(value);
-  }
-}
-
-function asNumber(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined;
-}
-
-function sumDefined(left?: number, right?: number): number | undefined {
-  if (left == null && right == null) {
-    return undefined;
-  }
-  return (left ?? 0) + (right ?? 0);
-}
-
-function toToolCall(part: { toolCallId: string; toolName: string; args?: unknown; input?: unknown }): ToolCall {
-  return {
-    id: part.toolCallId,
-    type: "function",
-    function: {
-      name: part.toolName,
-      arguments: JSON.stringify(part.input ?? part.args ?? {}),
-    },
-  };
 }
 
 function notifyObserver<T>(listener: ((payload: T) => void) | undefined, payload: T): void {
@@ -2589,48 +2812,6 @@ function notifyObserver<T>(listener: ((payload: T) => void) | undefined, payload
   }
 }
 
-function getStepNumber(event: unknown, fallback: number): number {
-  if (event && typeof event === "object" && "stepNumber" in event && typeof event.stepNumber === "number") {
-    return event.stepNumber;
-  }
-
-  return fallback;
-}
-
-function getFinishReason(event: unknown): ProcessMessageFinishReason {
-  if (event && typeof event === "object" && "finishReason" in event) {
-    switch (event.finishReason) {
-      case "stop":
-      case "length":
-      case "content-filter":
-      case "tool-calls":
-      case "error":
-      case "other":
-        return event.finishReason;
-    }
-  }
-
-  return "other";
-}
-
-function getUsage(event: unknown): ProcessMessageUsage {
-  if (!(event && typeof event === "object" && "usage" in event)) {
-    return {};
-  }
-
-  const usage = event.usage;
-  if (!usage || typeof usage !== "object") {
-    return {};
-  }
-
-  const u = usage as Record<string, unknown>;
-  return {
-    inputTokens: typeof u.inputTokens === "number" ? u.inputTokens : undefined,
-    outputTokens: typeof u.outputTokens === "number" ? u.outputTokens : undefined,
-    totalTokens: typeof u.totalTokens === "number" ? u.totalTokens : undefined,
-  };
-}
-
 function toToolResult(output: unknown): ToolResult {
   if (output && typeof output === "object" && "success" in output) {
     const r = output as {
@@ -2639,6 +2820,7 @@ function toToolResult(output: unknown): ToolResult {
       error?: string;
       diff?: ToolResult["diff"];
       plan?: Plan;
+      planUpdate?: ToolResult["planUpdate"];
       task?: ToolResult["task"];
       delegation?: ToolResult["delegation"];
       backgroundProcess?: ToolResult["backgroundProcess"];
@@ -2652,6 +2834,7 @@ function toToolResult(output: unknown): ToolResult {
       error: r.error ?? (r.success ? undefined : r.output),
       diff: r.diff,
       plan: r.plan,
+      planUpdate: r.planUpdate,
       task: r.task,
       delegation: r.delegation,
       backgroundProcess: r.backgroundProcess,
@@ -2669,6 +2852,7 @@ function formatSubagentActivity(toolName: string, args?: unknown): string {
   if (toolName === "lsp") return `LSP ${parsed.operation || "query"} ${parsed.filePath || ""}`.trim();
   if (toolName === "write_file") return `Write ${parsed.path || "file"}`;
   if (toolName === "edit_file") return `Edit ${parsed.path || "file"}`;
+  if (toolName === "delete_file") return `Delete ${parsed.path || "file"}`;
   if (toolName === "search_web") return `Web search "${truncate(parsed.query || "", 50)}"`;
   if (toolName === "search_x") return `X search "${truncate(parsed.query || "", 50)}"`;
   if (toolName === "generate_image") return `Generate image "${truncate(parsed.prompt || "", 50)}"`;
@@ -2778,9 +2962,17 @@ function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortS
   return controller.signal;
 }
 
+function utcDayStart(): Date {
+  const value = new Date();
+  value.setUTCHours(0, 0, 0, 0);
+  return value;
+}
+
 function isContextLimitError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /(context|token|prompt).*(limit|length|large|window|overflow)|too many tokens|maximum context/i.test(message);
+  return /(context|token|prompt).*(limit|length|large|window|overflow|size|exceed)|too many tokens|maximum context/i.test(
+    message,
+  );
 }
 
 function isAuthenticationError(error: unknown): boolean {
@@ -2788,6 +2980,51 @@ function isAuthenticationError(error: unknown): boolean {
   return /\b(401|403)\b|unauthori[sz]ed|invalid.*(api[_ ]?key|token|credential)|authentication failed|forbidden|access denied/i.test(
     message,
   );
+}
+
+/**
+ * Deterministic detector for whether a tool call actually observed reality (a network
+ * request, a test/build run, a browser/desktop observation) rather than only re-reading the
+ * source the model itself just wrote. Reproduced live (2026-09-13): a headless coding turn
+ * wrote three files, re-read them with `read_file`, stopped its own dev server without ever
+ * requesting it, and reported "Done." — code state was mistaken for runtime reality (the
+ * failure §14 of the reconstruction brief names). Deliberately conservative: only tool calls
+ * that touch something outside the model's own text count as evidence, and `read_file`/`bash`
+ * `Get-ChildItem`/`ls`-style inspection does not. A successful delegation to `verify`/`ui-verify`/
+ * `computer` also counts: those sub-agents are prompted to do the real thing themselves (build,
+ * test, start the app, real browser smoke test, or a desktop/UI observation) — see
+ * docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §13. Without this, a parent turn that
+ * correctly delegated real verification work still got blocked, because the gate only ever
+ * looked at the parent's own direct tool calls.
+ */
+const VERIFICATION_BASH_RE =
+  /\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|pytest|jest|vitest|playwright|cypress|npm test|npm run test|yarn test|pnpm test|go test|cargo test|python -m pytest|python -m unittest|dotnet test|mvn test|gradle test|npm run build|yarn build|pnpm build|cargo build|go build|tsc\b)/i;
+
+function describeVerificationEvidence(toolName: string, argsJson: string): string | null {
+  if (toolName === "bash") {
+    try {
+      const command = (JSON.parse(argsJson) as { command?: string }).command ?? "";
+      if (VERIFICATION_BASH_RE.test(command)) return `bash: ${command.slice(0, 120)}`;
+    } catch {
+      // malformed args; no evidence either way
+    }
+    return null;
+  }
+  if (toolName === "computer_screenshot" || toolName === "computer_snapshot") {
+    return `${toolName}: observed rendered output`;
+  }
+  if (toolName === "task") {
+    try {
+      const agentName = (JSON.parse(argsJson) as { agent?: string }).agent ?? "";
+      if (agentName === "verify" || agentName === "ui-verify" || agentName === "computer") {
+        return `task(${agentName}): delegated verification completed`;
+      }
+    } catch {
+      // malformed args; no evidence either way
+    }
+    return null;
+  }
+  return null;
 }
 
 const STATUS_MESSAGES: Record<number, string> = {

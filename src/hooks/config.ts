@@ -2,7 +2,7 @@ import { loadUserSettings } from "../utils/settings.js";
 import type { HookCommand, HookEvent, HookMatcher, HooksConfig } from "./types.js";
 
 /**
- * Load hooks config from user settings (~/.grok/user-settings.json) only.
+ * Load hooks config from user settings (~/.shelra/user-settings.json) only.
  *
  * Project-level .grok/settings.json hooks are intentionally excluded because
  * that file is repo-committed — a malicious repository could execute arbitrary

@@ -1,4 +1,4 @@
-import { getModelInfo } from "../grok/models";
+import { getModelInfo } from "../models/catalog";
 import type { UsageEvent, UsageSource } from "../types/index";
 import { getDatabase } from "./db";
 
@@ -19,6 +19,8 @@ export interface TokenUsageLike {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /** Provider-reported USD in millionths. Preferred over catalog estimation. */
+  costUsdTicks?: number;
 }
 
 export function recordUsageEvent(
@@ -33,9 +35,12 @@ export function recordUsageEvent(
   const inputTokens = usage.inputTokens ?? 0;
   const outputTokens = usage.outputTokens ?? 0;
   const totalTokens = usage.totalTokens ?? inputTokens + outputTokens;
-  if (inputTokens <= 0 && outputTokens <= 0 && totalTokens <= 0) return;
+  if (inputTokens <= 0 && outputTokens <= 0 && totalTokens <= 0 && usage.costUsdTicks === undefined) return;
 
-  const costMicros = estimateCostMicros(model, inputTokens, outputTokens);
+  const costMicros =
+    usage.costUsdTicks !== undefined
+      ? Math.max(0, Math.round(usage.costUsdTicks))
+      : estimateCostMicros(model, inputTokens, outputTokens);
   getDatabase()
     .prepare(`
     INSERT INTO usage_events (
@@ -65,6 +70,30 @@ export function getSessionTotalTokens(sessionId: string): number {
     .get(sessionId) as { total_tokens: number } | undefined;
 
   return row?.total_tokens ?? 0;
+}
+
+export function getSessionTotalCostMicros(sessionId: string): number {
+  const row = getDatabase()
+    .prepare(`
+    SELECT COALESCE(SUM(cost_micros), 0) AS cost_micros
+    FROM usage_events
+    WHERE session_id = ?
+  `)
+    .get(sessionId) as { cost_micros: number } | undefined;
+
+  return row?.cost_micros ?? 0;
+}
+
+export function getUsageCostSinceMicros(createdAt: string): number {
+  const row = getDatabase()
+    .prepare(`
+    SELECT COALESCE(SUM(cost_micros), 0) AS cost_micros
+    FROM usage_events
+    WHERE created_at >= ?
+  `)
+    .get(createdAt) as { cost_micros: number } | undefined;
+
+  return row?.cost_micros ?? 0;
 }
 
 export function listSessionUsage(sessionId: string): UsageEvent[] {

@@ -1,5 +1,5 @@
-import { generateText, type ModelMessage } from "ai";
-import { resolveModelRuntime, type XaiProvider } from "../grok/client";
+import type { ModelMessage } from "ai";
+import type { ProviderAdapter } from "../providers/types";
 import { containsEncryptedReasoning } from "./reasoning";
 
 export interface CompactionSettings {
@@ -25,11 +25,41 @@ export interface PreparedCompaction {
 }
 
 const TOOL_RESULT_MAX_CHARS = 2000;
-const MIN_KEPT_TOKENS_ON_RETRY = 4000;
+export const MIN_KEPT_TOKENS_ON_RETRY = 4000;
 
+/** Budget used only when no model context window is known (legacy 128K sizing). */
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 export const COMPACTION_SUMMARY_HEADER = "[Context checkpoint summary]";
+
+/**
+ * Reserve headroom is a share of the *model's* window, not a fixed constant. It
+ * only has to cover the model's own output (a local turn emits at most 2048
+ * tokens) plus prompt slack. The absolute floor keeps small local windows from
+ * reserving less than a normal coding response, and the
+ * ceiling stops the reserve from eating the window it is protecting.
+ */
+export const MIN_RESERVE_TOKENS = 2_048;
+const RESERVE_WINDOW_RATIO = 0.15;
+const MAX_RESERVE_WINDOW_RATIO = 0.5;
+
+/**
+ * The kept-recent budget must stay strictly below the compaction trigger
+ * (`contextWindow - reserveTokens`), otherwise compaction can never bring the
+ * conversation back under its own threshold and it re-runs on every turn.
+ */
+export const MIN_KEEP_RECENT_TOKENS = 2_048;
+const KEEP_RECENT_WINDOW_RATIO = 0.35;
+const KEEP_RECENT_MARGIN_RATIO = 0.1;
+const MIN_KEEP_RECENT_MARGIN = 512;
+
+/**
+ * `chars / 4` systematically under-counts code, JSON tool payloads and non-ASCII
+ * text. Budget decisions apply this margin so the trigger fires before the
+ * server rejects the prompt; displayed statistics stay on the raw estimate.
+ */
+export const CONTEXT_ESTIMATE_MARGIN = 1.15;
+export const CONTEXT_TRUNCATION_MARKER = "\n\n[... user prompt truncated by host to fit model context ...]";
 
 const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant.
 
@@ -200,6 +230,29 @@ export function createCompactionSummaryMessage(summary: string): ModelMessage {
   };
 }
 
+/**
+ * Appends the CURRENT acceptance criteria verbatim after the LLM-generated prose summary. The
+ * summarization model paraphrases everything else (§14 Phase 2 item 3, docs/migration/
+ * 14-AGENT-HARNESS-RECONSTRUCTION.md) — fine for prose, but the exact criterion ids, wording, and
+ * verification methods must survive a compaction boundary unchanged, since a resumed turn and the
+ * completion gate (§9) both need to state/check the SAME criteria the model published, not a
+ * compacted-away approximation of them. Deliberately bounded to acceptance criteria only (not
+ * full per-step status) — see the Phase 2 item 3 status note for why. A no-op when there's
+ * nothing to preserve.
+ */
+export function appendActiveCriteriaBlock(
+  summary: string,
+  criteria: ReadonlyArray<{ id: string; description: string; verification: string }> | null,
+): string {
+  if (!criteria || criteria.length === 0) return summary;
+  const block = [
+    "",
+    "## Active Acceptance Criteria (verbatim — do not paraphrase or drop these)",
+    ...criteria.map((c) => `- ${c.id}: ${c.description} (verify: ${c.verification})`),
+  ].join("\n");
+  return `${summary.trim()}\n${block}`;
+}
+
 export function isCompactionSummaryMessage(message: ModelMessage | undefined): boolean {
   return message?.role === "system" && typeof message.content === "string"
     ? message.content.startsWith(COMPACTION_SUMMARY_HEADER)
@@ -244,12 +297,91 @@ export function estimateConversationTokens(systemPrompt: string, messages: Model
   return systemTokens + messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
 }
 
+/**
+ * Keeps an oversized user prompt usable when it is larger than the model's
+ * entire context window. The beginning usually contains the request and the
+ * ending often contains pasted errors or acceptance criteria, so both are
+ * retained around an explicit marker.
+ */
+export function truncateTextToTokens(text: string, maxTokens: number): string {
+  const maxChars = Math.max(1, Math.floor(maxTokens * 4));
+  if (text.length <= maxChars) return text;
+  if (maxChars <= CONTEXT_TRUNCATION_MARKER.length) {
+    return CONTEXT_TRUNCATION_MARKER.slice(0, maxChars);
+  }
+
+  const availableChars = maxChars - CONTEXT_TRUNCATION_MARKER.length;
+  const headChars = Math.ceil(availableChars / 2);
+  const tailChars = Math.floor(availableChars / 2);
+  return `${text.slice(0, headChars)}${CONTEXT_TRUNCATION_MARKER}${tailChars > 0 ? text.slice(-tailChars) : ""}`;
+}
+
+/** Returns a request-only copy; the full user message remains persisted. */
+export function truncateUserMessageToTokens(message: ModelMessage, maxTokens: number): ModelMessage {
+  if (message.role !== "user") return message;
+
+  if (typeof message.content === "string") {
+    const content = truncateTextToTokens(message.content, maxTokens);
+    return content === message.content ? message : { ...message, content };
+  }
+
+  if (!Array.isArray(message.content)) return message;
+  const parts = message.content as unknown as Array<Record<string, unknown>>;
+  const textIndex = parts.findIndex((part) => part.type === "text" && typeof part.text === "string");
+  if (textIndex < 0) return message;
+
+  // Image/file markers also consume input budget, so leave a small allowance
+  // for them before sizing the text portion.
+  const content = parts.map((part, index) =>
+    index === textIndex
+      ? { ...part, text: truncateTextToTokens(String(part.text), Math.max(1, maxTokens - 16)) }
+      : part,
+  );
+  if (content[textIndex]?.text === parts[textIndex]?.text) return message;
+  return { ...message, content } as unknown as ModelMessage;
+}
+
+/** Raw estimate inflated by the safety margin, for budget decisions only. */
+export function budgetedContextTokens(estimatedTokens: number): number {
+  return Math.ceil(estimatedTokens * CONTEXT_ESTIMATE_MARGIN);
+}
+
+/**
+ * Derives a compaction budget from the model's real context window. Returns the
+ * legacy constants when the window is unknown so remote defaults are unchanged.
+ *
+ * Guarantees `keepRecentTokens < contextWindow - reserveTokens` for any window
+ * of at least a couple of tokens, which is the invariant that makes compaction
+ * able to satisfy its own trigger.
+ */
+export function compactionSettingsForWindow(contextWindow?: number): CompactionSettings {
+  if (contextWindow === undefined || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return { reserveTokens: DEFAULT_RESERVE_TOKENS, keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS };
+  }
+
+  const reserveCeiling = Math.floor(contextWindow * MAX_RESERVE_WINDOW_RATIO);
+  const reserveTokens = Math.min(
+    Math.max(MIN_RESERVE_TOKENS, Math.round(contextWindow * RESERVE_WINDOW_RATIO)),
+    Math.max(1, reserveCeiling),
+  );
+
+  const trigger = contextWindow - reserveTokens;
+  const margin = Math.max(MIN_KEEP_RECENT_MARGIN, Math.round(trigger * KEEP_RECENT_MARGIN_RATIO));
+  const keepCeiling = Math.max(1, Math.min(trigger - 1, trigger - margin));
+  const keepRecentTokens = Math.min(
+    Math.max(MIN_KEEP_RECENT_TOKENS, Math.round(contextWindow * KEEP_RECENT_WINDOW_RATIO)),
+    keepCeiling,
+  );
+
+  return { reserveTokens, keepRecentTokens };
+}
+
 export function shouldCompactContext(
   contextTokens: number,
   contextWindow: number,
   settings: CompactionSettings,
 ): boolean {
-  return contextTokens > contextWindow - settings.reserveTokens;
+  return budgetedContextTokens(contextTokens) > contextWindow - settings.reserveTokens;
 }
 
 function isValidCutPoint(message: ModelMessage): boolean {
@@ -339,10 +471,17 @@ export function prepareCompaction(
   };
 }
 
+/**
+ * Halves the kept-recent budget for a retry. The 4000-token floor is itself
+ * capped at a quarter of the current budget: on a small local window the budget
+ * can already start below 4000, and an absolute floor would then refuse to
+ * shrink at all and leave the retry ladder spinning on an unchanged cut.
+ */
 export function relaxCompactionSettings(settings: CompactionSettings): CompactionSettings {
+  const floor = Math.min(MIN_KEPT_TOKENS_ON_RETRY, Math.floor(settings.keepRecentTokens / 4));
   return {
     ...settings,
-    keepRecentTokens: Math.max(MIN_KEPT_TOKENS_ON_RETRY, Math.floor(settings.keepRecentTokens / 2)),
+    keepRecentTokens: Math.max(1, Math.max(floor, Math.floor(settings.keepRecentTokens / 2))),
   };
 }
 
@@ -391,7 +530,7 @@ export function serializeConversation(messages: ModelMessage[]): string {
 }
 
 async function summarizeConversation(
-  provider: XaiProvider,
+  provider: ProviderAdapter,
   modelId: string,
   messages: ModelMessage[],
   reserveTokens: number,
@@ -414,25 +553,20 @@ async function summarizeConversation(
     promptParts.push(`Additional focus: ${customInstructions.trim()}`);
   }
 
-  const runtime = resolveModelRuntime(provider, modelId);
-  const { text } = await generateText({
-    model: runtime.model,
+  const { text } = await provider.generateText({
+    modelId,
     system: SUMMARIZATION_SYSTEM_PROMPT,
     prompt: promptParts.filter(Boolean).join("\n\n"),
-    abortSignal: signal,
-    maxRetries: 0,
+    signal,
     temperature: 0.2,
-    ...(runtime.modelInfo?.supportsMaxOutputTokens === false
-      ? {}
-      : { maxOutputTokens: Math.max(512, Math.floor(reserveTokens * 0.8)) }),
-    ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+    maxOutputTokens: Math.max(512, Math.floor(reserveTokens * 0.8)),
   });
 
   return text.trim();
 }
 
 export async function generateCompactionSummary(
-  provider: XaiProvider,
+  provider: ProviderAdapter,
   modelId: string,
   preparation: PreparedCompaction,
   customInstructions?: string,

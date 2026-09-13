@@ -101,6 +101,15 @@ temp/
 .claude/
 .grok/*
 .grok/
+.shelra/
+
+# Local ShelraCode reference checkout used for migration forensics; it is not
+# part of the target product tree.
+/ShelraCode/
+
+# Local claude-code reference checkout used for migration forensics; it is a
+# nested git repo, not part of the target product tree.
+/references/claude-code/
 
 # Cursor config (tracked — do not ignore)
 # .cursor/

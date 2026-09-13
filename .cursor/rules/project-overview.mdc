@@ -4,62 +4,70 @@ globs: "**/*"
 alwaysApply: true
 ---
 
-# Grok CLI — Project Overview
+# ShelraCode — Project Overview
 
-Grok CLI (`@vibe-kit/grok-cli`) is an open-source AI coding agent powered by Grok that brings AI assistance directly into the terminal.
+`shelra` (product name **ShelraCode**) is a **cloud-first AI coding agent** for
+the terminal. It defaults to OpenRouter Free when configured; a small reviewed
+GGUF model through an app-managed `llama.cpp` server remains available through
+the explicit `--local` mode.
+It began as the Grok CLI and is mid-migration to this architecture — see
+`docs/migration/`.
 
 ## Tech Stack
 
-- **Language**: TypeScript (ES2022, ESNext modules)
-- **Runtime**: Bun (primary)
-- **UI Framework**: React with [OpenTUI](https://github.com/anomalyco/opentui) for terminal rendering
-- **Build**: `tsc` (TypeScript compiler)
-- **Package Manager**: Bun
-- **API Client**: OpenAI SDK (for OpenAI-compatible xAI API)
-- **Tools**: Bash-only (all file operations via shell commands)
-- **Search**: X Search API + Web Search via xAI Responses API
+- **Language**: TypeScript (ES2022, ESNext modules, `strict: true`)
+- **Runtime**: Bun (required at build AND runtime — the bundle imports `bun:sqlite`)
+- **UI**: React with [OpenTUI](https://github.com/anomalyco/opentui)
+  (`@opentui/react`, `jsxImportSource` set in `tsconfig.json` — no `import React`)
+- **Build**: `bun run scripts/build.ts` (bundle + declarations + `dist/shelra.exe`)
+- **Lint/format**: Biome (`biome.json`)
+- **Tests**: Vitest
+- **Model layer**: Vercel AI SDK (`ai`, `@ai-sdk/openai-compatible`) behind a
+  provider-neutral seam (`src/providers/`); `@ai-sdk/xai` remains only as an
+  isolated migration-compat surface
+- **Storage**: local SQLite via `bun:sqlite` (`src/storage/`)
+- **Tools**: bash, file read/write/edit, grep, LSP, MCP, schedules, computer-use
 
-## Architecture
+## Architecture (high level)
 
 ```
 src/
-├── index.ts          # CLI entry point (Commander.js + OpenTUI)
-├── agent/
-│   └── agent.ts      # Agent — orchestrates client, bash tool, search
-├── grok/
-│   ├── client.ts     # Grok API client (Chat Completions + Responses API)
-│   ├── models.ts     # Model definitions and metadata
-│   └── tools.ts      # Tool schemas (bash, search_web, search_x)
-├── tools/
-│   └── bash.ts       # Bash command execution
-├── ui/
-│   └── app.tsx       # OpenTUI React terminal UI
-├── utils/
-│   ├── settings.ts   # User and project settings
-│   ├── git-root.ts   # Resolve git repository root for AGENTS.md discovery
-│   └── instructions.ts # AGENTS.md (ecosystem) custom instructions
-└── types/
-    └── index.ts      # Shared TypeScript types
+├── index.ts          # CLI entry (Commander) + OpenTUI bootstrap + startup state machine
+├── startup/          # explicit local-mode startup orchestrator + state machine
+├── agent/            # agent loop, kernel, compaction, delegations
+├── providers/        # provider-neutral seam (types, stream normalizer, fake, xai-compat)
+├── runtimes/         # managed llama.cpp lifecycle, discovery, local OpenAI-compatible adapter
+├── models/           # Hugging Face GGUF download/catalog + recommendation
+├── router/           # cloud model routing + local privacy/capability routing
+├── context/          # bounded repository-context compiler
+├── hardware/         # host hardware profile + model-fit scoring
+├── security/         # workspace path guard, sandboxing
+├── grok/             # tool schemas + legacy Grok client (compat)
+├── tools/            # bash, file, grep, schedule, computer
+├── ui/               # OpenTUI React shell (app.tsx, startup.tsx, modals)
+├── storage/          # bun:sqlite sessions/transcripts/usage
+├── mcp/  lsp/         # MCP + LSP integrations
+├── telegram/         # Telegram remote-control bridge
+├── verify/           # host-owned verification / completion gate
+└── product/identity.ts  # product/name/env-var/config-path constants
 ```
 
 ## Key Patterns
 
-- **Agent loop**: `Agent.processMessage()` is an async generator that yields `StreamChunk` objects — the LLM responds, tools execute, results feed back until no more tool calls remain.
-- **Bash-only tools**: The agent uses bash for everything (file editing, searching, git, builds, etc.).
-- **X Search & Web Search**: Integrated via the xAI Responses API for real-time information.
-- **Settings hierarchy**: Environment variables → User-level (`~/.grok/user-settings.json`) → Project-level (`.grok/settings.json`).
-- **Custom instructions**: `~/.grok/AGENTS.md`, then `AGENTS.override.md` / `AGENTS.md` per directory from git root through the workspace cwd (Codex-style merge).
-- **ESM only**: The project uses `"type": "module"` — all imports use `.js` extensions for compiled output.
-
-## Latest Grok Models
-
-- grok-4.3 (recommended flagship reasoning)
-- grok-4.20-non-reasoning (recommended non-reasoning)
-- grok-4.20-multi-agent-0309 (multi-agent, 2M context)
-- grok-4.20-0309-reasoning (reasoning, 2M context)
-- grok-3-mini (compact model with reasoning effort controls)
+- **Cloud-first**: normal startup discovers OpenRouter models and gates cloud
+  chat behind catalog/capability policy. `--local` activates
+  `runStartup` (`src/startup/orchestrator.ts`) for managed local inference.
+- **Research-first**: every agent turn performs bounded web research and
+  combines repository evidence with official documentation or primary sources.
+- **Provider seam**: no AI-SDK or vendor object crosses the agent/UI boundary —
+  enforced by `src/providers/architecture.test.ts`.
+- **Settings hierarchy**: env (`SHELRA_*`, legacy `GROK_*`) → user
+  (`~/.shelra/user-settings.json`) → project (`.shelra/settings.json`).
+- **Custom instructions**: `AGENTS.md` discovered from git root through cwd.
+- **ESM only** (`"type": "module"`); imports omit extensions (`moduleResolution: Bundler`).
 
 ## CI/CD
 
-- **typecheck.yml**: Runs `tsc --noEmit` on push/PR to `main`/`develop`.
-- **security.yml**: Runs `npm audit` and TruffleHog secret scanning.
+- **typecheck.yml**: `bun run format` → `bun run lint` → `bun run typecheck` →
+  `bun run build:binary` on push/PR to `main`/`develop`.
+- **security.yml**: `bun pm untrusted` + TruffleHog secret scan (weekly + PR).

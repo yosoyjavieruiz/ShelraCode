@@ -13,6 +13,26 @@ export interface PlanStep {
   title: string;
   description: string;
   filePaths?: string[];
+  /** Acceptance criterion ids advanced by this step. */
+  satisfies?: string[];
+  /** Runtime-owned execution state, updated through update_plan_step. */
+  status?: PlanStepStatus;
+  evidence?: string;
+}
+
+export type PlanStepStatus = "pending" | "working" | "complete" | "failed";
+
+export interface PlanStepUpdate {
+  index: number;
+  status: PlanStepStatus;
+  evidence?: string;
+}
+
+export interface PlanAcceptanceCriterion {
+  id: string;
+  description: string;
+  /** Concrete command, test, observation, or evidence that will prove the criterion. */
+  verification: string;
 }
 
 export interface PlanQuestion {
@@ -26,6 +46,10 @@ export interface PlanQuestion {
 export interface Plan {
   title: string;
   summary: string;
+  /** Optional only for compatibility with plans persisted before the executable-plan contract. */
+  goal?: string;
+  requirements?: string[];
+  acceptanceCriteria?: PlanAcceptanceCriterion[];
   steps: PlanStep[];
   questions?: PlanQuestion[];
 }
@@ -35,6 +59,7 @@ export type BuiltinSubagentId =
   | "explore"
   | "vision"
   | "verify"
+  | "ui-verify"
   | "verify-detect"
   | "verify-manifest"
   | "computer";
@@ -60,6 +85,8 @@ export interface DelegationRun {
   description: string;
   summary: string;
   status: DelegationStatus;
+  startedAt?: string;
+  completedAt?: string;
 }
 
 export interface SubagentStatus {
@@ -170,6 +197,7 @@ export interface ToolResult {
   error?: string;
   diff?: FileDiff;
   plan?: Plan;
+  planUpdate?: PlanStepUpdate;
   task?: TaskRun;
   delegation?: DelegationRun;
   backgroundProcess?: BackgroundProcessInfo;
@@ -230,6 +258,7 @@ export interface ModelInfo {
   contextWindow: number;
   inputPrice: number;
   outputPrice: number;
+  pricingKnown?: boolean;
   reasoning: boolean;
   description: string;
   aliases?: string[];
@@ -239,6 +268,13 @@ export interface ModelInfo {
   supportsMaxOutputTokens?: boolean;
   defaultReasoningEffort?: ReasoningEffort;
   supportsReasoningEffort?: boolean;
+  /** Host evidence quality for tool/agent claims. */
+  capabilityConfidence?: "unknown" | "declared" | "probed" | "measured";
+  runtimeKind?: string;
+  supportsVision?: boolean;
+  maxOutputTokens?: number;
+  category?: "local" | "cloud";
+  provider?: string;
 }
 
 export type AgentMode = "agent" | "plan" | "ask";
@@ -293,10 +329,11 @@ export interface SessionSnapshot {
   messages: ModelMessage[];
   entries: ChatEntry[];
   totalTokens: number;
+  totalCostMicros?: number;
 }
 
-export const MODES: { id: AgentMode; label: string; color: string }[] = [
-  { id: "agent", label: "Agent", color: "#5c9cf5" },
-  { id: "plan", label: "Plan", color: "#e5c07b" },
-  { id: "ask", label: "Ask", color: "#22c55e" },
+export const MODES: { id: AgentMode; label: string; tone: "info" | "modePlan" | "brand" }[] = [
+  { id: "agent", label: "Agent", tone: "info" },
+  { id: "plan", label: "Plan", tone: "modePlan" },
+  { id: "ask", label: "Ask", tone: "brand" },
 ];

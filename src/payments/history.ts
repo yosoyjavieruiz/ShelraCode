@@ -1,11 +1,11 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
+import { getProductUserDir } from "../product/identity";
 import type { PaymentAuditRecord } from "./types";
 
 export class PaymentHistory {
   static getLogPath(): string {
-    return path.join(os.homedir(), ".grok", "payment_log.jsonl");
+    return path.join(getProductUserDir(), "payment_log.jsonl");
   }
 
   record(entry: PaymentAuditRecord): void {

@@ -100,6 +100,7 @@ describe("getBatchChatCompletion", () => {
 
     const result = await pollBatchRequestResult({
       apiKey: "test-key",
+      baseURL: "https://api.x.ai/v1",
       batchId: "batch-1",
       batchRequestId: "req-3",
       initialPollMs: 0,
@@ -153,6 +154,7 @@ describe("getBatchChatCompletion", () => {
 
     const result = await pollBatchRequestResult({
       apiKey: "test-key",
+      baseURL: "https://api.x.ai/v1",
       batchId: "batch-2",
       batchRequestId: "req-4",
       initialPollMs: 0,

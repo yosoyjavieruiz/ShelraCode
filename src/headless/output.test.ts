@@ -87,6 +87,36 @@ describe("headless output helpers", () => {
     });
   });
 
+  it("renders the full executable plan in headless text mode", () => {
+    const output = [
+      "Plan: Implement clock",
+      "Goal: A working clock is visible.",
+      "Acceptance criteria:",
+      "  AC1. Clock updates | verify: observe it in a browser",
+    ].join("\n");
+    const chunk: StreamChunk = {
+      type: "tool_result",
+      toolCall: toolCall("generate_plan"),
+      toolResult: {
+        success: true,
+        output,
+        plan: {
+          title: "Implement clock",
+          summary: "Create and verify a clock.",
+          goal: "A working clock is visible.",
+          requirements: ["Show time"],
+          acceptanceCriteria: [{ id: "AC1", description: "Clock updates", verification: "observe it in a browser" }],
+          steps: [],
+        },
+      },
+    };
+
+    expect(renderHeadlessChunk(chunk)).toEqual({
+      stdout: `${output}\n`,
+      stderr: "\u001b[32m▸ generate_plan\u001b[0m\n",
+    });
+  });
+
   it("emits semantic JSONL for a single step with text and tool (json emitter)", () => {
     const sessionId = "jsonl-test-session";
     const tc = toolCall("bash");

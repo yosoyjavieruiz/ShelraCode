@@ -52,10 +52,10 @@ export class X402Service {
 
   private ensureEnabled(): void {
     if (!this.settings.enabled) {
-      throw new Error("Payments are disabled. Enable them in ~/.grok/user-settings.json.");
+      throw new Error("Payments are disabled. Enable them in ~/.shelra/user-settings.json.");
     }
     if (!WalletManager.exists()) {
-      throw new Error("No wallet found. Run `grok wallet init` first.");
+      throw new Error("No wallet found. Run `shelra wallet init` first.");
     }
   }
 

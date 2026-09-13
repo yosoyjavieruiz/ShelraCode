@@ -84,7 +84,7 @@ describe("GrokSttEngine", () => {
     );
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const engine = new GrokSttEngine({ apiKey: "test-key" });
+    const engine = new GrokSttEngine({ apiKey: "test-key", baseURL: "https://api.x.ai/v1" });
     await engine.transcribe({ audioPath });
 
     const body = (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as FormData;
@@ -102,7 +102,7 @@ describe("GrokSttEngine", () => {
         new Response("invalid audio", { status: 400, statusText: "Bad Request" }),
       ) as unknown as typeof fetch;
 
-    const engine = new GrokSttEngine({ apiKey: "test-key" });
+    const engine = new GrokSttEngine({ apiKey: "test-key", baseURL: "https://api.x.ai/v1" });
     await expect(engine.transcribe({ audioPath })).rejects.toThrow(/Grok STT request failed \(400\).*invalid audio/);
   });
 
@@ -117,7 +117,7 @@ describe("GrokSttEngine", () => {
       }),
     ) as unknown as typeof fetch;
 
-    const engine = new GrokSttEngine({ apiKey: "test-key" });
+    const engine = new GrokSttEngine({ apiKey: "test-key", baseURL: "https://api.x.ai/v1" });
     await expect(engine.transcribe({ audioPath })).rejects.toThrow(/empty transcript/i);
   });
 });

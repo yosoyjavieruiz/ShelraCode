@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 3;
+const LATEST_DB_VERSION = 4;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -14,8 +14,12 @@ export function applyMigrations(db: SQLiteDatabase): void {
       createCompactionSchema(db);
       db.pragma("user_version = 2");
     }
-    if (version < LATEST_DB_VERSION) {
+    if (version < 3) {
       createSessionRecapSchema(db);
+      db.pragma("user_version = 3");
+    }
+    if (version < LATEST_DB_VERSION) {
+      createAutonomyLedgerSchema(db);
       db.pragma(`user_version = ${LATEST_DB_VERSION}`);
     }
 
@@ -96,15 +100,6 @@ function createInitialSchema(db: SQLiteDatabase): void {
       created_at TEXT NOT NULL
     ) STRICT;
 
-    CREATE TABLE IF NOT EXISTS compactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-      first_kept_seq INTEGER NOT NULL,
-      summary TEXT NOT NULL,
-      tokens_before INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL
-    ) STRICT;
-
     CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated
       ON sessions(workspace_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_session_seq
@@ -113,9 +108,11 @@ function createInitialSchema(db: SQLiteDatabase): void {
       ON tool_calls(session_id, message_seq);
     CREATE INDEX IF NOT EXISTS idx_usage_events_session_created
       ON usage_events(session_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_compactions_session_created
-      ON compactions(session_id, created_at DESC);
   `);
+  // compactions is created by createCompactionSchema, which always runs in the same
+  // migrate() transaction as a fresh install (version starts at 0, so both the
+  // version<1 and version<2 branches fire) as well as for real v1->v2 upgrades.
+  // Defining it here too would just be a redundant duplicate CREATE.
 }
 
 function createCompactionSchema(db: SQLiteDatabase): void {
@@ -138,6 +135,66 @@ function createSessionRecapSchema(db: SQLiteDatabase): void {
   addColumnIfMissing(db, "sessions", "recap_text", "TEXT");
   addColumnIfMissing(db, "sessions", "recap_model", "TEXT");
   addColumnIfMissing(db, "sessions", "recap_updated_at", "TEXT");
+}
+
+/**
+ * Cross-references a chat session with any autonomy objective(s) it ran, and adds file
+ * checkpoints. The autonomy runtime's own file-based journal (`src/autonomy/journal.ts`)
+ * remains the source of truth for the full action/observation/verification/repair history
+ * of one run — that is already well-designed and per-run reconstructable from disk. This
+ * schema only indexes the parts that must be queryable *across* runs/sessions without
+ * loading every run's journal off disk: which session (if any) an objective belongs to,
+ * current phase/stop reason, and per-task status.
+ */
+function createAutonomyLedgerSchema(db: SQLiteDatabase): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS objectives (
+      id TEXT PRIMARY KEY,
+      session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+      workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      request TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      stop_reason TEXT,
+      blocker TEXT,
+      run_dir TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS idx_objectives_session
+      ON objectives(session_id);
+    CREATE INDEX IF NOT EXISTS idx_objectives_workspace_updated
+      ON objectives(workspace_id, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS objective_tasks (
+      objective_id TEXT NOT NULL REFERENCES objectives(id) ON DELETE CASCADE,
+      task_id TEXT NOT NULL,
+      description TEXT NOT NULL,
+      satisfies_json TEXT NOT NULL,
+      status TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (objective_id, task_id)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS checkpoints (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+      objective_id TEXT REFERENCES objectives(id) ON DELETE SET NULL,
+      workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      file_path TEXT NOT NULL,
+      previous_existed INTEGER NOT NULL,
+      previous_content TEXT,
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_workspace_path_created
+      ON checkpoints(workspace_id, file_path, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_session_created
+      ON checkpoints(session_id, created_at DESC);
+  `);
 }
 
 function ensureLatestSchema(db: SQLiteDatabase): void {

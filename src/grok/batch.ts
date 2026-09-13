@@ -1,6 +1,8 @@
 import process from "node:process";
 
-const DEFAULT_BASE_URL = "https://api.x.ai/v1";
+/** Legacy batch compatibility. The application disables batch for local and
+ * generic adapters unless they explicitly declare support. An endpoint must be
+ * supplied by the caller; there is no implicit xAI destination. */
 const DEFAULT_INITIAL_POLL_MS = 2_000;
 const DEFAULT_MAX_POLL_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
@@ -303,7 +305,8 @@ async function requestJson<T>(
     retryRateLimit?: boolean;
   },
 ): Promise<T> {
-  const url = `${normalizeBaseUrl(options.baseURL)}${options.path.startsWith("/") ? options.path : `/${options.path}`}`;
+  const baseURL = normalizeBaseUrl(options.baseURL);
+  const url = `${baseURL}${options.path.startsWith("/") ? options.path : `/${options.path}`}`;
   let attempt = 0;
   let delayMs = 500;
 
@@ -353,7 +356,11 @@ async function readJson<T>(response: Response): Promise<T> {
 }
 
 function normalizeBaseUrl(baseURL?: string): string {
-  return (baseURL || process.env.GROK_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const endpoint = baseURL || process.env.SHELRA_BASE_URL || process.env.GROK_BASE_URL;
+  if (!endpoint) {
+    throw new Error("Batch provider base URL required. Set SHELRA_BASE_URL or pass baseURL explicitly.");
+  }
+  return endpoint.replace(/\/+$/, "");
 }
 
 function getRetryAfterMs(response: Response): number | undefined {

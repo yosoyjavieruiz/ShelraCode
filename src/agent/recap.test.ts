@@ -1,27 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-async function importAgentModuleWithRecapMocks() {
-  vi.resetModules();
-
-  const generateRecap = vi.fn(async () => ({
-    recap: "Recovered the latest session state.",
-    modelId: "grok-4.20-non-reasoning",
-    usage: {
-      inputTokens: 10,
-      outputTokens: 4,
-      totalTokens: 14,
-    },
-  }));
-
-  vi.doMock("../grok/client", async () => {
-    const actual = await vi.importActual<typeof import("../grok/client")>("../grok/client");
-    return {
-      ...actual,
-      generateRecap,
-    };
-  });
-
-  vi.doMock("../storage/index", () => ({
+const testMocks = vi.hoisted(() => {
+  const generateRecap = vi.fn();
+  const storage = {
     appendCompaction: vi.fn(),
     appendMessages: vi.fn(() => []),
     appendSystemMessage: vi.fn(() => 0),
@@ -54,43 +35,44 @@ async function importAgentModuleWithRecapMocks() {
       setMode() {}
       touchSession() {}
     },
-  }));
+  };
+  return { generateRecap, storage };
+});
 
-  const mod = await import("./agent");
+vi.mock("../providers/auxiliary", async () => {
+  const actual = await vi.importActual<typeof import("../providers/auxiliary")>("../providers/auxiliary");
+  return { ...actual, generateRecap: testMocks.generateRecap };
+});
+
+vi.mock("../storage/index", () => testMocks.storage);
+
+import { Agent } from "./agent";
+
+function makeSession() {
   return {
-    ...mod,
-    mocks: {
-      generateRecap,
-    },
+    id: "session-1",
+    workspaceId: "workspace-1",
+    title: null,
+    recap: null,
+    model: "local-test-model",
+    mode: "agent",
+    cwdAtStart: process.cwd(),
+    cwdLast: process.cwd(),
+    status: "active",
+    createdAt: new Date("2026-04-22T15:00:00.000Z"),
+    updatedAt: new Date("2026-04-22T15:00:00.000Z"),
   };
 }
 
-afterEach(() => {
-  vi.restoreAllMocks();
-  vi.resetModules();
-  vi.doUnmock("../grok/client");
-  vi.doUnmock("../storage/index");
-});
-
 describe("Agent session recap", () => {
   it("does not throw when persisting a generated recap fails", async () => {
-    const { Agent, mocks } = await importAgentModuleWithRecapMocks();
-    const agent = new Agent(undefined, undefined, undefined, undefined, {
-      persistSession: false,
+    testMocks.generateRecap.mockReset().mockResolvedValue({
+      recap: "Recovered the latest session state.",
+      modelId: "local-test-model",
+      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 },
     });
-    const session = {
-      id: "session-1",
-      workspaceId: "workspace-1",
-      title: null,
-      recap: null,
-      model: "grok-4.3",
-      mode: "agent",
-      cwdAtStart: process.cwd(),
-      cwdLast: process.cwd(),
-      status: "active",
-      createdAt: new Date("2026-04-22T15:00:00.000Z"),
-      updatedAt: new Date("2026-04-22T15:00:00.000Z"),
-    };
+    const agent = new Agent(undefined, undefined, undefined, undefined, { persistSession: false });
+    const session = makeSession();
     const sessionStore = {
       setRecap: vi.fn(() => {
         throw new Error("database is unavailable");
@@ -98,61 +80,35 @@ describe("Agent session recap", () => {
       getRequiredSession: vi.fn(() => session),
     };
 
-    Object.assign(agent as object, {
-      provider: {},
-      session,
-      sessionStore,
-    });
+    Object.assign(agent as object, { provider: {}, session, sessionStore });
 
     await expect(
-      (
-        agent as unknown as {
-          refreshSessionRecap: (signal?: AbortSignal) => Promise<void>;
-        }
-      ).refreshSessionRecap(),
+      (agent as unknown as { refreshSessionRecap: (signal?: AbortSignal) => Promise<void> }).refreshSessionRecap(),
     ).resolves.toBeUndefined();
 
-    expect(mocks.generateRecap).toHaveBeenCalled();
+    expect(testMocks.generateRecap).toHaveBeenCalled();
     expect(sessionStore.setRecap).toHaveBeenCalled();
   });
 
   it("skips recap generation when recaps are disabled", async () => {
-    const { Agent, mocks } = await importAgentModuleWithRecapMocks();
-    const agent = new Agent(undefined, undefined, undefined, undefined, {
-      persistSession: false,
+    testMocks.generateRecap.mockReset().mockResolvedValue({
+      recap: "Should not be generated.",
+      modelId: "local-test-model",
+      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 },
     });
-    const session = {
-      id: "session-1",
-      workspaceId: "workspace-1",
-      title: null,
-      recap: null,
-      model: "grok-4.3",
-      mode: "agent",
-      cwdAtStart: process.cwd(),
-      cwdLast: process.cwd(),
-      status: "active",
-      createdAt: new Date("2026-04-22T15:00:00.000Z"),
-      updatedAt: new Date("2026-04-22T15:00:00.000Z"),
-    };
+    const agent = new Agent(undefined, undefined, undefined, undefined, { persistSession: false });
+    const session = makeSession();
     const sessionStore = {
       setRecap: vi.fn(),
       getRequiredSession: vi.fn(() => session),
     };
 
     agent.setRecapsEnabled(false);
-    Object.assign(agent as object, {
-      provider: {},
-      session,
-      sessionStore,
-    });
+    Object.assign(agent as object, { provider: {}, session, sessionStore });
 
-    await (
-      agent as unknown as {
-        refreshSessionRecap: (signal?: AbortSignal) => Promise<void>;
-      }
-    ).refreshSessionRecap();
+    await (agent as unknown as { refreshSessionRecap: (signal?: AbortSignal) => Promise<void> }).refreshSessionRecap();
 
-    expect(mocks.generateRecap).not.toHaveBeenCalled();
+    expect(testMocks.generateRecap).not.toHaveBeenCalled();
     expect(sessionStore.setRecap).not.toHaveBeenCalled();
   });
 });

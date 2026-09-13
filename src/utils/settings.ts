@@ -1,7 +1,5 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
-import { DEFAULT_MODEL, getEffectiveReasoningEffort, getModelIds, normalizeModelId } from "../grok/models";
 import type { HooksConfig } from "../hooks/types";
 import type {
   LspBuiltInServerId,
@@ -10,6 +8,20 @@ import type {
   LspSettings,
   NormalizedLspSettings,
 } from "../lsp/types";
+import { DEFAULT_MODEL, getEffectiveReasoningEffort, normalizeModelId } from "../models/catalog";
+import {
+  API_KEY_ENV,
+  BASE_URL_ENV,
+  CONFIG_DIR_NAME,
+  getLegacyUserDir,
+  getProductUserDir,
+  LEGACY_CONFIG_DIR_NAME,
+  MIGRATION_MARKER_NAME,
+  MODEL_ENV,
+  OPENROUTER_API_KEY_ENV,
+  OPENROUTER_BASE_URL,
+} from "../product/identity";
+import { getStoredOpenRouterApiKey } from "../security/credentials";
 import type { AgentMode, ReasoningEffort } from "../types/index";
 
 export type TelegramStreamingMode = "off" | "partial";
@@ -115,6 +127,7 @@ export interface CustomSubagentConfig {
 const RESERVED_SUBAGENT_NAMES = new Set([
   "general",
   "explore",
+  "plan",
   "vision",
   "verify",
   "verify-detect",
@@ -129,7 +142,6 @@ export function isReservedSubagentName(name: string): boolean {
 export function parseSubAgentsRawList(raw: unknown): CustomSubagentConfig[] {
   if (!Array.isArray(raw)) return [];
 
-  const validModels = new Set(getModelIds());
   const seen = new Set<string>();
   const agents: CustomSubagentConfig[] = [];
 
@@ -141,7 +153,13 @@ export function parseSubAgentsRawList(raw: unknown): CustomSubagentConfig[] {
     const model = typeof entry.model === "string" ? normalizeModelId(entry.model) : "";
     const instruction = typeof entry.instruction === "string" ? entry.instruction : "";
 
-    if (!name || isReservedSubagentName(name) || !validModels.has(model)) {
+    if (
+      !name ||
+      isReservedSubagentName(name) ||
+      !model ||
+      /^(?:xai|x-ai)\//i.test(model) ||
+      /^grok(?:-|$)/i.test(model)
+    ) {
       continue;
     }
 
@@ -162,17 +180,26 @@ export function loadValidSubAgents(): CustomSubagentConfig[] {
 export interface UserSettings {
   apiKey?: string;
   defaultModel?: string;
+  /** Last validated local selection; the runtime is still rediscovered on boot. */
+  localRuntimeId?: string;
+  lastLocalHealthCheck?: string;
   recapsEnabled?: boolean;
   sandboxMode?: SandboxMode;
   sandbox?: SandboxSettings;
   lsp?: LspSettings;
   reasoningEffortByModel?: Record<string, ReasoningEffort>;
+  /** Explicit `/effort` override, session-wide (not per-model). `undefined` means "auto". */
+  reasoningEffort?: ReasoningEffort;
   telegram?: TelegramSettings;
   mcp?: McpSettings;
   subAgents?: CustomSubagentConfig[];
   hooks?: HooksConfig;
   payments?: PaymentSettings;
   modeModels?: Partial<Record<AgentMode, string>>;
+  /** Terminal interface appearance; system follows the renderer when it reports a scheme. */
+  appearance?: "system" | "dark" | "light";
+  /** Explicit terminal equivalent of reduced motion. */
+  motion?: "full" | "reduced";
 }
 
 export interface ProjectSettings {
@@ -182,8 +209,10 @@ export interface ProjectSettings {
   lsp?: LspSettings;
 }
 
-const USER_DIR = path.join(os.homedir(), ".grok");
+const USER_DIR = getProductUserDir();
+const LEGACY_USER_DIR = getLegacyUserDir();
 const USER_SETTINGS_PATH = path.join(USER_DIR, "user-settings.json");
+const LEGACY_USER_SETTINGS_PATH = path.join(LEGACY_USER_DIR, "user-settings.json");
 
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
@@ -206,17 +235,37 @@ function writeJson(filePath: string, data: unknown): void {
 }
 
 export function loadUserSettings(): UserSettings {
-  return readJson<UserSettings>(USER_SETTINGS_PATH) || {};
+  return readJson<UserSettings>(USER_SETTINGS_PATH) || readJson<UserSettings>(LEGACY_USER_SETTINGS_PATH) || {};
+}
+
+export function normalizeAppearancePreference(value: unknown): "system" | "dark" | "light" {
+  return value === "dark" || value === "light" ? value : "system";
+}
+
+export function normalizeMotionPreference(value: unknown): "full" | "reduced" {
+  return value === "reduced" ? "reduced" : "full";
+}
+
+export function loadAppearancePreference(): "system" | "dark" | "light" {
+  return normalizeAppearancePreference(loadUserSettings().appearance);
+}
+
+export function loadMotionPreference(): "full" | "reduced" {
+  return normalizeMotionPreference(loadUserSettings().motion);
 }
 
 export function saveUserSettings(partial: Partial<UserSettings>): void {
   const current = loadUserSettings();
+  const hadCanonicalSettings = fs.existsSync(USER_SETTINGS_PATH);
+  const loadedLegacySettings = !hadCanonicalSettings && fs.existsSync(LEGACY_USER_SETTINGS_PATH);
   const next: UserSettings = {
     ...current,
     ...partial,
     ...(partial.apiKey !== undefined ? { apiKey: partial.apiKey } : {}),
     ...(partial.defaultModel !== undefined ? { defaultModel: normalizeModelId(partial.defaultModel) } : {}),
     ...(partial.sandboxMode !== undefined ? { sandboxMode: normalizeSandboxMode(partial.sandboxMode) } : {}),
+    ...(partial.appearance !== undefined ? { appearance: normalizeAppearancePreference(partial.appearance) } : {}),
+    ...(partial.motion !== undefined ? { motion: normalizeMotionPreference(partial.motion) } : {}),
     ...(partial.reasoningEffortByModel !== undefined
       ? {
           reasoningEffortByModel: Object.fromEntries(
@@ -283,15 +332,23 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
   };
 
   writeJson(USER_SETTINGS_PATH, next);
+  if (loadedLegacySettings) {
+    writeJson(path.join(USER_DIR, MIGRATION_MARKER_NAME), {
+      source: LEGACY_USER_SETTINGS_PATH,
+      migratedAt: new Date().toISOString(),
+      writes: "canonical-only",
+    });
+  }
 }
 
 export function loadProjectSettings(): ProjectSettings {
-  const projectPath = path.join(process.cwd(), ".grok", "settings.json");
-  return readJson<ProjectSettings>(projectPath) || {};
+  const projectPath = path.join(process.cwd(), CONFIG_DIR_NAME, "settings.json");
+  const legacyPath = path.join(process.cwd(), LEGACY_CONFIG_DIR_NAME, "settings.json");
+  return readJson<ProjectSettings>(projectPath) || readJson<ProjectSettings>(legacyPath) || {};
 }
 
 export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
-  const projectPath = path.join(process.cwd(), ".grok", "settings.json");
+  const projectPath = path.join(process.cwd(), CONFIG_DIR_NAME, "settings.json");
   const current = loadProjectSettings();
   writeJson(projectPath, {
     ...current,
@@ -310,15 +367,28 @@ export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
 }
 
 export function getApiKey(): string | undefined {
-  return process.env.GROK_API_KEY || loadUserSettings().apiKey;
+  return (
+    process.env[OPENROUTER_API_KEY_ENV] ||
+    process.env.KEY_OPENROUTER ||
+    process.env[API_KEY_ENV] ||
+    process.env.GROK_API_KEY ||
+    getStoredOpenRouterApiKey() ||
+    loadUserSettings().apiKey
+  );
 }
 
 export function getBaseURL(): string {
-  return process.env.GROK_BASE_URL || "https://api.x.ai/v1";
+  return (
+    process.env[BASE_URL_ENV] ||
+    process.env.GROK_BASE_URL ||
+    (getApiKey() && (process.env[OPENROUTER_API_KEY_ENV] || process.env.KEY_OPENROUTER || getStoredOpenRouterApiKey())
+      ? OPENROUTER_BASE_URL
+      : "")
+  );
 }
 
 export function getCurrentModel(mode?: AgentMode): string {
-  if (process.env.GROK_MODEL) return normalizeModelId(process.env.GROK_MODEL);
+  if (process.env[MODEL_ENV]) return normalizeModelId(process.env[MODEL_ENV]);
 
   const project = loadProjectSettings();
   if (project.model) return normalizeModelId(project.model);
@@ -327,21 +397,28 @@ export function getCurrentModel(mode?: AgentMode): string {
     const user = loadUserSettings();
     const modeModel = user.modeModels?.[mode];
     if (modeModel) {
-      return normalizeModelId(modeModel);
+      return resolveCurrentModel(modeModel);
     }
   }
 
   const user = loadUserSettings();
-  return user.defaultModel ? normalizeModelId(user.defaultModel) : DEFAULT_MODEL;
+  return resolveCurrentModel(undefined, user.defaultModel);
+}
+
+/** Pure model precedence helper so settings behavior can be tested without
+ * reading or mutating a developer's real ~/.shelra configuration. */
+export function resolveCurrentModel(modeModel?: string, defaultModel?: string): string {
+  if (modeModel) return normalizeModelId(modeModel);
+  return defaultModel ? normalizeModelId(defaultModel) : DEFAULT_MODEL;
 }
 
 /**
  * Returns the explicitly configured model for a mode, or undefined if none is set.
- * Only GROK_MODEL env var suppresses this (absolute override). Project-level model
+ * Only SHELRA_MODEL env var suppresses this (absolute override). Project-level model
  * does NOT suppress — modeModels is an explicit per-mode config that applies on mode switch.
  */
 export function getModeSpecificModel(mode: AgentMode): string | undefined {
-  if (process.env.GROK_MODEL) return undefined;
+  if (process.env[MODEL_ENV]) return undefined;
 
   const user = loadUserSettings();
   const modeModel = user.modeModels?.[mode];

@@ -1,8 +1,19 @@
+import type { createXai } from "@ai-sdk/xai";
 import { generateImage, experimental_generateVideo as generateVideo } from "ai";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, extname, isAbsolute, join, resolve } from "path";
 import type { MediaAsset, ToolResult } from "../types/index";
-import type { XaiProvider } from "./client";
+
+/**
+ * Was re-exported from the now-removed `./client` (the legacy xAI-only `GrokProviderAdapter` —
+ * see docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §14 Phase 0). `generateImageTool`/
+ * `generateVideoTool` below are xAI-specific (Grok Imagine) and currently have no live caller:
+ * no remaining `ProviderAdapter` (`OpenRouterProviderAdapter`, `LocalProviderAdapter`)
+ * implements `ProviderToolContext.generateImage`/`generateVideo`, only the deleted xAI adapter
+ * did. Left in place — deciding their fate is a separate question from the batch-mode removal
+ * this cleanup was scoped to.
+ */
+type XaiProvider = ReturnType<typeof createXai>;
 
 const GENERATED_MEDIA_DIR = ".grok/generated-media";
 const IMAGE_MODEL_ID = "grok-imagine-image";

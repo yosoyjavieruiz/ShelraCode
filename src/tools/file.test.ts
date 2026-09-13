@@ -1,8 +1,9 @@
+import { existsSync } from "fs";
 import { mkdtemp, readFile, rm, writeFile as writeFsFile } from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { editFile, writeFile } from "./file";
+import { deleteFile, editFile, writeFile } from "./file";
 
 const summarizeDiagnosticsMock = vi.fn<(diagnostics: unknown) => string>(() => "1 LSP issue · 1 error");
 const syncFileWithLspMock = vi.fn<
@@ -85,6 +86,32 @@ describe("file tool LSP integration", () => {
     expect(result.success).toBe(true);
     expect(content).toContain("42");
     expect(syncFileWithLspMock).toHaveBeenCalledWith(cwd, filePath, "const answer = 42;\n", true, true);
+  });
+});
+
+describe("deleteFile", () => {
+  it("removes the file and returns a full-removal diff", async () => {
+    const cwd = await createTempDir();
+    const filePath = path.join(cwd, "demo.ts");
+    await writeFsFile(filePath, "const answer = 42;\nconst other = 1;\n", "utf8");
+
+    const result = await deleteFile("demo.ts", cwd);
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("Deleted demo.ts");
+    expect(existsSync(filePath)).toBe(false);
+    expect(result.diff?.additions).toBe(0);
+    expect(result.diff?.removals).toBe(2);
+    expect(result.diff?.patch).toContain("-const answer = 42;");
+  });
+
+  it("fails cleanly when the file does not exist", async () => {
+    const cwd = await createTempDir();
+    const result = await deleteFile("missing.ts", cwd);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("File not found");
+    expect(result.diff).toBeUndefined();
   });
 });
 

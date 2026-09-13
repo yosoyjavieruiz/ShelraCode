@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import fs from "fs";
-import os from "os";
 import path from "path";
+import { getProductUserDir, LEGACY_CONFIG_DIR_NAME } from "../product/identity";
 import { applyMigrations } from "./migrations";
 
 export interface SQLiteStatement {
@@ -21,9 +21,18 @@ export interface SQLiteDatabase {
 let db: SQLiteDatabase | null = null;
 
 export function getDatabasePath(): string {
-  const dir = path.join(os.homedir(), ".grok");
+  const dir = getProductUserDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return path.join(dir, "grok.db");
+  const target = path.join(dir, "shelra.db");
+  const legacy = path.join(path.dirname(dir), LEGACY_CONFIG_DIR_NAME, "grok.db");
+  if (!fs.existsSync(target) && fs.existsSync(legacy)) {
+    try {
+      fs.copyFileSync(legacy, target);
+    } catch {
+      // Fall back to a fresh canonical database if the legacy copy is unavailable.
+    }
+  }
+  return target;
 }
 
 export function getDatabase(): SQLiteDatabase {

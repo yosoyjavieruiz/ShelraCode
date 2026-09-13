@@ -12,8 +12,8 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
-function readStoredDelegationRecord(home: string): Record<string, unknown> {
-  const delegationsRoot = path.join(home, ".grok", "delegations");
+function readStoredDelegationRecord(home: string, configDir = ".shelra"): Record<string, unknown> {
+  const delegationsRoot = path.join(home, configDir, "delegations");
   const projectDirs = fs.readdirSync(delegationsRoot);
   expect(projectDirs).toHaveLength(1);
   const projectDir = path.join(delegationsRoot, projectDirs[0] as string);
@@ -62,7 +62,7 @@ describe("DelegationManager sandbox propagation", () => {
       unref: vi.fn(),
     }));
     const mod = await importDelegationsModule({ home, spawnMock });
-    const manager = new mod.DelegationManager(() => cwd);
+    const manager = new mod.DelegationManager(() => cwd, spawnMock as never);
 
     const result = await manager.start(
       {
@@ -102,7 +102,7 @@ describe("DelegationManager sandbox propagation", () => {
       unref: vi.fn(),
     }));
     const mod = await importDelegationsModule({ home, spawnMock });
-    const manager = new mod.DelegationManager(() => cwd);
+    const manager = new mod.DelegationManager(() => cwd, spawnMock as never);
 
     const sandboxSettings = {
       allowNet: true,
@@ -138,5 +138,36 @@ describe("DelegationManager sandbox propagation", () => {
 
     expect(record.sandboxMode).toBe("shuru");
     expect(record.sandboxSettings).toEqual(sandboxSettings);
+  });
+});
+
+describe("legacy delegation mirror", () => {
+  async function startDelegation(home: string) {
+    const cwd = makeTempDir("grok-delegation-cwd-");
+    const spawnMock = vi.fn(() => ({ pid: 1234, unref: vi.fn() }));
+    const mod = await importDelegationsModule({ home, spawnMock });
+    const manager = new mod.DelegationManager(() => cwd, spawnMock as never);
+    await manager.start(
+      { agent: "explore", description: "Inspect", prompt: "Look around" },
+      { model: "grok-test-model", sandboxMode: "shuru", maxToolRounds: 25, maxTokens: 2048 },
+    );
+  }
+
+  it("never creates the legacy directory for a fresh install", async () => {
+    const home = makeTempDir("grok-delegation-home-");
+    await startDelegation(home);
+
+    expect(fs.existsSync(path.join(home, ".shelra", "delegations"))).toBe(true);
+    expect(fs.existsSync(path.join(home, ".grok", "delegations"))).toBe(false);
+  });
+
+  it("still mirrors when the legacy directory already exists", async () => {
+    const home = makeTempDir("grok-delegation-home-");
+    fs.mkdirSync(path.join(home, ".grok", "delegations"), { recursive: true });
+    await startDelegation(home);
+
+    const canonical = readStoredDelegationRecord(home);
+    const legacy = readStoredDelegationRecord(home, ".grok");
+    expect(legacy).toEqual(canonical);
   });
 });

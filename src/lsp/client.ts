@@ -192,7 +192,7 @@ export async function createLspClientSession(options: LspClientOptions): Promise
     },
     async sendRequest<TResult>(method: string, params: unknown) {
       ensureActive(stopped, options.serverId);
-      return connection.sendRequest(method, params);
+      return connection.sendRequest<TResult>(method, params);
     },
     async waitForDiagnostics(filePath, timeoutMs = 1_500) {
       const normalizedPath = normalizeFsPath(filePath);

@@ -8,59 +8,55 @@ alwaysApply: true
 
 ## Prerequisites
 
-- Bun 1.0+ (required)
+- Bun 1.3+ (required for build **and** runtime)
 
 ## Common Commands
 
 ```bash
-# Install dependencies
-bun install
-
-# Development (runs from source with Bun)
-bun run dev
-
-# Build (compile TypeScript to dist/)
-bun run build
-
-# Type checking (no emit)
-bun run typecheck
-
-# Linting
-bun run lint
-
-# Format (check / write)
-bun run format
-bun run format:fix
-
-# Run the built CLI
-bun run start
+bun install            # deps + Husky pre-commit (Biome on staged files)
+bun run src/index.ts   # dev run from source
+bun run typecheck      # tsc --noEmit
+bun run lint           # biome check src/
+bun run format         # biome format src/   (fix: bun run format:fix)
+bun run test           # vitest
+bun run build          # scripts/build.ts → dist/index.js + dist/shelra.exe (+ per-user install)
+SHELRA_BUILD_SKIP_INSTALL=1 bun run build   # build artifacts only
+bun run dist/index.js  # run the built CLI (Bun only; node fails on bun:sqlite)
 ```
 
 ## Environment Variables
 
-| Variable | Required | Description |
-|----|----|----|
-| `GROK_API_KEY` | Yes | API key for xAI Grok |
-| `GROK_BASE_URL` | No | Custom API endpoint (default: `https://api.x.ai/v1`) |
-| `GROK_MODEL` | No | Model override (default: `grok-4.3`) |
-| `GROK_MAX_TOKENS` | No | Max tokens per response (default: 16384) |
+The default path is cloud-first OpenRouter Free and needs an OpenRouter key.
+The managed local path is explicit through `--local`; copy `.env.example` to
+`.env` for the full list.
 
-Copy `.env.example` to `.env` and fill in your values.
+| Variable | Purpose |
+|----|----|
+| `OPENROUTER_API_KEY` | Primary cloud provider key; activates dynamic Free catalog and routing. |
+| `SHELRA_API_KEY` / `SHELRA_BASE_URL` | Optional generic OpenAI-compatible provider (`--remote`). Legacy `GROK_*` still read. |
+| `SHELRA_MODEL` | Force a model id for every turn |
+| `SHELRA_RUNTIME_BACKEND` | `cpu` or `cuda` for the managed llama.cpp engine (auto-detected) |
+| `TELEGRAM_BOT_TOKEN` | Enable the Telegram bridge |
+
+Every agent task also performs bounded web research, prioritizing Google when
+available and falling back only when Google cannot return usable results.
 
 ## Git hooks
 
-After `bun install`, **Husky** installs a **pre-commit** hook that runs **`lint-staged`**: Biome **format + lint** (`check --write`) on staged `*.{ts,tsx,js,mjs,cjs,json}` files. Fixes are written to disk and re-staged automatically when possible.
+`bun install` sets up **Husky** → **lint-staged**, which runs
+`biome check --write` on staged `*.{ts,tsx,js,mjs,cjs,json}` and re-stages fixes.
 
-## Before Submitting Changes
+## Before submitting changes
 
-1. Run `bun run typecheck` — CI enforces this on every PR.
-2. Run `bun run lint` — fix any Biome issues (or let pre-commit apply safe fixes).
-3. Ensure no secrets or `.env` files are committed.
-4. Follow the PR template in `.github/pull_request_template.md`.
+1. `bun run format` and `bun run lint` — CI blocks on both (Biome).
+2. `bun run typecheck` — CI enforces.
+3. `bun run test`.
+4. `bun run build` — CI runs `build:binary`.
+5. No secrets or `.env` files committed.
 
-## Project Structure Conventions
+## Project structure conventions
 
-- Source code lives in `src/`, compiled output in `dist/` (gitignored).
-- The CLI entry point is `src/index.ts` which uses Commander.js for argument parsing.
-- UI is built with OpenTUI React (`@opentui/react`).
-- Only tool is bash — all file operations happen through shell commands.
+- Source in `src/`, compiled output in `dist/` (gitignored unless built locally).
+- CLI entry is `src/index.ts` (Commander) → OpenTUI React shell in `src/ui/`.
+- `ShelraCode/` is a gitignored migration reference checkout — do not edit it.
+- Line endings are CRLF repo-wide (`biome.json` + `.gitattributes`).

@@ -3,6 +3,7 @@ export function formatSubagentName(agent: string): string {
   if (agent === "explore") return "Explore";
   if (agent === "vision") return "Vision";
   if (agent === "verify") return "Verify";
+  if (agent === "ui-verify") return "UI Verifier";
   if (agent === "verify-detect") return "Verify Detect";
   if (agent === "verify-manifest") return "Verify Manifest";
   if (agent === "computer") return "Computer";

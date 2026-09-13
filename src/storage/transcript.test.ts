@@ -21,4 +21,14 @@ describe("transcript media tool results", () => {
 
     expect(extractToolResultFromOutput(mediaResult)).toEqual(mediaResult);
   });
+
+  it("preserves explicit plan progress for session resume", () => {
+    const update: ToolResult = {
+      success: true,
+      output: "Plan step 2 is working.",
+      planUpdate: { index: 1, status: "working", evidence: "Running restart test" },
+    };
+
+    expect(extractToolResultFromOutput(update)).toMatchObject({ planUpdate: update.planUpdate });
+  });
 });

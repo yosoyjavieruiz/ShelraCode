@@ -2,10 +2,11 @@ import { spawn } from "child_process";
 import { closeSync, promises as fs, openSync } from "fs";
 import os from "os";
 import path from "path";
+import { getProductUserDir } from "../product/identity";
 import { getCurrentModel } from "../utils/settings";
 
-const SCHEDULES_DIR = path.join(os.homedir(), ".grok", "schedules");
-const SCHEDULE_DAEMON_PID_PATH = path.join(os.homedir(), ".grok", "daemon.pid");
+const SCHEDULES_DIR = path.join(getProductUserDir(os.homedir()), "schedules");
+const SCHEDULE_DAEMON_PID_PATH = path.join(getProductUserDir(os.homedir()), "daemon.pid");
 
 export interface StoredSchedule {
   id: string;

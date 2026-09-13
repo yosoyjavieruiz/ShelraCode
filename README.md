@@ -1,14 +1,17 @@
-# grok-cli: an open-source coding agent for the Grok API
+# ShelraCode: a cloud-first terminal coding agent
 
 [![CI](https://github.com/superagent-ai/grok-cli/actions/workflows/typecheck.yml/badge.svg)](https://github.com/superagent-ai/grok-cli/actions/workflows/typecheck.yml)
-[![npm](https://img.shields.io/npm/v/grok-dev.svg)](https://www.npmjs.com/package/grok-dev)
+[![npm](https://img.shields.io/npm/v/shelra.svg)](https://www.npmjs.com/package/shelra)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Bun](https://img.shields.io/badge/Bun-1.x-000000?logo=bun&logoColor=white)](https://bun.sh/)
 
-> **Disclaimer:** This project is community-built, open-source, and **not affiliated with, endorsed by, or sponsored by xAI Corp.** "Grok" is a trademark of xAI Corp. This tool uses the publicly available Grok API.
-
-An open-source terminal coding agent that connects to xAI’s Grok API — real-time **X search**, **web search**, the full Grok model lineup, **sub-agents on by default**, **remote control via Telegram** (pair once, drive the agent from your phone while the CLI runs), and a terminal UI built with **Bun** and **OpenTUI**.
+ShelraCode preserves the OpenTUI terminal interaction model of its upstream
+Grok CLI foundation while routing coding work through OpenRouter first. The
+default route is OpenRouter Free, with dynamic model discovery, capability
+filtering, budgets, tool execution, and verification in the real agent loop.
+Local inference remains available as an explicit private/offline mode with
+`--local`; it is not downloaded or started by the default cloud path.
 
 [https://github.com/user-attachments/assets/7ca4f6df-50ca-4e9c-91b2-d4abad5c66cb](https://github.com/user-attachments/assets/7ca4f6df-50ca-4e9c-91b2-d4abad5c66cb)
 
@@ -17,25 +20,47 @@ An open-source terminal coding agent that connects to xAI’s Grok API — real-
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash
+bun install
 ```
 
 **Alternative installs** (requires Bun on PATH):
 
 ```bash
-bun add -g grok-dev
+bun add -g shelra
 ```
 
 **Self-management** (script-installed only):
 
 ```bash
-grok update
-grok uninstall
-grok uninstall --dry-run
-grok uninstall --keep-config
+shelra update
+shelra uninstall
+shelra uninstall --dry-run
+shelra uninstall --keep-config
 ```
 
-**Prerequisites:** a **Grok API key** from [x.ai](https://x.ai) and a modern terminal emulator for the interactive OpenTUI experience. Headless `--prompt` mode does not depend on terminal UI support. If you want host desktop automation via the built-in computer sub-agent, also enable **Accessibility** permission for your terminal app on macOS.
+**Build a portable local executable** (Windows, macOS, or Linux):
+
+```bash
+bun install
+bun run build
+```
+
+The build produces both `dist/index.js` and a Bun standalone executable. On
+Windows the executable is `dist/shelra.exe`; it is copied atomically to
+`%USERPROFILE%\\.shelra\\bin\\shelra.exe`, the active version is recorded in
+`%USERPROFILE%\\.shelra\\active.json`, and that directory is added to the
+user PATH. Open a new terminal after the build, then run `shelra` from any
+project directory. On macOS and Linux the equivalent user-level install
+directory is `$XDG_BIN_HOME` or `~/.local/bin`.
+
+To build artifacts without changing the user installation (CI or local
+inspection), set `SHELRA_BUILD_SKIP_INSTALL=1` before running the same command.
+`SHELRA_INSTALL_BIN` can be used to test or choose a different install
+directory. The installer keeps the previous executable as
+`shelra.exe.previous` (or `shelra.previous` on Unix) and never replaces the
+active binary in place.
+
+**Prerequisites:** Bun and a modern terminal emulator for the interactive OpenTUI experience. The normal `shelra` path uses OpenRouter Free after an OpenRouter API key is configured. Use `shelra auth openrouter <key>` or the in-app cloud setup. Headless `--prompt` mode does not depend on terminal UI support. Use `--local` for the managed local model and offline/private inference.
 
 ---
 
@@ -44,7 +69,7 @@ grok uninstall --keep-config
 **Interactive (default)** — launches the OpenTUI coding agent:
 
 ```bash
-grok
+shelra
 ```
 
 ### Supported terminals
@@ -61,29 +86,29 @@ Other modern terminals may work, but these are the terminal apps we currently re
 **Pick a project directory:**
 
 ```bash
-grok -d /path/to/your/repo
+shelra -d /path/to/your/repo
 ```
 
 **Headless** — one prompt, then exit (scripts, CI, automation):
 
 ```bash
-grok --prompt "run the test suite and summarize failures"
-grok -p "show me package.json" --directory /path/to/project
-grok --prompt "refactor X" --max-tool-rounds 30
-grok --prompt "summarize the repo state" --format json
-grok --prompt "review the repo overnight" --batch-api
-grok --verify
+shelra --prompt "run the test suite and summarize failures"
+shelra -p "show me package.json" --directory /path/to/project
+shelra --prompt "refactor X" --max-tool-rounds 30
+shelra --prompt "summarize the repo state" --format json
+shelra --prompt "review the repo"
+shelra --prompt "review the repo" --local
+shelra --verify
 ```
 
-`--batch-api` uses xAI's Batch API for lower-cost unattended runs. It is a good
-fit for scripts, CI, schedules, and other non-interactive workflows where a
-delayed result is fine.
+`--batch-api` remains available only for compatibility providers that expose a
+batch endpoint. Local runtimes use the normal streaming path.
 
 **Continue a saved session:**
 
 ```bash
-grok --session latest
-grok -s <session-id>
+shelra --session latest
+shelra -s <session-id>
 ```
 
 Works in interactive mode too—same flag.
@@ -91,30 +116,61 @@ Works in interactive mode too—same flag.
 **Structured headless output:**
 
 ```bash
-grok --prompt "summarize the repo state" --format json
+shelra --prompt "summarize the repo state" --format json
 ```
 
 `--format json` emits a newline-delimited JSON event stream instead of the
 default human-readable text output. Events are semantic, step-level records such
 as `step_start`, `text`, `tool_use`, `step_finish`, and `error`.
 
+**Autonomous objective with a visible executable plan:**
+
+```bash
+shelra --autonomous --prompt "Create a responsive digital clock website"
+shelra objectives
+shelra objectives latest
+shelra objectives <id> --json
+```
+
+An autonomous run prints the complete contract before changing files:
+
+- `[SPECIFICATION]`: original goal, derived requirements, and required/optional
+  acceptance criteria, including the concrete check Shelra must execute.
+- `[PLAN]`: ordered tasks and the acceptance-criterion IDs each task advances.
+- `[TASK]`: live task status and attempt count.
+- `Verification`: observed pass/fail evidence for every criterion.
+
+The same data is persisted under `.shelra/objectives/<id>/`, so the plan and its
+evidence remain inspectable after the process exits. Autonomous `--format json`
+uses structured `specification`, `plan`, `task`, `verification`, and `complete`
+events rather than reducing the plan to prose or counters.
+
+The normal interactive Agent mode also exposes `generate_plan`. Before its
+canonical `write_file` or `edit_file` tools may change the workspace, it must
+publish the goal, requirements, acceptance criteria, verification methods, and
+task-to-criterion mapping. The existing Plan-mode view renders the same fields;
+plans without questions are retained when switching from Plan to Agent mode.
+Autonomous mode begins executing after publishing its plan; use `Ctrl+C` to
+cancel. An explicit `--sandbox` autonomous run is currently refused instead of
+pretending that host execution is sandboxed.
+
 ### Computer sub-agent
 
-Grok ships a built-in `**computer**` sub-agent backed by `[agent-desktop](https://github.com/lahfir/agent-desktop)` for host desktop automation on macOS.
+ShelraCode ships a built-in `computer` sub-agent backed by [agent-desktop](https://github.com/lahfir/agent-desktop) for host desktop automation on macOS.
 
 Ask for it in natural language, for example:
 
 ```bash
-grok "Use the computer sub-agent to take a screenshot of my host desktop and tell me what is open."
-grok "Use the computer sub-agent to launch Google Chrome, snapshot the UI, and tell me which refs correspond to the address bar and tabs."
+shelra "Use the computer sub-agent to take a screenshot of my host desktop and tell me what is open."
+shelra "Use the computer sub-agent to launch Google Chrome, snapshot the UI, and tell me which refs correspond to the address bar and tabs."
 ```
 
 Notes:
 
-- Screenshots are saved under `**.grok/computer/**` by default.
+- Screenshots are saved under `.shelra/computer/` by default.
 - The primary workflow is **snapshot -> refs -> action -> snapshot** using `agent-desktop` accessibility snapshots and stable refs like `@e1`.
 - `computer_screenshot` is available for visual confirmation, but the preferred path is `computer_snapshot` plus ref-based actions such as `computer_click`, `computer_type`, and `computer_scroll`.
-- macOS requires **System Settings → Privacy & Security → Accessibility** access for the terminal app running `grok`.
+- macOS requires **System Settings → Privacy & Security → Accessibility** access for the terminal app running `shelra`.
 - `agent-desktop` currently targets **macOS**.
 - If Bun blocks the native binary download during install, run:
 
@@ -124,7 +180,7 @@ node ./node_modules/agent-desktop/scripts/postinstall.js
 
 ### Scheduling
 
-Schedules let Grok run a headless prompt on a recurring schedule or once. Ask
+Schedules let ShelraCode run a headless prompt on a recurring schedule or once. Ask
 for it in natural language, for example:
 
 ```text
@@ -135,58 +191,73 @@ and updates CHANGELOG.md from the latest merged commits.
 Recurring schedules require the background daemon:
 
 ```bash
-grok daemon --background
+shelra daemon --background
 ```
 
 Use `/schedule` in the TUI to browse saved schedules. One-time schedules start
 immediately in the background; recurring schedules keep running as long as the
 daemon is active.
 
-**List Grok models and pricing hints:**
+**Inspect the live OpenRouter catalog and the secondary local catalog:**
 
 ```bash
-grok models
+shelra models
 ```
 
 **Pass an opening message without another prompt:**
 
 ```bash
-grok fix the flaky test in src/foo.test.ts
+shelra fix the flaky test in src/foo.test.ts
 ```
 
 **Generate images or short videos from chat:**
 
 ```bash
-grok "Generate a retro-futuristic logo for my CLI called Grok Forge"
-grok "Edit ./assets/hero.png into a watercolor poster"
-grok "Animate ./assets/cover.jpg into a 6 second cinematic push-in"
+shelra "Generate a retro-futuristic logo for my CLI called ShelraCode"
+shelra "Edit ./assets/hero.png into a watercolor poster"
+shelra "Animate ./assets/cover.jpg into a 6 second cinematic push-in"
 ```
 
-Image and video generation are exposed as agent tools inside normal chat sessions.
-You keep using a text model for the session, and Grok saves generated media under
-`.grok/generated-media/` by default unless you ask for a specific output path.
+Image and video generation remain optional compatibility tools. They are exposed
+only when the selected provider advertises those capabilities; local runtimes
+otherwise receive a clear unavailable result. Generated media uses the existing
+`.grok/generated-media/` compatibility path until that subsystem is replaced.
 
 ---
 
 ## What you actually get
 
+ShelraCode is cloud-first by default. `shelra models` discovers and prints the
+OpenRouter catalog first, then shows managed local models as a secondary
+catalog. The default routing policy is Free; use `--model-policy auto` (or a
+paid policy) only when paid routing is allowed by the configured budget. Use
+`--local` to opt into the managed local runtime. Search and media tools are
+capability-gated, while the built-in web research tools are provider-neutral.
 
-| Thing                             | What it means                                                                                                                                                                                                              |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Built for the Grok API**        | Defaults tuned for the xAI API; models like `grok-4.3`, `grok-4.20-non-reasoning`, `grok-4.20-multi-agent-0309`, plus current flagship and multi-agent variants—run `grok models` for the full menu.                       |
-| **X + web search**                | `**search_x`** and `**search_web`** tools—live posts and docs without pretending the internet stopped in 2023.                                                                                                             |
-| **Media generation**              | Built-in `**generate_image`** and `**generate_video`** tools for text-to-image, image editing, text-to-video, and image-to-video flows. Generated files are saved locally so you can reuse them after the xAI URLs expire. |
-| **Sub-agents (default behavior)** | Foreground `**task`** delegation (e.g. explore, general, or computer) plus background `**delegate`** for read-only deep dives—parallelize like you mean it.                                                                |
-| **Verify**                        | `**/verify`** or `**--verify`** — inspects your app, builds, tests, boots it, and runs browser smoke checks in a sandboxed environment. Screenshots and video included.                                                    |
-| **Computer use**                  | Built-in `**computer`** sub-agent for host desktop automation via `**agent-desktop`**. It prefers semantic accessibility snapshots and stable refs, with screenshots saved under `**.grok/computer/**` when requested.     |
-| **Custom sub-agents**             | Define named agents with `**subAgents`** in `**~/.grok/user-settings.json`** and manage them from the TUI with `**/agents**`.                                                                                              |
-| **Remote control**                | Pair **Telegram** from the TUI (`/remote-control` → Telegram): DM your bot, `**/pair`**, approve the code in-terminal. Keep the CLI running while you ping it from your phone.                                             |
-| **No “mystery meat” UI**          | OpenTUI React terminal UI—fast, keyboard-driven, not whatever glitchy thing you’re thinking of.                                                                                                                            |
-| **Skills**                        | Agent Skills under `**.agents/skills/<name>/SKILL.md`** (project) or `**~/.agents/skills/`** (user). Use `**/skills**` in the TUI to list what’s installed.                                                                |
-| **MCPs**                          | Extend with Model Context Protocol servers—configure via `**/mcps`** in the TUI or `**.grok/settings.json`** (`mcpServers`).                                                                                               |
-| **Sessions**                      | Conversations persist; `**--session latest`** picks up where you left off.                                                                                                                                                 |
-| **Headless**                      | `**--prompt`** / `**-p`** for non-interactive runs—pipe it, script it, bench it.                                                                                                                                           |
-| **Hackable**                      | TypeScript, clear agent loop, bash-first tools—fork it, shamelessly.                                                                                                                                                       |
+### Legacy feature compatibility matrix
+
+The inherited table below lists capabilities that remain available only when an
+adapter implements them. It is retained to document the existing Grok CLI
+surface while each capability is being replaced or removed.
+
+
+| Thing | What it means |
+| --- | --- |
+| **OpenRouter first** | Discovers the live cloud catalog, routes to capable Free models by default, and keeps local inference available through `--local`. |
+| **Web research** | Every agent task performs a bounded web research pass and can use `search_web` plus `open_web` to inspect documentation and references. Results are treated as untrusted leads and the agent is instructed to verify them. |
+| **X + web search** | `search_x` remains provider-specific; `search_web` and `open_web` are provider-neutral and available to the real agent loop. |
+| **Media generation** | `generate_image` and `generate_video` tools for text-to-image, image editing, text-to-video, and image-to-video. Capability-gated; generated files are saved locally under `.grok/generated-media/` (compatibility path). |
+| **Sub-agents (default behavior)** | Foreground `task` delegation (explore, plan, general, vision, verify, or computer) plus background `delegate` for read-only deep dives. Every delegated task follows intent -> context -> plan -> verify -> deliver: gather context before acting, plan non-trivial changes (directly or via `plan`), and verify results before reporting done. |
+| **Verify** | `/verify` or `--verify` — inspects your app, builds, tests, boots it, and runs browser smoke checks in a sandboxed environment. Screenshots and video included. |
+| **Computer use** | Built-in `computer` sub-agent for host desktop automation via `agent-desktop` (macOS). Prefers semantic accessibility snapshots and stable refs; screenshots saved under `.shelra/computer/`. |
+| **Custom sub-agents** | Define named agents with `subAgents` in `~/.shelra/user-settings.json` and manage them from the TUI with `/agents`. |
+| **Remote control** | Pair **Telegram** from the TUI (`/remote-control` → Telegram): DM your bot, `/pair`, approve the code in-terminal. Keep the CLI running while you ping it from your phone. |
+| **OpenTUI React terminal UI** | Fast, keyboard-driven terminal rendering. |
+| **Skills** | Agent Skills under `.agents/skills/<name>/SKILL.md` (project) or `~/.agents/skills/` (user). Use `/skills` in the TUI to list what's installed. |
+| **MCPs** | Extend with Model Context Protocol servers — configure via `/mcps` in the TUI or `.shelra/settings.json` (`mcpServers`). |
+| **Sessions** | Conversations persist; `--session latest` picks up where you left off. |
+| **Headless** | `--prompt` / `-p` for non-interactive runs — pipe it, script it, bench it. |
+| **Hackable** | TypeScript, a clear agent loop, and typed tools — fork it. |
 
 
 ### Coming soon
@@ -195,31 +266,79 @@ You keep using a text model for the session, and Grok saves generated media unde
 
 ---
 
-## API key (pick one)
+## Cloud runtime and secondary local mode
 
-**Environment (good for CI):**
+OpenRouter is the primary runtime. Configure it once:
 
 ```bash
-export GROK_API_KEY=your_key_here
+shelra auth openrouter <your-key>
 ```
+
+The normal `shelra` startup opens the cloud-first screen and loads OpenRouter
+Free models. It does not ask a workspace-trust/sandbox question and it does
+not download a local model. `--sandbox` is an explicit execution option; the
+default is host execution.
+
+For private or offline work, opt into the managed local runtime explicitly:
+
+```bash
+shelra --local
+```
+
+`setup` remains available for local-runtime diagnostics. An explicitly managed
+OpenAI-compatible local endpoint can be supplied when integrating an existing
+private runtime:
+
+```bash
+export SHELRA_LOCAL_ENDPOINT=http://127.0.0.1:8080/v1
+```
+
+With `--local`, ShelraCode scans hardware, discovers cached local artifacts,
+selects the best fit, prepares its loopback engine, and runs a real health
+check before opening chat. On first local run it can download the recommended
+GGUF from Hugging Face with resumable progress, verify it, start the managed
+engine, and continue into chat.
 
 `**.env**` in the project (see `.env.example` if present):
 
 ```bash
-GROK_API_KEY=your_key_here
+SHELRA_API_KEY=your_key_here
+SHELRA_BASE_URL=https://provider.example/v1
+SHELRA_MODEL=provider-model
+OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
 **CLI once:**
 
 ```bash
-grok -k your_key_here
+shelra -k your_openrouter_key_here
 ```
 
-**Saved in user settings** — `~/.grok/user-settings.json`:
+For OpenRouter, Shelra uses `https://openrouter.ai/api/v1` automatically when
+`OPENROUTER_API_KEY` is configured. Use `--model-policy auto` or
+`--model-policy economy` to permit paid routing; the default `free` policy
+never selects a paid model silently. `shelra models` reads the live catalog
+with a six-hour cache, and `shelra models use openrouter/provider/model` saves
+an explicit selection.
+
+Cost controls run before a model request is sent:
+`--max-cost <usd>` limits cumulative spend for the session and
+`--max-request-cost <usd>` limits one request. The same controls are available
+through `SHELRA_MAX_SESSION_COST_USD` and `SHELRA_MAX_REQUEST_COST_USD`; a
+value of `0` permits only requests whose catalog estimate is free.
+
+The implemented provider/catalog design and known limitations are documented
+in [`docs/architecture/OPENROUTER-RUNTIME.md`](docs/architecture/OPENROUTER-RUNTIME.md).
+
+**Saved in user settings** — `~/.shelra/user-settings.json`:
 
 ```json
-{ "apiKey": "your_key_here" }
+{ "defaultModel": "openrouter/openai/gpt-4o-mini" }
 ```
+
+Store an OpenRouter key with `shelra auth openrouter <key>` or use
+`OPENROUTER_API_KEY`; keys are kept in `~/.shelra/auth.json`, never in this
+JSON file or in source control.
 
 Optional `**subAgents**` — custom foreground sub-agents. Each entry needs `**name**`, `**model**`, and `**instruction**`:
 
@@ -228,35 +347,36 @@ Optional `**subAgents**` — custom foreground sub-agents. Each entry needs `**n
   "subAgents": [
     {
       "name": "security-review",
-      "model": "grok-4.3",
+      "model": "qwen2.5-coder:7b",
       "instruction": "Prioritize security implications and suggest concrete fixes."
     }
   ]
 }
 ```
 
-Names cannot be `general`, `explore`, `vision`, `verify`, or `computer` because those are reserved for the built-in sub-agents.
+Names cannot be `general`, `explore`, `plan`, `vision`, `verify`, `verify-detect`, `verify-manifest`, or `computer` because those are reserved for the built-in sub-agents.
 
-Optional: `**GROK_BASE_URL**` (default `https://api.x.ai/v1`), `**GROK_MODEL**`, `**GROK_MAX_TOKENS**`.
+The legacy `GROK_*` environment variables and `~/.grok` settings are read only
+for migration. New settings and state are written under `~/.shelra`.
 
 ---
 
 ## Telegram (remote control) — short version
 
 1. Create a bot with [@BotFather](https://t.me/BotFather), copy the token.
-2. Set `**TELEGRAM_BOT_TOKEN**` or add `**telegram.botToken**` in `~/.grok/user-settings.json` (the TUI `**/remote-control**` flow can save it).
-3. Start `**grok**`, open `**/remote-control**` → **Telegram** if needed, then in Telegram DM your bot: `**/pair`**, enter the **6-character code** in the terminal when asked.
+2. Set `**TELEGRAM_BOT_TOKEN**` or add `**telegram.botToken**` in `~/.shelra/user-settings.json` (the TUI `**/remote-control**` flow can save it).
+3. Start `shelra`, open `/remote-control` → **Telegram** if needed, then in Telegram DM your bot: `/pair`, enter the **6-character code** in the terminal when asked.
 4. First user must be approved once; after that, it’s remembered. **Keep the CLI process running** while you use the bot (long polling lives in that process).
 
 ### Voice & audio messages
 
-Send a voice note or audio attachment in Telegram and Grok will transcribe it with the **Grok Speech-to-Text API** (`POST https://api.x.ai/v1/stt`) before passing the text to the agent. The endpoint accepts Telegram's OGG/Opus voice notes and common audio containers (MP3, WAV, M4A, FLAC, AAC) directly — no local model download, `whisper-cli`, or `ffmpeg` required.
+Send a voice note or audio attachment in Telegram and ShelraCode will transcribe it before passing the text to the agent. Transcription is **capability-gated**: it uses the xAI Speech-to-Text endpoint (`POST https://api.x.ai/v1/stt`) and therefore requires a configured remote provider. The endpoint accepts Telegram's OGG/Opus voice notes and common audio containers (MP3, WAV, M4A, FLAC, AAC) directly — no local model download, `whisper-cli`, or `ffmpeg` required.
 
 #### Prerequisites
 
-- A valid `GROK_API_KEY` (the same key used for the agent). Transcription reuses the CLI's `apiKey` / `baseURL` resolution, so if the agent can reach xAI, transcription will too.
+- A remote provider key (`SHELRA_API_KEY` / `SHELRA_BASE_URL`, or legacy `GROK_API_KEY`). Transcription reuses the CLI's `apiKey` / `baseURL` resolution. In local-only mode (no remote provider), voice messages are not transcribed.
 
-#### Configure in `~/.grok/user-settings.json`
+#### Configure in `~/.shelra/user-settings.json`
 
 ```json
 {
@@ -280,7 +400,7 @@ Send a voice note or audio attachment in Telegram and Grok will transcribe it wi
 Optional headless flow when you do not want the TUI open:
 
 ```bash
-grok telegram-bridge
+shelra telegram-bridge
 ```
 
 Treat the bot token like a password.
@@ -291,7 +411,7 @@ Treat the bot token like a password.
 
 Hooks execute shell commands at key agent lifecycle events — enforce policies, run linters, trigger tests, or log activity.
 
-Configure in `~/.grok/user-settings.json`:
+Configure in `~/.shelra/user-settings.json`:
 
 ```json
 {
@@ -326,19 +446,22 @@ Hook commands receive JSON on **stdin** (event details) and can return JSON on *
 
 ## Project settings
 
-Project file: `**.grok/settings.json**` — e.g. the current model for this project.
+Project file: `**.shelra/settings.json**` — e.g. the current model for this project.
 
 ---
 
 ## Sandbox
 
-Grok CLI can run shell commands inside a [Shuru](https://github.com/superhq-ai/shuru) microVM sandbox so the agent can't touch your host filesystem or network.
+ShelraCode can run shell commands inside a [Shuru](https://github.com/superhq-ai/shuru) microVM sandbox so the agent can't touch your host filesystem or network.
 
 **Requires macOS 14+ on Apple Silicon.**
 
 Enable it with `--sandbox` on the CLI, or toggle it from the TUI with `/sandbox`.
 
-On the first interactive run in a new directory, Grok asks whether to remember sandbox or host mode for that workspace and stores the choice in `~/.grok/workspace-trust.json`. Explicit `--sandbox` / `--no-sandbox` flags and non-interactive commands keep their current behavior.
+ShelraCode does not ask a workspace-trust question on startup. Host execution
+is the default. Enable the microVM explicitly with `--sandbox`, or select it
+from the TUI with `/sandbox`; use `--no-sandbox` to make host execution
+explicit. The stored workspace-trust file is not consulted by the startup path.
 
 When sandbox mode is active you can configure:
 
@@ -348,15 +471,18 @@ When sandbox mode is active you can configure:
 - **Checkpoints** — start from a saved environment snapshot
 - **Secrets** — inject API keys without exposing them inside the VM
 
-All settings are saved in `~/.grok/user-settings.json` (user) and `.grok/settings.json` (project).
+Non-secret preferences are saved in `~/.shelra/user-settings.json` (user) and
+`.shelra/settings.json` (project). OpenRouter credentials are stored separately
+in `~/.shelra/auth.json` with restrictive permissions; legacy `.grok` settings
+remain readable during migration.
 
 ### Verify
 
 Run `**/verify`** in the TUI or `**--verify`** on the CLI to verify your app locally:
 
 ```bash
-grok --verify
-grok -d /path/to/your/app --verify
+shelra --verify
+shelra -d /path/to/your/app --verify
 ```
 
 The agent inspects your project, figures out how to build and run it, spins up a sandbox, and produces a verification report with screenshots and video evidence. Works with any app type.
@@ -387,24 +513,35 @@ The install script bundles Bun, but if you want to use your own:
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
-bun add -g grok-dev
+bun add -g shelra
 ```
 
 ### API key issues
 
-**"Missing GROK_API_KEY" error**
+**OpenRouter models are missing**
 
-Set your API key using one of these methods:
+Run `shelra models --refresh` after configuring `shelra auth openrouter <key>`
+or `OPENROUTER_API_KEY`. The catalog is fetched dynamically and cached under
+`~/.shelra/catalog/openrouter.json`; use `shelra models --json` to inspect the
+normalized entries. If cloud access is unavailable, use `shelra --local`.
+
+**"No local model is ready" error**
+
+Use `shelra --local` and accept the recommended model. Shelra will download
+the engine and GGUF into `~/.shelra`, verify both, and start a loopback server.
+For an explicit remote compatibility endpoint:
 
 ```bash
-# Environment variable
-export GROK_API_KEY=your_key_here
+# Environment variables
+export SHELRA_API_KEY=your_key_here
+export SHELRA_BASE_URL=https://provider.example/v1
 
-# Or save to user settings
-grok -k your_key_here
+# Or pass them for one run
+shelra --remote --api-key your_key_here --base-url https://provider.example/v1
 ```
 
-Get your API key from [x.ai](https://x.ai).
+The legacy `GROK_API_KEY` and `~/.grok` settings are accepted only for
+compatibility. Cloud mode requires an OpenRouter key; local mode does not.
 
 ### Terminal UI issues
 
@@ -431,8 +568,9 @@ Ensure your terminal supports true color and Unicode. Update your terminal emula
 
 **Voice messages not transcribing**
 
-- Verify `GROK_API_KEY` is set (transcription uses the same key)
-- Check `~/.grok/user-settings.json` has `telegram.audioInput.enabled: true`
+- Verify `SHELRA_API_KEY` and `SHELRA_BASE_URL` are set for the selected remote
+  compatibility STT endpoint
+- Check `~/.shelra/user-settings.json` has `telegram.audioInput.enabled: true`
 
 ### Sandbox mode
 
@@ -444,8 +582,8 @@ If you're on Intel Mac or Linux, sandbox mode is not available. Use standard mod
 
 **Slow response times**
 
-- Check your network connection to x.ai API
-- Try `grok-4.20-non-reasoning` for non-reasoning workloads
+- Check the selected cloud/local catalogs with `shelra models --json`
+- Choose a smaller local model when memory is constrained
 - Reduce `--max-tool-rounds` for headless runs
 
 **High memory usage**
@@ -458,7 +596,7 @@ If you're on Intel Mac or Linux, sandbox mode is not available. Use standard mod
 - Check existing [issues](https://github.com/superagent-ai/grok-cli/issues)
 - Open a new issue with:
   - OS and terminal emulator version
-  - Grok CLI version (`grok --version`)
+  - ShelraCode version (`shelra --version`)
   - Steps to reproduce
   - Error messages or logs
 
@@ -472,7 +610,7 @@ From a clone:
 bun install
 bun run build
 bun run start
-# or: node dist/index.js
+# or: bun dist/index.js
 ```
 
 Other useful commands:

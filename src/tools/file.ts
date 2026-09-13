@@ -1,8 +1,9 @@
 import { createTwoFilesPatch } from "diff";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, isAbsolute, resolve } from "path";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { dirname } from "path";
 import { summarizeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
 import type { LspDiagnosticFile } from "../lsp/types";
+import { resolveWorkspacePath } from "../security/workspace-guard";
 
 export interface FileDiff {
   filePath: string;
@@ -20,7 +21,7 @@ export interface FileResult {
 }
 
 function resolvePath(filePath: string, cwd: string): string {
-  return isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
+  return resolveWorkspacePath(filePath, cwd).path;
 }
 
 function computeDiff(filePath: string, before: string, after: string): FileDiff {
@@ -36,6 +37,24 @@ function computeDiff(filePath: string, before: string, after: string): FileDiff 
   }
 
   return { filePath, additions, removals, patch, isNew: before === "" };
+}
+
+/**
+ * Reads a file's content immediately before a write/edit would touch it, so a caller can
+ * checkpoint it for revert. Kept separate from `writeFile`/`editFile` so their existing
+ * signatures (and tests) stay untouched — this is purely additive.
+ */
+export function snapshotForCheckpoint(
+  filePath: string,
+  cwd: string,
+): { previousExisted: boolean; previousContent: string | null; relativePath: string } {
+  const resolved = resolveWorkspacePath(filePath, cwd);
+  const previousExisted = existsSync(resolved.path);
+  return {
+    previousExisted,
+    previousContent: previousExisted ? readFileSync(resolved.path, "utf-8") : null,
+    relativePath: resolved.relativePath,
+  };
 }
 
 export function readFile(filePath: string, cwd: string, startLine?: number, endLine?: number): FileResult {
@@ -124,5 +143,29 @@ export async function editFile(
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, output: `Failed to edit file: ${msg}` };
+  }
+}
+
+export async function deleteFile(filePath: string, cwd: string): Promise<FileResult> {
+  try {
+    const full = resolvePath(filePath, cwd);
+    if (!existsSync(full)) {
+      return { success: false, output: `File not found: ${filePath}` };
+    }
+    if (statSync(full).isDirectory()) {
+      return { success: false, output: `Cannot delete a directory: ${filePath}` };
+    }
+    const before = readFileSync(full, "utf-8");
+    unlinkSync(full);
+
+    const diff = computeDiff(filePath, before, "");
+    return {
+      success: true,
+      output: `Deleted ${filePath} (-${diff.removals} lines)`,
+      diff,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, output: `Failed to delete file: ${msg}` };
   }
 }

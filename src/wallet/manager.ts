@@ -1,13 +1,13 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import { createPublicClient, formatEther, formatUnits, http } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
+import { getProductUserDir } from "../product/identity";
 import type { PaymentChain } from "../utils/settings";
 import type { WalletBalance, WalletData } from "./types";
 
-const WALLET_DIR = path.join(os.homedir(), ".grok");
+const WALLET_DIR = getProductUserDir();
 const WALLET_PATH = path.join(WALLET_DIR, "wallet.json");
 
 const USDC_BY_CHAIN: Record<PaymentChain, `0x${string}`> = {
@@ -61,7 +61,7 @@ export class WalletManager {
 
   getStoredWallet(): StoredWallet {
     if (!WalletManager.exists()) {
-      throw new Error("No wallet found. Run `grok wallet init` first.");
+      throw new Error("No wallet found. Run `shelra wallet init` first.");
     }
     const parsed = JSON.parse(fs.readFileSync(WALLET_PATH, "utf-8")) as Partial<StoredWallet>;
     if (!parsed.privateKey || !parsed.address || !parsed.chain || !parsed.createdAt) {

@@ -11,11 +11,14 @@ export function extractToolResultFromOutput(output: unknown): ToolResult | null 
       error: result.error,
       diff: result.diff,
       plan: result.plan,
+      planUpdate: result.planUpdate,
       task: result.task,
       delegation: result.delegation,
       backgroundProcess: result.backgroundProcess,
       media: result.media,
       computer: result.computer,
+      verifyRecipe: result.verifyRecipe,
+      lspDiagnostics: result.lspDiagnostics,
     };
   }
 

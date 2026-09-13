@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { Markdown } from "../markdown.js";
 import type { Theme } from "../theme.js";
 
@@ -7,17 +6,6 @@ export interface BtwState {
   question: string;
   answer?: string;
   error?: string;
-}
-
-const LOADING_SPINNER_FRAMES = ["⬒", "⬔", "⬓", "⬕"];
-
-function LoadingSpinner() {
-  const [frame, setFrame] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setFrame((n) => (n + 1) % LOADING_SPINNER_FRAMES.length), 120);
-    return () => clearInterval(id);
-  }, []);
-  return <>{LOADING_SPINNER_FRAMES[frame]}</>;
 }
 
 export function BtwOverlay({ state, theme: t }: { state: BtwState; theme: Theme }) {
@@ -41,9 +29,7 @@ export function BtwOverlay({ state, theme: t }: { state: BtwState; theme: Theme 
 
       {state.status === "loading" && (
         <text>
-          <span style={{ fg: t.textMuted }}>
-            <LoadingSpinner />
-          </span>
+          <span style={{ fg: t.textMuted }}>{"◌"}</span>
           <span style={{ fg: t.textMuted }}> Answering…</span>
         </text>
       )}

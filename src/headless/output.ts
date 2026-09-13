@@ -1,5 +1,10 @@
-import type { ProcessMessageObserver, ProcessMessageStepFinish, ProcessMessageStepStart } from "../agent/agent";
-import type { StreamChunk, ToolCall, ToolResult } from "../types";
+import type {
+  ProcessMessageObserver,
+  ProcessMessageResearch,
+  ProcessMessageStepFinish,
+  ProcessMessageStepStart,
+} from "../agent/agent";
+import type { ModelInfo, StreamChunk, ToolCall, ToolResult } from "../types";
 
 export type HeadlessOutputFormat = "text" | "json";
 
@@ -11,9 +16,30 @@ export interface HeadlessWrites {
 /** Semantic JSONL events for headless `--format json` (OpenCode-style). */
 export type HeadlessJsonEvent =
   | {
+      type: "model_selected";
+      sessionID?: string;
+      modelId: string;
+      modelName: string;
+      provider?: string;
+      pricing: "free" | "paid" | "unknown";
+      contextWindow: number;
+      supportsTools: boolean;
+      supportsReasoning: boolean;
+    }
+  | {
       type: "step_start";
       sessionID?: string;
       stepNumber: number;
+      timestamp: number;
+    }
+  | {
+      type: "research";
+      sessionID?: string;
+      query: string;
+      provider: ProcessMessageResearch["provider"];
+      success: boolean;
+      sourceCount: number;
+      sources: { title: string; url: string }[];
       timestamp: number;
     }
   | {
@@ -61,14 +87,45 @@ export function isHeadlessOutputFormat(value: string): value is HeadlessOutputFo
   return value === "text" || value === "json";
 }
 
-export function renderHeadlessPrelude(format: HeadlessOutputFormat, sessionId?: string): HeadlessWrites {
+export function renderHeadlessPrelude(
+  format: HeadlessOutputFormat,
+  sessionId?: string,
+  modelInfo?: ModelInfo,
+): HeadlessWrites {
   if (format === "json") {
-    return {};
+    if (!modelInfo) return {};
+    const pricing =
+      modelInfo.pricingKnown === false
+        ? "unknown"
+        : modelInfo.inputPrice === 0 && modelInfo.outputPrice === 0
+          ? "free"
+          : "paid";
+    return {
+      stdout: `${JSON.stringify({
+        type: "model_selected",
+        ...(sessionId ? { sessionID: sessionId } : {}),
+        modelId: modelInfo.id,
+        modelName: modelInfo.name,
+        ...(modelInfo.provider ? { provider: modelInfo.provider } : {}),
+        pricing,
+        contextWindow: modelInfo.contextWindow,
+        supportsTools: modelInfo.supportsClientTools === true,
+        supportsReasoning: modelInfo.reasoning,
+      } satisfies HeadlessJsonEvent)}\n`,
+    };
   }
 
   return {
     stdout: "\x1b[36m⏳ Processing...\x1b[0m\n",
-    stderr: sessionId ? `\x1b[2mSession: ${sessionId}\x1b[0m\n` : undefined,
+    stderr:
+      [
+        sessionId ? `\x1b[2mSession: ${sessionId}\x1b[0m` : undefined,
+        modelInfo
+          ? `\x1b[2mModel: ${modelInfo.name} (${modelInfo.provider ?? modelInfo.category ?? "unknown"})\x1b[0m`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n") + (sessionId || modelInfo ? "\n" : ""),
   };
 }
 
@@ -101,7 +158,10 @@ export function renderHeadlessChunk(chunk: StreamChunk): HeadlessWrites {
           return `  ${asset.path}${suffix}`;
         }) ?? [];
       const stderr = [`${color}${icon} ${label}\x1b[0m`, ...mediaLines].join("\n");
-      return { stderr: `${stderr}\n` };
+      const planOutput = chunk.toolResult.plan
+        ? `${chunk.toolResult.output?.trim() || "The executable plan was published."}\n`
+        : undefined;
+      return { ...(planOutput ? { stdout: planOutput } : {}), stderr: `${stderr}\n` };
     }
 
     case "error":
@@ -137,8 +197,9 @@ function formatToolCallLabel(tc: ToolCall): string {
     if (name === "read_file" && typeof args.path === "string") {
       return `read: ${args.path}`;
     }
-    if ((name === "write_file" || name === "edit_file") && typeof args.path === "string") {
-      return `${name === "write_file" ? "write" : "edit"}: ${args.path}`;
+    if ((name === "write_file" || name === "edit_file" || name === "delete_file") && typeof args.path === "string") {
+      const verb = name === "write_file" ? "write" : name === "edit_file" ? "edit" : "delete";
+      return `${verb}: ${args.path}`;
     }
   } catch {}
   return name;
@@ -178,6 +239,19 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
         withSession({
           type: "step_start",
           stepNumber: info.stepNumber,
+          timestamp: info.timestamp,
+        }) as HeadlessJsonEvent,
+      );
+    },
+    onResearch(info: ProcessMessageResearch) {
+      pending += jsonLine(
+        withSession({
+          type: "research",
+          query: info.query,
+          provider: info.provider,
+          success: info.success,
+          sourceCount: info.sourceCount,
+          sources: info.sources,
           timestamp: info.timestamp,
         }) as HeadlessJsonEvent,
       );

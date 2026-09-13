@@ -6,16 +6,20 @@ import path from "path";
 import readline from "readline";
 import semverGt from "semver/functions/gt.js";
 import semverValid from "semver/functions/valid.js";
+import { getLegacyUserDir, getProductUserDir } from "../product/identity";
 
 export const GROK_GITHUB_REPO = "superagent-ai/grok-cli";
+/** Release repository retained until ShelraCode publishes a renamed artifact set. */
+export const SHELRA_RELEASE_REPO = GROK_GITHUB_REPO;
 export const GROK_RELEASES_API = `https://api.github.com/repos/${GROK_GITHUB_REPO}/releases`;
 export const SCRIPT_INSTALL_METHOD = "script";
 
 const FETCH_TIMEOUT_MS = 5_000;
 const INSTALL_SCHEMA_VERSION = 1;
-const PATH_MARKER = "# grok";
+const PATH_MARKER = "# shelra";
+const LEGACY_PATH_MARKER = "# grok";
 const CONFIG_FILENAMES = ["user-settings.json", "AGENTS.md"];
-const DATA_ENTRIES = ["daemon.pid", "delegations", "grok.db", "models", "schedules"];
+const DATA_ENTRIES = ["daemon.pid", "delegations", "shelra.db", "grok.db", "models", "schedules"];
 
 export interface ReleaseTarget {
   key: "darwin-arm64" | "linux-x64" | "windows-x64";
@@ -78,29 +82,45 @@ interface ReleaseDownload {
 }
 
 export function getGrokUserDir(homeDir = os.homedir()): string {
-  return path.join(homeDir, ".grok");
+  return getLegacyUserDir(homeDir);
+}
+
+export function getShelraUserDir(homeDir = os.homedir()): string {
+  return getProductUserDir(homeDir);
 }
 
 export function getScriptInstallDir(homeDir = os.homedir()): string {
-  return path.join(getGrokUserDir(homeDir), "bin");
+  return path.join(getShelraUserDir(homeDir), "bin");
 }
 
 export function getInstallMetadataPath(homeDir = os.homedir()): string {
+  return path.join(getShelraUserDir(homeDir), "install.json");
+}
+
+function getActiveInstallManifestPath(homeDir = os.homedir()): string {
+  return path.join(getShelraUserDir(homeDir), "active.json");
+}
+
+function getLegacyInstallMetadataPath(homeDir: string): string {
   return path.join(getGrokUserDir(homeDir), "install.json");
 }
 
-export function getReleaseTargetForPlatform(platform = process.platform, arch = process.arch): ReleaseTarget | null {
+export function getReleaseTargetForPlatform(
+  platform = process.platform,
+  arch: string = process.arch,
+): ReleaseTarget | null {
   if (platform === "darwin" && (arch === "arm64" || arch === "x64"))
-    return { key: "darwin-arm64", assetName: "grok-darwin-arm64", binaryName: "grok" };
+    return { key: "darwin-arm64", assetName: "grok-darwin-arm64", binaryName: "shelra" };
   if (platform === "linux" && arch === "x64")
-    return { key: "linux-x64", assetName: "grok-linux-x64", binaryName: "grok" };
+    return { key: "linux-x64", assetName: "grok-linux-x64", binaryName: "shelra" };
   if (platform === "win32" && arch === "x64")
-    return { key: "windows-x64", assetName: "grok-windows-x64.exe", binaryName: "grok.exe" };
+    return { key: "windows-x64", assetName: "grok-windows-x64.exe", binaryName: "shelra.exe" };
   return null;
 }
 
 export function loadScriptInstallMetadata(homeDir = os.homedir()): ScriptInstallMetadata | null {
-  const metadataPath = getInstallMetadataPath(homeDir);
+  const canonicalPath = getInstallMetadataPath(homeDir);
+  const metadataPath = fs.existsSync(canonicalPath) ? canonicalPath : getLegacyInstallMetadataPath(homeDir);
   try {
     if (!fs.existsSync(metadataPath)) return null;
     const parsed = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Partial<ScriptInstallMetadata>;
@@ -116,7 +136,7 @@ export function loadScriptInstallMetadata(homeDir = os.homedir()): ScriptInstall
       schemaVersion: INSTALL_SCHEMA_VERSION,
       installMethod: SCRIPT_INSTALL_METHOD,
       version: typeof parsed.version === "string" ? parsed.version : "unknown",
-      repo: typeof parsed.repo === "string" ? parsed.repo : GROK_GITHUB_REPO,
+      repo: typeof parsed.repo === "string" ? parsed.repo : SHELRA_RELEASE_REPO,
       binaryPath: parsed.binaryPath,
       installDir: parsed.installDir,
       assetName: parsed.assetName,
@@ -124,6 +144,53 @@ export function loadScriptInstallMetadata(homeDir = os.homedir()): ScriptInstall
       installedAt: typeof parsed.installedAt === "string" ? parsed.installedAt : new Date(0).toISOString(),
       shellConfigPath: typeof parsed.shellConfigPath === "string" ? parsed.shellConfigPath : undefined,
       pathCommand: typeof parsed.pathCommand === "string" ? parsed.pathCommand : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The current Bun build writes Shelra's active.json manifest. Read it as a
+ * script-install context for update/uninstall commands without creating a
+ * second metadata file or reviving the old Grok installer format.
+ */
+function loadActiveInstallMetadata(homeDir = os.homedir()): ScriptInstallMetadata | null {
+  const manifestPath = getActiveInstallManifestPath(homeDir);
+  try {
+    if (!fs.existsSync(manifestPath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Partial<{
+      product: string;
+      command: string;
+      version: string;
+      platform: NodeJS.Platform;
+      architecture: string;
+      executable: string;
+      installedAt: string;
+    }>;
+    if (
+      parsed.product !== "ShelraCode" ||
+      parsed.command !== "shelra" ||
+      typeof parsed.version !== "string" ||
+      typeof parsed.platform !== "string" ||
+      typeof parsed.architecture !== "string" ||
+      typeof parsed.executable !== "string"
+    ) {
+      return null;
+    }
+    const target = getReleaseTargetForPlatform(parsed.platform, parsed.architecture);
+    if (!target) return null;
+    const installDir = getScriptInstallDir(homeDir);
+    return {
+      schemaVersion: INSTALL_SCHEMA_VERSION,
+      installMethod: SCRIPT_INSTALL_METHOD,
+      version: parsed.version,
+      repo: SHELRA_RELEASE_REPO,
+      binaryPath: path.join(installDir, parsed.executable),
+      installDir,
+      assetName: parsed.executable,
+      target: target.key,
+      installedAt: typeof parsed.installedAt === "string" ? parsed.installedAt : new Date(0).toISOString(),
     };
   } catch {
     return null;
@@ -140,7 +207,7 @@ export function getScriptInstallContext(homeDir = os.homedir()): ScriptInstallCo
   const target = getReleaseTargetForPlatform();
   if (!target) return null;
 
-  const metadata = loadScriptInstallMetadata(homeDir);
+  const metadata = loadScriptInstallMetadata(homeDir) ?? loadActiveInstallMetadata(homeDir);
   if (metadata) {
     return {
       metadata,
@@ -217,7 +284,7 @@ export async function runScriptManagedUpdate(currentVersion: string): Promise<Sc
       installedAt: new Date().toISOString(),
     });
 
-    return { success: true, output: `Updated to Grok ${release.version}.` };
+    return { success: true, output: `Updated ShelraCode to ${release.version}.` };
   } catch (error) {
     return { success: false, output: error instanceof Error ? error.message : String(error) };
   } finally {
@@ -232,15 +299,18 @@ export function buildScriptUninstallPlan(
   const context = getScriptInstallContext(homeDir);
   if (!context) return null;
 
-  const userDir = getGrokUserDir(homeDir);
+  const userDir = getShelraUserDir(homeDir);
+  const legacyUserDir = getGrokUserDir(homeDir);
   const removePaths = new Set<string>();
   const pruneDirs = new Set<string>();
 
   if (!options.keepConfig && !options.keepData) {
     removePaths.add(userDir);
+    removePaths.add(legacyUserDir);
   } else {
     removePaths.add(context.binaryPath);
     removePaths.add(getInstallMetadataPath(homeDir));
+    removePaths.add(getActiveInstallManifestPath(homeDir));
     if (!options.keepConfig) for (const f of CONFIG_FILENAMES) removePaths.add(path.join(userDir, f));
     if (!options.keepData) for (const e of DATA_ENTRIES) removePaths.add(path.join(userDir, e));
     pruneDirs.add(getScriptInstallDir(homeDir));
@@ -267,7 +337,7 @@ export async function runScriptManagedUninstall(options: ScriptUninstallOptions 
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       return { success: false, output: "Non-interactive terminal. Re-run with --force." };
     }
-    if (!(await confirm("Remove Grok from this machine?"))) {
+    if (!(await confirm("Remove ShelraCode from this machine?"))) {
       return { success: false, output: "Uninstall cancelled." };
     }
   }
@@ -276,7 +346,7 @@ export async function runScriptManagedUninstall(options: ScriptUninstallOptions 
     if (plan.pathCleanup) removePathLine(plan.pathCleanup.configFile, plan.pathCleanup.command);
     for (const p of plan.removePaths) fs.rmSync(p, { recursive: true, force: true });
     for (const d of plan.pruneDirs) removeDirIfEmpty(d);
-    return { success: true, output: "Grok uninstall complete." };
+    return { success: true, output: "ShelraCode uninstall complete." };
   } catch (error) {
     return { success: false, output: error instanceof Error ? error.message : String(error) };
   }
@@ -285,20 +355,20 @@ export async function runScriptManagedUninstall(options: ScriptUninstallOptions 
 function notScriptManaged(action: string): ScriptUpdateRunResult {
   return {
     success: false,
-    output: `This install is not script-managed, so \`grok ${action}\` cannot proceed. Use the package manager you installed with, or reinstall via install.sh.`,
+    output: `This install is not script-managed, so \`shelra ${action}\` cannot proceed. Use the package manager you installed with, or reinstall via install.sh.`,
   };
 }
 
 function getReleaseTargetForPlatformKey(key: string): ReleaseTarget | null {
   switch (key) {
     case "darwin-arm64":
-      return { key, assetName: "grok-darwin-arm64", binaryName: "grok" };
+      return { key, assetName: "grok-darwin-arm64", binaryName: "shelra" };
     case "darwin-x64":
-      return { key: "darwin-arm64", assetName: "grok-darwin-arm64", binaryName: "grok" };
+      return { key: "darwin-arm64", assetName: "grok-darwin-arm64", binaryName: "shelra" };
     case "linux-x64":
-      return { key, assetName: "grok-linux-x64", binaryName: "grok" };
+      return { key, assetName: "grok-linux-x64", binaryName: "shelra" };
     case "windows-x64":
-      return { key, assetName: "grok-windows-x64.exe", binaryName: "grok.exe" };
+      return { key, assetName: "grok-windows-x64.exe", binaryName: "shelra.exe" };
     default:
       return null;
   }
@@ -332,6 +402,7 @@ async function fetchReleaseJson(url: string): Promise<GitHubRelease | null> {
 function normalizeReleaseVersion(tagName: string): string | null {
   let version = tagName;
   if (version.startsWith("grok-dev@")) version = version.slice("grok-dev@".length);
+  if (version.startsWith("shelra@")) version = version.slice("shelra@".length);
   if (version.startsWith("v")) version = version.slice(1);
   return semverValid(version);
 }
@@ -370,7 +441,7 @@ function removePathLine(configFile: string, command: string): void {
   fs.writeFileSync(
     configFile,
     `${lines
-      .filter((l) => l !== PATH_MARKER && l !== command)
+      .filter((l) => l !== PATH_MARKER && l !== LEGACY_PATH_MARKER && l !== command)
       .join("\n")
       .replace(/\n+$/, "")}\n`,
   );
@@ -418,7 +489,7 @@ function applyWindowsUpdate(
   });
   child.unref();
 
-  return { success: true, output: `Updated to Grok ${release.version}. Restart the CLI to use the new version.` };
+  return { success: true, output: `Updated ShelraCode to ${release.version}. Restart the CLI to use the new version.` };
 }
 
 function esc(s: string): string {

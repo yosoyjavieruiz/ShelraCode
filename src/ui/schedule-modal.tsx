@@ -51,7 +51,7 @@ export function ScheduleBrowserModal({
   const contentHeight = itemCount + 10;
   const panelHeight = Math.min(contentHeight, Math.floor(height * 0.6));
   const panelWidth = Math.min(60, width - 6);
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
 
   return (
     <box
@@ -67,7 +67,9 @@ export function ScheduleBrowserModal({
       <box
         width={panelWidth}
         height={panelHeight}
-        backgroundColor={t.backgroundPanel}
+        backgroundColor={t.surface}
+        border={["top", "right", "bottom", "left"]}
+        borderColor={t.borderStrong}
         paddingTop={1}
         paddingBottom={1}
         flexDirection="column"

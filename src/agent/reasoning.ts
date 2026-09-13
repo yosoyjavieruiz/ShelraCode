@@ -1,4 +1,5 @@
 import type { ModelMessage } from "ai";
+import { normalizeModelMessages } from "../providers/messages";
 
 const ENCRYPTED_REASONING_MARKERS = [
   "-----BEGIN PGP MESSAGE-----",
@@ -40,7 +41,10 @@ export function sanitizeModelMessages(messages: ModelMessage[]): ModelMessage[] 
   let changed = false;
   const sanitized: ModelMessage[] = [];
 
-  for (const message of messages) {
+  const normalizedMessages = normalizeModelMessages(messages);
+  changed = normalizedMessages !== messages;
+
+  for (const message of normalizedMessages) {
     if (message.role !== "assistant") {
       sanitized.push(message);
       continue;

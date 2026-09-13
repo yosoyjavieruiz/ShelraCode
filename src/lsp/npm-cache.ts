@@ -3,6 +3,8 @@ import { access, mkdir, readdir, readFile, rm } from "fs/promises";
 import os from "os";
 import path from "path";
 
+// Retained for compatibility with installed language servers; cache migration
+// is intentionally separate from user settings/state migration.
 const CACHE_ROOT = path.join(os.homedir(), ".grok", "cache", "lsp");
 const locks = new Map<string, Promise<unknown>>();
 

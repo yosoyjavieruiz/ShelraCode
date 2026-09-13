@@ -1,8 +1,10 @@
-import { type ChildProcess, exec, spawn } from "child_process";
+import { type ChildProcess, spawn } from "child_process";
 import { createReadStream, createWriteStream } from "fs";
 import { mkdtemp, rm, stat, unlink } from "fs/promises";
 import os from "os";
 import path from "path";
+import { runCommand } from "../exec/command";
+import { buildShellInvocation } from "../exec/shell";
 import { executeEventHooks } from "../hooks/index";
 import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
@@ -90,75 +92,33 @@ export class BashTool {
         return { success: false, error: prepared.error };
       }
 
-      return await new Promise<ToolResult>((resolve) => {
-        let settled = false;
-        let aborted = false;
-        let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-
-        const finish = (result: ToolResult) => {
-          if (settled) return;
-          settled = true;
-          if (forceKillTimer) clearTimeout(forceKillTimer);
-          abortSignal?.removeEventListener("abort", onAbort);
-          resolve(result);
-        };
-
-        const child = exec(
-          prepared.command,
-          {
-            cwd: this.cwd,
-            timeout,
-            maxBuffer: 10 * 1024 * 1024,
-            env: { ...process.env, FORCE_COLOR: "0" },
-          },
-          (err, stdout, stderr) => {
-            if (aborted || abortSignal?.aborted) {
-              finish({ success: false, error: "[Cancelled]" });
-              return;
-            }
-
-            const output = stdout + (stderr ? `\nSTDERR: ${stderr}` : "");
-            if (err) {
-              const sandboxError = this.formatSandboxRuntimeError(output, err.message);
-              if (sandboxError) {
-                finish({ success: false, error: sandboxError });
-                return;
-              }
-              if (output.trim()) {
-                finish({ success: false, error: output.trim() });
-                return;
-              }
-              finish({ success: false, error: `Command failed: ${err.message}` });
-              return;
-            }
-
-            finish({
-              success: true,
-              output: output.trim() || "Command executed successfully (no output)",
-            });
-          },
-        );
-
-        const onAbort = () => {
-          aborted = true;
-          try {
-            child.kill("SIGTERM");
-          } catch {
-            finish({ success: false, error: "[Cancelled]" });
-            return;
-          }
-
-          forceKillTimer = setTimeout(() => {
-            try {
-              child.kill("SIGKILL");
-            } catch {
-              /* already exited */
-            }
-          }, 1_000);
-        };
-
-        abortSignal?.addEventListener("abort", onAbort, { once: true });
+      const outcome = await runCommand({
+        command: prepared.command,
+        cwd: this.cwd,
+        timeoutMs: timeout,
+        signal: abortSignal,
+        log: false,
       });
+      const output = [outcome.stdout, outcome.stderr ? `STDERR: ${outcome.stderr}` : ""]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+
+      if (outcome.state === "killed" || abortSignal?.aborted) {
+        return { success: false, error: "[Cancelled]" };
+      }
+
+      if (outcome.state === "timed_out") {
+        return { success: false, error: output || `Command timed out after ${timeout}ms` };
+      }
+
+      if (outcome.state !== "completed" || outcome.exitCode !== 0) {
+        const sandboxError = this.formatSandboxRuntimeError(output, outcome.stderr || "Command failed");
+        if (sandboxError) return { success: false, error: sandboxError };
+        return { success: false, error: output || `Command failed with exit code ${outcome.exitCode ?? "unknown"}` };
+      }
+
+      return { success: true, output: output || "Command executed successfully (no output)" };
     } catch (err: unknown) {
       if (err && typeof err === "object" && "stdout" in err) {
         const execErr = err as { stdout?: string; stderr?: string; message: string };
@@ -191,7 +151,8 @@ export class BashTool {
       const logPath = path.join(tmpDir, `bg-${id}.log`);
       const logStream = createWriteStream(logPath, { flags: "a" });
 
-      const child = spawn("sh", ["-c", prepared.command], {
+      const invocation = buildShellInvocation(prepared.command);
+      const child = spawn(invocation.file, invocation.args, {
         cwd: this.cwd,
         detached: false,
         stdio: ["ignore", "pipe", "pipe"],
@@ -398,7 +359,10 @@ export class BashTool {
         : "";
       return `Execute a bash command inside a Shuru sandbox. Use for find, ls, git inspection, build tools, test runners, and other shell commands that should stay isolated. For content search, prefer the dedicated grep tool. The current workspace is mounted inside the sandbox at /workspace, ${netStatus}, and shell-side workspace file changes do not persist back to the host in this version, so prefer the dedicated file tools for durable edits.${hostBrowserNote} Set background=true for long-running processes like dev servers or watchers.`;
     }
-    return "Execute a bash command. Use for find, ls, git, build tools, package managers, running tests, and any other shell command. For content search, prefer the dedicated grep tool. Set background=true for long-running processes like dev servers, watchers, or anything that should keep running while you continue working. For file read/write/edit, prefer the dedicated file tools instead.";
+    if (process.platform === "win32") {
+      return "Execute a Windows PowerShell command. Use for Get-ChildItem, Get-Content, git, build tools, package managers, running tests, and other shell commands. Do not use POSIX paths or syntax such as /d/..., ls -la, find, or &&. For content search, prefer the dedicated grep tool. Set background=true for long-running processes like dev servers or watchers. For file read/write/edit, prefer the dedicated file tools instead.";
+    }
+    return "Execute a POSIX shell command. Use for find, ls, git, build tools, package managers, running tests, and any other shell command. For content search, prefer the dedicated grep tool. Set background=true for long-running processes like dev servers, watchers, or anything that should keep running while you continue working. For file read/write/edit, prefer the dedicated file tools instead.";
   }
 
   private prepareCommand(command: string): { ok: true; command: string } | { ok: false; error: string } {

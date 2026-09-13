@@ -264,6 +264,16 @@ describe("getSandboxMutationBlockReason", () => {
 });
 
 describe("BashTool sandbox state", () => {
+  it("executes commands through the host shell used by the runtime", async () => {
+    const bash = new BashTool(makeTempDir("grok-bash-shell-"));
+    const command = process.platform === "win32" ? 'Write-Output "shelra-shell-ok"' : "printf shelra-shell-ok";
+
+    const result = await bash.execute(command);
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("shelra-shell-ok");
+  });
+
   it("tracks cwd changes independently of sandbox mode", () => {
     const root = makeTempDir("grok-bash-test-");
     const nested = path.join(root, "nested");

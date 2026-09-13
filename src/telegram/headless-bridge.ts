@@ -122,12 +122,16 @@ export async function runTelegramHeadlessBridge(options: TelegramHeadlessBridgeO
 
   const apiKey = options.apiKey ?? getApiKey();
   if (!apiKey) {
-    throw new Error("Missing Grok API key.");
+    throw new Error("Missing provider API key. Set OPENROUTER_API_KEY or pass --api-key.");
+  }
+  const baseURL = options.baseURL ?? getBaseURL();
+  if (!baseURL) {
+    throw new Error("Remote provider base URL required. Set SHELRA_BASE_URL or pass --base-url.");
   }
 
   const startupConfig: TelegramHeadlessStartupConfig = {
     apiKey,
-    baseURL: options.baseURL ?? getBaseURL(),
+    baseURL,
     model: options.model ?? getCurrentModel(),
     sandboxMode: options.sandboxMode ?? getCurrentSandboxMode(),
     sandboxSettings: options.sandboxSettings ?? getCurrentSandboxSettings(),

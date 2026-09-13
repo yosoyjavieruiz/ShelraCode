@@ -34,7 +34,8 @@ export async function buildVisionUserMessages(
 }
 
 function extractImageSourcesFromPrompt(prompt: string): string[] {
-  const matches = prompt.match(/((?:file:\/\/|https?:\/\/|\/)[^\n]*?\.(?:png|jpe?g))/gi) ?? [];
+  // Include POSIX paths, Windows drive paths, file URLs and escaped spaces.
+  const matches = prompt.match(/((?:file:\/\/|https?:\/\/|[A-Za-z]:[\\/]|\/)[^\n]*?\.(?:png|jpe?g))/gi) ?? [];
   const seen = new Set<string>();
   const sources: string[] = [];
 

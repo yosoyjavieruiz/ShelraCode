@@ -22,14 +22,14 @@ describe("computer tools", () => {
     }
   });
 
-  it("stores screenshots under .grok/computer by default", () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-computer-"));
+  it("stores screenshots under .shelra/computer by default", () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "shelra-computer-"));
     tempDirs.push(cwd);
 
     const outputPath = buildScreenshotPath(cwd);
 
-    expect(outputPath).toContain(path.join(".grok", "computer"));
-    expect(path.dirname(outputPath)).toBe(path.join(cwd, ".grok", "computer"));
+    expect(outputPath).toContain(path.join(".shelra", "computer"));
+    expect(path.dirname(outputPath)).toBe(path.join(cwd, ".shelra", "computer"));
   });
 
   it("captures screenshots through agent-desktop", async () => {

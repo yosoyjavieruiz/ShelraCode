@@ -1,6 +1,6 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
+import { CONFIG_DIR_NAME, getHomeDir, LEGACY_CONFIG_DIR_NAME } from "../product/identity";
 import type { SandboxMode } from "./settings";
 
 interface WorkspaceTrustEntry {
@@ -38,8 +38,12 @@ function normalizeTrustEntry(value: unknown): WorkspaceTrustEntry | null {
   };
 }
 
-export function getWorkspaceTrustPath(homeDir = os.homedir()): string {
-  return path.join(homeDir, ".grok", WORKSPACE_TRUST_FILENAME);
+export function getWorkspaceTrustPath(homeDir = getHomeDir()): string {
+  return path.join(homeDir, CONFIG_DIR_NAME, WORKSPACE_TRUST_FILENAME);
+}
+
+function getLegacyWorkspaceTrustPath(homeDir = getHomeDir()): string {
+  return path.join(homeDir, LEGACY_CONFIG_DIR_NAME, WORKSPACE_TRUST_FILENAME);
 }
 
 export function getWorkspaceTrustKey(cwd = process.cwd()): string {
@@ -70,9 +74,12 @@ export function resolveWorkspaceTrustPromptAnswer(
 }
 
 export function loadWorkspaceTrustStore(trustPath = getWorkspaceTrustPath()): WorkspaceTrustStore {
+  const candidatePaths =
+    trustPath === getWorkspaceTrustPath() ? [trustPath, getLegacyWorkspaceTrustPath()] : [trustPath];
   try {
-    if (!fs.existsSync(trustPath)) return { version: 1, workspaces: {} };
-    const parsed = JSON.parse(fs.readFileSync(trustPath, "utf-8")) as unknown;
+    const existing = candidatePaths.find((candidate) => fs.existsSync(candidate));
+    if (!existing) return { version: 1, workspaces: {} };
+    const parsed = JSON.parse(fs.readFileSync(existing, "utf-8")) as unknown;
     const rawWorkspaces = isRecord(parsed) && isRecord(parsed.workspaces) ? parsed.workspaces : {};
     const workspaces: Record<string, WorkspaceTrustEntry> = {};
     for (const [workspace, entry] of Object.entries(rawWorkspaces)) {

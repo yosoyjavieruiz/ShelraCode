@@ -1,8 +1,6 @@
 import { readFile } from "fs/promises";
 import path from "path";
 
-export const DEFAULT_GROK_STT_BASE_URL = "https://api.x.ai/v1";
-
 export interface GrokSttEngineConfig {
   apiKey: string;
   baseURL?: string;
@@ -118,7 +116,10 @@ export function inferMimeTypeFromFileName(fileName: string): string {
 }
 
 function normalizeBaseURL(baseURL?: string): string {
-  const value = baseURL?.trim() || DEFAULT_GROK_STT_BASE_URL;
+  const value = baseURL?.trim() || process.env.SHELRA_BASE_URL?.trim() || process.env.GROK_BASE_URL?.trim();
+  if (!value) {
+    throw new Error("Speech-to-text provider base URL required. Set SHELRA_BASE_URL or pass baseURL explicitly.");
+  }
   return value.replace(/\/+$/, "");
 }
 

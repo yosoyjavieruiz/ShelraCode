@@ -3,19 +3,18 @@ import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Agent } from "../agent/agent";
-import {
-  DEFAULT_MODEL,
-  getEffectiveReasoningEffort,
-  getModelIds,
-  getModelInfo,
-  getSupportedReasoningEfforts,
-  MODELS,
-  normalizeModelId,
-} from "../grok/models";
+import { Agent, type ProcessMessageObserver } from "../agent/agent";
+import type { KernelState } from "../agent/kernel";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
+import { projectMemoryScope, readMemoryIndex } from "../memory/store";
+import {
+  getEffectiveReasoningEffort,
+  getModelInfo,
+  getSupportedReasoningEfforts,
+  normalizeModelId,
+} from "../models/catalog";
 import { createTelegramBridge, type TelegramBridgeHandle } from "../telegram/bridge";
 import { approvePairingCode } from "../telegram/pairing";
 import { createTurnCoordinator } from "../telegram/turn-coordinator";
@@ -23,6 +22,7 @@ import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
   ChatEntry,
+  DelegationRun,
   FileDiff,
   ModelInfo,
   Plan,
@@ -41,7 +41,9 @@ import {
   getApiKey,
   getTelegramBotToken,
   isReservedSubagentName,
+  loadAppearancePreference,
   loadMcpServers,
+  loadMotionPreference,
   loadPaymentSettings,
   loadUserSettings,
   loadValidSubAgents,
@@ -61,7 +63,6 @@ import {
 import { discoverSkills, formatSkillsForChat } from "../utils/skills";
 import { formatSubagentName } from "../utils/subagent-display";
 import { checkForUpdate, runUpdate, type UpdateCheckResult } from "../utils/update-checker";
-import { buildVerifyPrompt } from "../verify/entrypoint";
 import {
   buildSubagentBrowseRows,
   SUBAGENT_EDITOR_FIELDS,
@@ -69,6 +70,7 @@ import {
   SubagentEditorModal,
   SubagentsBrowserModal,
 } from "./agents-modal";
+import { AuroraEdge } from "./aurora";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
 import { type TypeaheadState, useTypeahead } from "./hooks/useTypeahead.js";
@@ -76,13 +78,38 @@ import { Markdown } from "./markdown";
 import { buildMcpBrowseRows, McpBrowserModal, McpEditorModal } from "./mcp-modal";
 import { createEmptyMcpEditorDraft, type McpEditorDraft, type McpEditorField } from "./mcp-modal-types";
 import {
+  changedFiles,
+  describeReasoningEffort,
+  groupLiveActivity,
+  nextPlanStepLabel,
+  phaseLabel,
+  projectTranscript,
+  resolvePlanState,
+  type SessionUsageSummary,
+  summarizeMemoryStatus,
+  summarizeSessionUsage,
+  type TranscriptActivityItem,
+  type UiActivityEvent,
+  upsertActivity,
+  visibleRuntimeActivity,
+} from "./observability";
+import {
   formatPlanAnswers,
   initialPlanQuestionsState,
+  type PlanAnswers,
   PlanQuestionsPanel,
   type PlanQuestionsState,
   PlanView,
 } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
+import {
+  ActiveAgentsStrip,
+  type InspectorContextStats,
+  type InspectorTab,
+  SessionInspector,
+  SessionStatusStrip,
+  WorkspaceSidebar,
+} from "./session-inspector";
 import { filterSlashMenuItems, SLASH_MENU_ITEMS, type SlashMenuItem } from "./slash-menu";
 import {
   buildAssistantEntry,
@@ -94,19 +121,39 @@ import {
   replaceTurnEntries,
 } from "./telegram-turn-ui";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
-import { dark, type Theme } from "./theme";
+import {
+  type MotionPreference,
+  reducedMotionEnabled,
+  resolveTheme,
+  type TerminalThemeMode,
+  type Theme,
+  type ThemePreference,
+} from "./theme";
+import { resolveWorkspaceLayout } from "./workspace-layout";
 
-const STAR_PALETTE = ["#777777", "#666666", "#4a4a4a", "#333333", "#222222"];
-const LOADING_SPINNER_FRAMES = ["⬒", "⬔", "⬓", "⬕"];
-const PROMPT_LOADING_FRAMES = [
-  { active: 0, forward: true },
-  { active: 1, forward: true },
-  { active: 2, forward: true },
-  { active: 1, forward: false },
-] as const;
+const THEME_OPTIONS: ThemePreference[] = ["system", "dark", "light"];
+const MOTION_OPTIONS: MotionPreference[] = ["full", "reduced"];
 
-type Star = { col: number; ch: string };
-type Row = { stars: Star[]; grok?: number };
+function modeAccent(t: Theme, mode: (typeof MODES)[number]): string {
+  return t[mode.tone];
+}
+
+function resolvedEntryModeColor(t: Theme, storedColor: string | undefined, fallback: string): string {
+  switch (storedColor?.toLowerCase()) {
+    case "brand":
+    case "#22c55e":
+      return t.brand;
+    case "info":
+    case "#5c9cf5":
+      return t.info;
+    case "warning":
+    case "#e5c07b":
+      return t.warning;
+    default:
+      return storedColor || fallback;
+  }
+}
+
 type ContextStats = {
   contextWindow: number;
   usedTokens: number;
@@ -130,123 +177,42 @@ function getFileMentionToken(block: FileMentionBlock): string {
   return `[File: ${name}]`;
 }
 
-const HERO_ROWS: Row[] = [
-  {
-    stars: [
-      { col: 0, ch: "·" },
-      { col: 13, ch: "*" },
-      { col: 21, ch: "·" },
-      { col: 34, ch: "·" },
-    ],
-  },
-  {
-    stars: [
-      { col: 3, ch: "*" },
-      { col: 11, ch: "·" },
-      { col: 17, ch: "·" },
-      { col: 25, ch: "*" },
-    ],
-  },
-  {
-    stars: [
-      { col: 6, ch: "·" },
-      { col: 12, ch: "·" },
-      { col: 15, ch: "·" },
-      { col: 18, ch: "·" },
-      { col: 24, ch: "·" },
-    ],
-  },
-  {
-    stars: [
-      { col: 2, ch: "·" },
-      { col: 10, ch: "·" },
-      { col: 19, ch: "·" },
-      { col: 27, ch: "·" },
-    ],
-    grok: 13,
-  },
-  {
-    stars: [
-      { col: 6, ch: "·" },
-      { col: 12, ch: "·" },
-      { col: 15, ch: "·" },
-      { col: 18, ch: "·" },
-      { col: 24, ch: "·" },
-    ],
-  },
-  {
-    stars: [
-      { col: 3, ch: "·" },
-      { col: 11, ch: "*" },
-      { col: 17, ch: "·" },
-      { col: 25, ch: "·" },
-    ],
-  },
-  {
-    stars: [
-      { col: 0, ch: "*" },
-      { col: 13, ch: "·" },
-      { col: 21, ch: "*" },
-      { col: 34, ch: "·" },
-    ],
-  },
-];
+// Original ShelraCode home mark, copied from the reference checkout. The
+// compact raster keeps the welcome screen readable at the common 80-column
+// terminal size; the wide mark is reserved for wide terminals.
+const WIDE_HERO_LOGO = [
+  "███████╗ ██╗  ██╗ ███████╗ ██╗      ██████╗   █████╗       ██████╗  ██████╗  ██████╗  ███████╗",
+  "██╔════╝ ██║  ██║ ██╔════╝ ██║      ██╔══██╗ ██╔══██╗     ██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝",
+  "███████╗ ███████║ █████╗   ██║      ██████╔╝ ███████║     ██║      ██║   ██║ ██║  ██║ █████╗  ",
+  "╚════██║ ██╔══██║ ██╔══╝   ██║      ██╔══██╗ ██╔══██║     ██║      ██║   ██║ ██║  ██║ ██╔══╝  ",
+  "███████║ ██║  ██║ ███████╗ ███████╗ ██║  ██║ ██║  ██║     ╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗",
+  "╚══════╝ ╚═╝  ╚═╝ ╚══════╝ ╚══════╝ ╚═╝  ╚═╝ ╚═╝  ╚═╝      ╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝",
+] as const;
 
-function HeroLogo({ t }: { t: Theme }) {
-  const [tick, setTick] = useState(0);
-  const starIdx = useRef(0);
+const COMPACT_HERO_LOGO = [
+  "░░░░ ░░░░ ░░░░ ░░░░ ░░░░ ░░░░ ░░░ ░░░░ ░░░░ ░░░░ ░░░░",
+  "░███ █░░█ ████ █░░░ ███░ ░██░ ░░░ ████ ░██░ ███░ ████",
+  "█    █░░█ █    █░░░ █  █ █  █ ░░░ █    █  █ █  █ █   ",
+  " ██░ ████ ███░ █░░░ ███  ████ ░░░ █░░░ █░░█ █░░█ ███░",
+  "░  █ █  █ █  ░ █░░░ █  █ █  █ ░░░ █░░░ █░░█ █░░█ █  ░",
+  "███  █░░█ ████ ████ █░░█ █░░█ ░░░ ████  ██  ███  ████",
+  "   ░  ░░             ░░   ░░  ░░░      ░  ░    ░     ",
+  "░░░░ ░░░░ ░░░░ ░░░░ ░░░░ ░░░░ ░░░ ░░░░ ░░░░ ░░░░ ░░░░",
+] as const;
 
-  useEffect(() => {
-    const id = setInterval(() => setTick((n) => n + 1), 900);
-    return () => clearInterval(id);
-  }, []);
+function HeroLogo({ t, width }: { t: Theme; width: number }) {
+  const logo = width >= 110 ? WIDE_HERO_LOGO : width >= 58 ? COMPACT_HERO_LOGO : [];
 
-  starIdx.current = 0;
-  const nextColor = () => {
-    const i = starIdx.current++;
-    return STAR_PALETTE[(i * 7 + tick * 3 + i * tick) % STAR_PALETTE.length];
-  };
+  if (logo.length === 0) return null;
 
   return (
     <box flexDirection="column" alignItems="center">
-      {HERO_ROWS.map((row, r) => {
-        const els: React.ReactNode[] = [];
-        let cursor = 0;
-
-        for (const star of row.stars) {
-          if (row.grok !== undefined && cursor <= row.grok && star.col > row.grok) {
-            els.push(" ".repeat(row.grok - cursor));
-            els.push(
-              <span key="grok" style={{ fg: t.primary }}>
-                {"Grok"}
-              </span>,
-            );
-            cursor = row.grok + 4;
-          }
-          const gap = star.col - cursor;
-          if (gap > 0) els.push(" ".repeat(gap));
-          els.push(
-            <span key={`s-${star.col}`} style={{ fg: nextColor() }}>
-              {star.ch}
-            </span>,
-          );
-          cursor = star.col + 1;
-        }
-
-        if (row.grok !== undefined && cursor <= row.grok) {
-          els.push(" ".repeat(row.grok - cursor));
-          els.push(
-            <span key="grok" style={{ fg: t.primary }}>
-              {"Grok"}
-            </span>,
-          );
-          cursor = row.grok + 4;
-        }
-
-        els.push(" ".repeat(Math.max(0, 35 - cursor)));
-        // biome-ignore lint/suspicious/noArrayIndexKey: static constant array that never reorders
-        return <text key={r}>{els}</text>;
-      })}
+      {logo.map((line, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: static logo rows never reorder
+        <text key={index} style={{ fg: t.primary }} wrapMode="none">
+          {line}
+        </text>
+      ))}
     </box>
   );
 }
@@ -340,6 +306,9 @@ const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/mcps",
   "/agents",
   "/agent",
+  "/status",
+  "/tasks",
+  "/delegations",
   "/schedule",
   "/schedules",
   "/quit",
@@ -560,7 +529,7 @@ ${prompt}`;
 }
 
 const CONNECT_CHANNELS: { id: string; label: string; description: string }[] = [
-  { id: "telegram", label: "Telegram", description: "Chat with Grok from Telegram" },
+  { id: "telegram", label: "Telegram", description: "Chat with ShelraCode from Telegram" },
 ];
 
 const MCP_REMOTE_FIELDS: McpEditorField[] = ["transport", "label", "url", "headers", "env"];
@@ -574,6 +543,9 @@ export interface AppStartupConfig {
   sandboxSettings: SandboxSettings;
   maxToolRounds: number;
   version: string;
+  localModels?: ModelInfo[];
+  onSelectLocalModel?: (modelId: string) => Promise<{ success: boolean; error?: string }>;
+  onApiKey?: (apiKey: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 interface AppProps {
@@ -595,8 +567,20 @@ interface ActiveTurnState {
 }
 
 export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) {
-  const t = dark;
   const renderer = useRenderer();
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => loadAppearancePreference());
+  const [motionPreference, setMotionPreference] = useState<MotionPreference>(() => loadMotionPreference());
+  const [systemTheme, setSystemTheme] = useState<TerminalThemeMode>(() => renderer.themeMode ?? "dark");
+  const t = resolveTheme(themePreference, systemTheme);
+  const reducedMotion = reducedMotionEnabled(motionPreference, process.env);
+
+  useEffect(() => {
+    const onThemeMode = (next: "dark" | "light") => setSystemTheme(next);
+    renderer.on("theme_mode", onThemeMode);
+    return () => {
+      renderer.off("theme_mode", onThemeMode);
+    };
+  }, [renderer]);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
@@ -608,6 +592,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [sandboxMode, setSandboxModeState] = useState<SandboxMode>(agent.getSandboxMode());
   const [mode, setModeState] = useState<AgentMode>(agent.getMode());
   const [showModelPicker, setShowModelPicker] = useState(false);
+  const [switchingModel, setSwitchingModel] = useState(false);
+  const [modelSwitchError, setModelSwitchError] = useState<string | null>(null);
   const [modelPickerIndex, setModelPickerIndex] = useState(0);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [showSandboxPicker, setShowSandboxPicker] = useState(false);
@@ -617,6 +603,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [sandboxSettingsEditBuffer, setSandboxSettingsEditBuffer] = useState("");
   const [showRecapPicker, setShowRecapPicker] = useState(false);
   const [recapsEnabled, setRecapsEnabledState] = useState(() => agent.getRecapsEnabled());
+  const [showThemePicker, setShowThemePicker] = useState(false);
+  const [themePickerIndex, setThemePickerIndex] = useState(0);
+  const [showEffortPicker, setShowEffortPicker] = useState(false);
+  const [reasoningEffort, setReasoningEffortState] = useState<ReasoningEffort | null>(() => agent.getReasoningEffort());
   const [showWalletPicker, setShowWalletPicker] = useState(false);
   const [walletSettings, setWalletSettings] = useState<Required<PaymentSettings>>(() => loadPaymentSettings());
   const [walletFocusIndex, setWalletFocusIndex] = useState(0);
@@ -659,10 +649,27 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   );
   const [pasteBlocks, setPasteBlocks] = useState<PasteBlock[]>([]);
   const [activePlan, setActivePlan] = useState<Plan | null>(null);
+  const [publishedPlan, setPublishedPlan] = useState<Plan | null>(() => findLatestPlan(agent.getChatEntries()));
+  const [kernelState, setKernelState] = useState<KernelState | null>(() => agent.getKernelState());
+  const [activityEvents, setActivityEvents] = useState<UiActivityEvent[]>([]);
+  const [usageSummary, setUsageSummary] = useState<SessionUsageSummary>(() =>
+    summarizeSessionUsage(agent.getSessionUsage()),
+  );
+  const [showInspector, setShowInspector] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
   /** Incremented on each successful TUI copy; drives a brief "Copied" banner. */
   const [copyFlashId, setCopyFlashId] = useState(0);
   const [expandedMessages, setExpandedMessages] = useState<Set<number>>(() => new Set());
   const [activeSubagent, setActiveSubagent] = useState<SubagentStatus | null>(null);
+  const [activeSubagentStartedAt, setActiveSubagentStartedAt] = useState<number | null>(null);
+  /**
+   * When the foreground sub-agent last reported a new action. Set from real `onSubagentStatus`
+   * emissions (one per child tool call) — never a synthetic heartbeat — and consumed by the
+   * three-tier disclosure rule in `resolveAgentDisclosure` (docs/migration/14-AGENT-HARNESS-RECONSTRUCTION.md §19).
+   */
+  const [activeSubagentActivityAt, setActiveSubagentActivityAt] = useState<number | null>(null);
+  const [delegations, setDelegations] = useState<DelegationRun[]>([]);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [pqs, setPqs] = useState<PlanQuestionsState>(initialPlanQuestionsState());
   const pasteCounterRef = useRef(0);
   const pasteBlocksRef = useRef<PasteBlock[]>([]);
@@ -673,9 +680,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const processedInitial = useRef(false);
   const contentAccRef = useRef("");
   const startTimeRef = useRef(0);
+  const sessionStartedAtRef = useRef(agent.getSessionInfo()?.createdAt.getTime() ?? Date.now());
   const isProcessingRef = useRef(false);
   const hasApiKeyRef = useRef(initialHasApiKey);
   const showApiKeyModalRef = useRef(!initialHasApiKey);
+  const showInspectorRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const processMessageRef = useRef<(text: string, displayText?: string) => Promise<void> | void>(() => {});
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
@@ -726,12 +735,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [editingSubagent, setEditingSubagent] = useState<CustomSubagentConfig | null>(null);
   const [agentsEditorDraft, setAgentsEditorDraft] = useState({ name: "", instruction: "" });
   const [agentsEditorField, setAgentsEditorField] = useState<SubagentEditorField>("name");
-  const [agentsEditorModelIndex, setAgentsEditorModelIndex] = useState(() =>
-    Math.max(
-      0,
-      MODELS.findIndex((model) => model.id === DEFAULT_MODEL),
-    ),
-  );
+  const [agentsEditorModelIndex, setAgentsEditorModelIndex] = useState(0);
   const [agentsEditorSyncKey, setAgentsEditorSyncKey] = useState(0);
   const [agentsEditorError, setAgentsEditorError] = useState<string | null>(null);
   const showAgentsModalRef = useRef(false);
@@ -784,10 +788,29 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         const planText = [
           `# ${activePlan.title}`,
           activePlan.summary,
+          ...(activePlan.goal ? ["", `Goal: ${activePlan.goal}`] : []),
+          ...(activePlan.requirements?.length
+            ? [
+                "",
+                "Requirements:",
+                ...activePlan.requirements.map((requirement, index) => `R${index + 1}. ${requirement}`),
+              ]
+            : []),
+          ...(activePlan.acceptanceCriteria?.length
+            ? [
+                "",
+                "Acceptance criteria:",
+                ...activePlan.acceptanceCriteria.map(
+                  (criterion) => `${criterion.id}. ${criterion.description} (verify: ${criterion.verification})`,
+                ),
+              ]
+            : []),
           "",
           ...activePlan.steps.map(
             (s, i) =>
-              `${i + 1}. ${s.title}: ${s.description}${s.filePaths?.length ? ` (${s.filePaths.join(", ")})` : ""}`,
+              `${i + 1}. ${s.title}: ${s.description}${s.filePaths?.length ? ` (${s.filePaths.join(", ")})` : ""}${
+                s.satisfies?.length ? ` [satisfies: ${s.satisfies.join(", ")}]` : ""
+              }`,
           ),
         ].join("\n");
         agent.setPlanContext(planText);
@@ -805,17 +828,54 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const modeInfo = MODES.find((m) => m.id === mode)!;
   modeInfoRef.current = modeInfo;
-  const modelInfo = getModelInfo(model);
+  const modelInfo = agent.getModelInfo() ?? getModelInfo(model);
   const contextStats = modelInfo ? agent.getContextStats(modelInfo.contextWindow, streamContent) : null;
-  const _flatModels = MODELS.map((m) => m.id);
+  const memoryStatus = summarizeMemoryStatus(readMemoryIndex(projectMemoryScope(agent.getCwd())));
+  const modelCatalog = useMemo(
+    () =>
+      [...(startupConfig.localModels ?? [])].sort((a, b) => {
+        const aCloud = a.category === "cloud";
+        const bCloud = b.category === "cloud";
+        if (aCloud !== bCloud) return Number(bCloud) - Number(aCloud);
+        const aFree = aCloud && a.pricingKnown !== false && a.inputPrice === 0 && a.outputPrice === 0;
+        const bFree = bCloud && b.pricingKnown !== false && b.inputPrice === 0 && b.outputPrice === 0;
+        return Number(bFree) - Number(aFree) || a.name.localeCompare(b.name);
+      }),
+    [startupConfig.localModels],
+  );
   const filteredModels = modelSearchQuery
-    ? MODELS.filter(
+    ? modelCatalog.filter(
         (m) =>
           m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()) ||
           m.id.toLowerCase().includes(modelSearchQuery.toLowerCase()),
       )
-    : MODELS;
+    : modelCatalog;
   const filteredModelIds = filteredModels.map((m) => m.id);
+  const selectLocalModel = useCallback(
+    /** Resolves true only when the model is actually switched. */
+    async (modelId: string): Promise<boolean> => {
+      if (switchingModel) return false;
+      setModelSwitchError(null);
+      setSwitchingModel(true);
+      try {
+        const result = startupConfig.onSelectLocalModel
+          ? await startupConfig.onSelectLocalModel(modelId)
+          : { success: true };
+        if (!result.success) {
+          setModelSwitchError(result.error || "The local model could not be prepared.");
+          return false;
+        }
+        agent.setModel(modelId);
+        setModel(modelId);
+        saveProjectSettings({ model: modelId });
+        saveUserSettings({ defaultModel: modelId });
+        return true;
+      } finally {
+        setSwitchingModel(false);
+      }
+    },
+    [agent, startupConfig.onSelectLocalModel, switchingModel],
+  );
   const filteredSlashItems = filterSlashMenuItems(SLASH_MENU_ITEMS, slashSearchQuery);
   const mcpRows = buildMcpBrowseRows(mcpServers, POPULAR_MCP_CATALOG, mcpSearchQuery);
   const mcpEditorFields = mcpEditorDraft.transport === "stdio" ? MCP_STDIO_FIELDS : MCP_REMOTE_FIELDS;
@@ -881,6 +941,39 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const openRecapPicker = useCallback(() => {
     setShowRecapPicker(true);
+  }, []);
+
+  const applyThemePreference = useCallback((preference: ThemePreference) => {
+    setThemePreference(preference);
+    saveUserSettings({ appearance: preference });
+  }, []);
+
+  const applyMotionPreference = useCallback((preference: MotionPreference) => {
+    setMotionPreference(preference);
+    saveUserSettings({ motion: preference });
+  }, []);
+
+  const openThemePicker = useCallback(() => {
+    setThemePickerIndex(0);
+    setShowSlashMenu(false);
+    setSlashSearchQuery("");
+    setShowThemePicker(true);
+  }, []);
+
+  const applyReasoningEffort = useCallback(
+    (effort: ReasoningEffort | null) => {
+      agent.setReasoningEffort(effort);
+      for (const telegramAgent of telegramAgentsRef.current.values()) {
+        telegramAgent.setReasoningEffort(effort);
+      }
+      setReasoningEffortState(effort);
+      saveUserSettings({ reasoningEffort: effort ?? undefined });
+    },
+    [agent],
+  );
+
+  const openEffortPicker = useCallback(() => {
+    setShowEffortPicker(true);
   }, []);
 
   const applyWalletSettings = useCallback((next: Required<PaymentSettings>) => {
@@ -1137,36 +1230,34 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     [agent],
   );
 
-  const openSubagentEditor = useCallback((agent: CustomSubagentConfig | null) => {
-    setEditingSubagent(agent);
-    if (agent) {
-      setAgentsEditorDraft({ name: agent.name, instruction: agent.instruction });
-      setAgentsEditorModelIndex(
-        Math.max(
-          0,
-          MODELS.findIndex((model) => model.id === normalizeModelId(agent.model)),
-        ),
-      );
-    } else {
-      setAgentsEditorDraft({ name: "", instruction: "" });
-      setAgentsEditorModelIndex(
-        Math.max(
-          0,
-          MODELS.findIndex((model) => model.id === DEFAULT_MODEL),
-        ),
-      );
-    }
-    setAgentsEditorField("name");
-    setAgentsEditorError(null);
-    setAgentsEditorSyncKey((n) => n + 1);
-    setShowAgentsEditor(true);
-    setShowAgentsModal(true);
-  }, []);
+  const openSubagentEditor = useCallback(
+    (agent: CustomSubagentConfig | null) => {
+      setEditingSubagent(agent);
+      if (agent) {
+        setAgentsEditorDraft({ name: agent.name, instruction: agent.instruction });
+        setAgentsEditorModelIndex(
+          Math.max(
+            0,
+            modelCatalog.findIndex((model) => model.id === normalizeModelId(agent.model)),
+          ),
+        );
+      } else {
+        setAgentsEditorDraft({ name: "", instruction: "" });
+        setAgentsEditorModelIndex(0);
+      }
+      setAgentsEditorField("name");
+      setAgentsEditorError(null);
+      setAgentsEditorSyncKey((n) => n + 1);
+      setShowAgentsEditor(true);
+      setShowAgentsModal(true);
+    },
+    [modelCatalog],
+  );
 
   const submitSubagentEditor = useCallback(() => {
     const name = (subagentNameRef.current?.plainText || "").trim();
     const instruction = subagentInstructionRef.current?.plainText || "";
-    const model = MODELS[agentsEditorModelIndex]?.id;
+    const model = modelCatalog[agentsEditorModelIndex]?.id;
 
     if (!name) {
       setAgentsEditorError("Name is required.");
@@ -1176,8 +1267,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       setAgentsEditorError('Names "general" and "explore" are reserved.');
       return;
     }
-    if (!model || !getModelIds().includes(model)) {
-      setAgentsEditorError("Pick a valid model.");
+    if (!model) {
+      setAgentsEditorError("Discover a cloud or local model before adding a sub-agent.");
       return;
     }
 
@@ -1198,7 +1289,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setShowAgentsEditor(false);
     setEditingSubagent(null);
     setAgentsEditorError(null);
-  }, [agentsEditorModelIndex, editingSubagent, subAgents]);
+  }, [agentsEditorModelIndex, editingSubagent, modelCatalog, subAgents]);
 
   const removeEditingSubagent = useCallback(() => {
     if (!editingSubagent) return;
@@ -1388,9 +1479,116 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setStreamReasoning("");
     setActiveToolCalls([]);
     setActiveSubagent(null);
+    setActiveSubagentStartedAt(null);
+    setActiveSubagentActivityAt(null);
     setLiveTurnSourceLabel(null);
     contentAccRef.current = "";
   }, []);
+
+  const syncKernelState = useCallback(() => {
+    setKernelState(agent.getKernelState());
+    setUsageSummary(summarizeSessionUsage(agent.getSessionUsage()));
+  }, [agent]);
+
+  const recordActivity = useCallback((event: UiActivityEvent) => {
+    setActivityEvents((current) => upsertActivity(current, event));
+  }, []);
+
+  const createProcessObserver = useCallback(
+    (runId: number): ProcessMessageObserver => ({
+      // Provider/model steps are internal cycles, not meaningful user activity.
+      // Usage stays in runtime accounting; "Step N" never enters the chat presentation.
+      onStepStart: syncKernelState,
+      onStepFinish: syncKernelState,
+      onResearch: (info) => {
+        recordActivity({
+          id: `research:${runId}`,
+          kind: "research",
+          status: info.success ? "complete" : "failed",
+          label: "Repository research",
+          detail: `${info.provider} | ${info.sourceCount} source${info.sourceCount === 1 ? "" : "s"}`,
+          source: "runtime",
+          operation: "research",
+          at: info.timestamp,
+        });
+        syncKernelState();
+      },
+      onToolStart: (info) => {
+        recordActivity({
+          id: `tool:${runId}:${info.toolCall.id}`,
+          kind: "tool",
+          status: "active",
+          label: toolLabel(info.toolCall),
+          detail: toolActivityDetail(info.toolCall),
+          source: "runtime",
+          operation: info.toolCall.function.name,
+          at: info.timestamp,
+        });
+        syncKernelState();
+      },
+      onToolFinish: (info) => {
+        recordActivity({
+          id: `tool:${runId}:${info.toolCall.id}`,
+          kind: "tool",
+          status: info.toolResult.success ? "complete" : "failed",
+          label: toolLabel(info.toolCall),
+          detail: info.toolResult.success
+            ? truncateActivity(info.toolResult.output || "completed")
+            : truncateActivity(info.toolResult.error || info.toolResult.output || "failed"),
+          source: "runtime",
+          operation: info.toolCall.function.name,
+          at: info.timestamp,
+        });
+        syncKernelState();
+      },
+      onError: (info) => {
+        recordActivity({
+          id: `error:${runId}:${info.timestamp}`,
+          kind: "error",
+          status: "failed",
+          label: "Runtime error",
+          detail: info.message,
+          source: "runtime",
+          operation: "error",
+          at: info.timestamp,
+        });
+        syncKernelState();
+      },
+    }),
+    [recordActivity, syncKernelState],
+  );
+
+  useEffect(() => {
+    syncKernelState();
+    if (!isProcessing) return;
+    const id = setInterval(syncKernelState, 100);
+    return () => clearInterval(id);
+  }, [isProcessing, syncKernelState]);
+
+  useEffect(() => {
+    if (!isProcessing && !activeSubagent && !delegations.some((delegation) => delegation.status === "running")) return;
+    setNowTick(Date.now());
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [activeSubagent, delegations, isProcessing]);
+
+  const refreshDelegations = useCallback(async () => {
+    try {
+      setDelegations(await agent.getDelegations());
+    } catch {
+      // Agent telemetry must not interrupt the conversation surface.
+    }
+  }, [agent]);
+
+  useEffect(() => {
+    void refreshDelegations();
+  }, [refreshDelegations]);
+
+  useEffect(() => {
+    if (!isProcessing && !delegations.some((delegation) => delegation.status === "running")) return;
+    const id = setInterval(() => void refreshDelegations(), 1000);
+    return () => clearInterval(id);
+  }, [delegations, isProcessing, refreshDelegations]);
 
   const finishTurnProcessing = useCallback(() => {
     const nextQueued = queuedMessagesRef.current.shift();
@@ -1497,15 +1695,18 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }),
       ]);
 
-      if (toolResult.plan?.questions?.length) {
-        setActivePlan(toolResult.plan);
-        setPqs(initialPlanQuestionsState());
+      if (toolResult.plan) {
+        setPublishedPlan(toolResult.plan);
+        if (mode === "plan") {
+          setActivePlan(toolResult.plan);
+          if (toolResult.plan.questions?.length) setPqs(initialPlanQuestionsState());
+        }
       }
 
-      setActiveToolCalls([]);
+      setActiveToolCalls((current) => current.filter((active) => active.id !== toolCall.id));
       setTimeout(scrollToBottom, 10);
     },
-    [scrollToBottom],
+    [mode, scrollToBottom],
   );
 
   const syncTelegramTurnEntries = useCallback((activeTurn: ActiveTurnState) => {
@@ -1571,6 +1772,74 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     [clearLiveTurnUi, finishTurnProcessing, scrollToBottom, syncTelegramTurnEntries],
   );
 
+  const runHostVerification = useCallback(async () => {
+    if (isProcessingRef.current) return;
+    const runId = ++activeRunIdRef.current;
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+
+    await coordinatorRef.current.run(async () => {
+      const color = modeInfoRef.current.tone;
+      beginLiveTurn({ kind: "local", agent, modeColor: color });
+      setMessages((prev) => [...prev, buildUserEntry("/verify", { modeColor: color })]);
+      setTimeout(scrollToBottom, 50);
+      recordActivity({
+        id: `verification:${runId}`,
+        kind: "verification",
+        status: "active",
+        label: "Host verification",
+        detail: "Starting verification orchestration",
+        source: "runtime",
+        at: Date.now(),
+      });
+
+      try {
+        const result = await agent.runVerify((detail) => {
+          recordActivity({
+            id: `verification:${runId}`,
+            kind: "verification",
+            status: "active",
+            label: "Host verification",
+            detail: truncateActivity(detail),
+            source: "runtime",
+            at: Date.now(),
+          });
+          syncKernelState();
+        });
+        if (activeRunIdRef.current !== runId) return;
+        recordActivity({
+          id: `verification:${runId}`,
+          kind: "verification",
+          status: result.success ? "complete" : "failed",
+          label: result.success ? "Verification passed" : "Verification failed",
+          detail: truncateActivity(result.output || result.error || "No verification detail returned"),
+          source: "runtime",
+          at: Date.now(),
+        });
+        syncKernelState();
+        if (interruptedRunIdRef.current === runId) {
+          interruptedRunIdRef.current = null;
+          finishTurnProcessing();
+          return;
+        }
+        finalizeActiveTurn();
+      } catch (error) {
+        if (activeRunIdRef.current !== runId) return;
+        recordActivity({
+          id: `verification:${runId}`,
+          kind: "verification",
+          status: "failed",
+          label: "Verification failed",
+          detail: truncateActivity(error instanceof Error ? error.message : String(error)),
+          source: "runtime",
+          at: Date.now(),
+        });
+        syncKernelState();
+        finalizeActiveTurn({ hadError: true });
+      }
+    });
+  }, [agent, beginLiveTurn, finalizeActiveTurn, finishTurnProcessing, recordActivity, scrollToBottom, syncKernelState]);
+
   const wireTelegramAgentUi = useCallback((userId: number, telegramAgent: Agent) => {
     if (!telegramEntryCountsRef.current.has(userId)) {
       telegramEntryCountsRef.current.set(userId, telegramAgent.getChatEntries().length);
@@ -1582,7 +1851,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
     const unsubscribe = telegramAgent.onSubagentStatus((status) => {
       if (activeTurnRef.current?.agent !== telegramAgent) return;
+      const observedAt = Date.now();
       setActiveSubagent(status);
+      setActiveSubagentStartedAt((current) => (status ? (current ?? observedAt) : null));
+      setActiveSubagentActivityAt(status ? observedAt : null);
     });
     telegramSubagentUnsubsRef.current.set(userId, unsubscribe);
   }, []);
@@ -1598,7 +1870,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
       const apiKey = getApiKey();
       if (!apiKey) {
-        throw new Error("Grok API key required. Add it in the CLI or set GROK_API_KEY.");
+        throw new Error("Provider API key required. Set OPENROUTER_API_KEY or use `shelra auth openrouter <key>`.");
       }
 
       const u = loadUserSettings();
@@ -1705,7 +1977,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const startTelegramBridge = useCallback(() => {
     const token = getTelegramBotToken();
-    if (!token || !getApiKey()) return;
+    if (!token || !getApiKey() || !startupConfig.baseURL) return;
     if (bridgeRef.current) return;
 
     const bridge = createTelegramBridge({
@@ -1728,6 +2000,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     appendTelegramUserMessage,
     getTelegramAgent,
     showTelegramToolCalls,
+    startupConfig.baseURL,
     upsertTelegramAssistantMessage,
   ]);
 
@@ -1783,19 +2056,27 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setShowApiKeyModal(false);
   }, []);
 
-  const submitApiKey = useCallback(() => {
+  const submitApiKey = useCallback(async () => {
     const apiKey = (apiKeyInputRef.current?.plainText || "").trim();
     if (!apiKey) {
       setApiKeyError("Enter an API key to continue.");
       return;
     }
-    if (!apiKey.startsWith("xai-")) {
-      setApiKeyError("API keys should start with xai-.");
-      return;
+    if (startupConfig.onApiKey) {
+      const result = await startupConfig.onApiKey(apiKey);
+      if (!result.success) {
+        setApiKeyError(result.error || "The cloud provider could not be configured.");
+        return;
+      }
+    } else {
+      try {
+        saveUserSettings({ apiKey });
+        agent.setApiKey(apiKey);
+      } catch (error: unknown) {
+        setApiKeyError(error instanceof Error ? error.message : String(error));
+        return;
+      }
     }
-
-    saveUserSettings({ apiKey });
-    agent.setApiKey(apiKey);
     hasApiKeyRef.current = true;
     showApiKeyModalRef.current = false;
     setHasApiKey(true);
@@ -1805,7 +2086,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     if (getTelegramBotToken()) {
       startTelegramBridge();
     }
-  }, [agent, startTelegramBridge]);
+  }, [agent, startupConfig.onApiKey, startTelegramBridge]);
 
   useEffect(() => {
     hasApiKeyRef.current = hasApiKey;
@@ -1814,6 +2095,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   useEffect(() => {
     showApiKeyModalRef.current = showApiKeyModal;
   }, [showApiKeyModal]);
+
+  useEffect(() => {
+    showInspectorRef.current = showInspector;
+  }, [showInspector]);
 
   useEffect(() => {
     showConnectModalRef.current = showConnectModal;
@@ -1869,7 +2154,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       return;
     }
     if (!getApiKey()) {
-      setTelegramTokenError("Add a Grok API key first.");
+      setTelegramTokenError("Add a compatible provider API key first.");
       return;
     }
     const u = loadUserSettings();
@@ -1915,7 +2200,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       },
     ]);
     try {
-      await bridgeRef.current?.sendDm(result.userId, "Pairing approved. You can message Grok here.");
+      await bridgeRef.current?.sendDm(result.userId, "Pairing approved. You can message ShelraCode here.");
     } catch {
       /* optional DM */
     }
@@ -1924,7 +2209,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const beginTelegramFromConnect = useCallback(() => {
     setShowConnectModal(false);
     if (!getApiKey()) {
-      setMessages((p) => [...p, { type: "assistant", content: "Add a Grok API key first.", timestamp: new Date() }]);
+      setMessages((p) => [
+        ...p,
+        {
+          type: "assistant",
+          content: "Telegram remote control needs a compatible provider API key.",
+          timestamp: new Date(),
+        },
+      ]);
       openApiKeyModal();
       return;
     }
@@ -1961,6 +2253,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const interruptActiveRun = useCallback(
     (key?: KeyEvent) => {
+      if (showInspector) {
+        setShowInspector(false);
+        setInspectorTab("overview");
+        key?.preventDefault();
+        key?.stopPropagation();
+        return true;
+      }
       if (btwStateRef.current) {
         btwAbortRef.current?.abort();
         btwAbortRef.current = null;
@@ -1982,7 +2281,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       activeAgent.abort();
       return true;
     },
-    [agent, clearLiveTurnUi],
+    [agent, clearLiveTurnUi, showInspector],
   );
 
   useEffect(() => {
@@ -2002,6 +2301,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     const onRawInput = (sequence: string) => {
       const parsed = parseKeypress(sequence, { useKittyKeyboard: renderer.useKittyKeyboard });
       if (parsed?.name === "escape" || sequence === "\u001b" || sequence === "\u001b\u001b") {
+        if (showInspectorRef.current) {
+          setShowInspector(false);
+          setInspectorTab("overview");
+          return true;
+        }
         return interruptActiveRun();
       }
       return false;
@@ -2037,6 +2341,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setSessionId(snapshot?.session.id ?? agent.getSessionId());
     setSessionRecap(agent.getSessionRecap());
     setActivePlan(null);
+    setPublishedPlan(null);
+    setKernelState(null);
+    setActivityEvents([]);
+    setUsageSummary(summarizeSessionUsage(agent.getSessionUsage()));
+    sessionStartedAtRef.current = snapshot?.session.createdAt.getTime() ?? Date.now();
+    setNowTick(Date.now());
+    setShowInspector(false);
+    setInspectorTab("overview");
     setPqs(initialPlanQuestionsState());
     replacePasteBlocks([]);
     queuedMessagesRef.current = [];
@@ -2050,21 +2362,27 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       const isStale = () => activeRunIdRef.current !== runId;
       isProcessingRef.current = true;
       setIsProcessing(true);
+      setKernelState(null);
+      setPublishedPlan(null);
+      setActivityEvents((current) =>
+        current.map((event) => (event.status === "active" ? { ...event, status: "complete" } : event)),
+      );
       if (!sessionTitle)
         agent
           .generateTitle((displayText ?? text).trim())
           .then(setSessionTitle)
           .catch(() => {});
       await coordinatorRef.current.run(async () => {
-        const color = modeInfoRef.current.color;
+        const color = modeInfoRef.current.tone;
         beginLiveTurn({ kind: "local", agent, modeColor: color });
         setMessages((prev) => [...prev, buildUserEntry((displayText ?? text).trim(), { modeColor: color })]);
         setTimeout(scrollToBottom, 50);
         await new Promise((r) => setTimeout(r, 0));
         let turnHadError = false;
         let turnHadAuthError = false;
+        const observer = createProcessObserver(runId);
         try {
-          for await (const chunk of agent.processMessage(text.trim())) {
+          for await (const chunk of agent.processMessage(text.trim(), observer)) {
             if (isStale()) {
               break;
             }
@@ -2121,6 +2439,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 break;
             }
           }
+          syncKernelState();
         } catch {
           turnHadError = true;
           if (!isStale()) {
@@ -2153,10 +2472,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       appendLiveToolResult,
       applyLocalAssistantDelta,
       beginLiveTurn,
+      createProcessObserver,
       finalizeActiveTurn,
       scrollToBottom,
       sessionTitle,
       showLiveToolCalls,
+      syncKernelState,
     ],
   );
 
@@ -2174,8 +2495,36 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       agent.onSubagentStatus((status) => {
         if (activeTurnRef.current?.agent !== agent) return;
         setActiveSubagent(status);
+        if (status) {
+          // Every emission is one real reported action from the child (`runTaskRequest` calls
+          // `onActivity` per child tool call), so this timestamp is genuinely "last observed
+          // activity" — exactly what the tier-2 collapse rule measures against.
+          const observedAt = Date.now();
+          setActiveSubagentStartedAt((current) => current ?? observedAt);
+          setActiveSubagentActivityAt(observedAt);
+          recordActivity({
+            id: `agent:${status.agent}`,
+            kind: "agent",
+            status: "active",
+            label: `Delegated agent: ${formatSubagentName(status.agent)}`,
+            detail: `${status.description}: ${status.detail}`,
+            source: "runtime",
+            at: observedAt,
+          });
+        } else {
+          setActivityEvents((current) =>
+            current.map((event) =>
+              event.kind === "agent" && event.status === "active"
+                ? { ...event, status: "complete", detail: `${event.detail || ""} | finished` }
+                : event,
+            ),
+          );
+          setActiveSubagentStartedAt(null);
+          setActiveSubagentActivityAt(null);
+        }
+        syncKernelState();
       }),
-    [agent],
+    [agent, recordActivity, syncKernelState],
   );
   useEffect(
     () => () => {
@@ -2219,6 +2568,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         resetToNewSession();
         return true;
       }
+      if (c === "/status") {
+        setInspectorTab("overview");
+        setShowInspector(true);
+        return true;
+      }
+      if (c === "/tasks" || c === "/delegations") {
+        setInspectorTab("agents");
+        setShowInspector(true);
+        return true;
+      }
       if (c === "/model" || c === "/models") {
         setShowModelPicker(true);
         setModelPickerIndex(0);
@@ -2231,6 +2590,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       }
       if (c === "/recap" || c === "/recaps") {
         openRecapPicker();
+        return true;
+      }
+      if (c === "/theme" || c === "/appearance") {
+        openThemePicker();
+        return true;
+      }
+      if (c === "/effort" || c === "/reasoning") {
+        openEffortPicker();
         return true;
       }
       if (c === "/wallet") {
@@ -2263,7 +2630,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         return true;
       }
       if (c === "/verify") {
-        processMessage(buildVerifyPrompt(agent.getCwd()));
+        void runHostVerification();
         return true;
       }
       if (c === "/commit-push") {
@@ -2329,13 +2696,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       agent,
       handleExit,
       openAgentsModal,
+      openEffortPicker,
       openMcpModal,
       openRecapPicker,
       openSandboxPicker,
+      openThemePicker,
       openWalletPicker,
       openScheduleModal,
       processMessage,
       resetToNewSession,
+      runHostVerification,
       subAgents,
     ],
   );
@@ -2358,6 +2728,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           break;
         case "recaps":
           openRecapPicker();
+          break;
+        case "theme":
+          openThemePicker();
+          break;
+        case "effort":
+          openEffortPicker();
           break;
         case "wallet":
           openWalletPicker();
@@ -2395,6 +2771,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         case "agents":
           openAgentsModal();
           break;
+        case "status":
+          setInspectorTab("overview");
+          setShowInspector(true);
+          break;
+        case "tasks":
+          setInspectorTab("agents");
+          setShowInspector(true);
+          break;
         case "schedule":
           openScheduleModal();
           break;
@@ -2402,7 +2786,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           processMessage(REVIEW_PROMPT);
           break;
         case "verify":
-          processMessage(buildVerifyPrompt(agent.getCwd()));
+          void runHostVerification();
           break;
         case "commit-push":
           processMessage(COMMIT_PUSH_PROMPT);
@@ -2428,13 +2812,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       agent,
       handleExit,
       openAgentsModal,
+      openEffortPicker,
       openMcpModal,
       openRecapPicker,
       openSandboxPicker,
+      openThemePicker,
       openWalletPicker,
       openScheduleModal,
       processMessage,
       resetToNewSession,
+      runHostVerification,
       startupConfig.version,
     ],
   );
@@ -2446,12 +2833,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     showMcpModal ||
     showSandboxPicker ||
     showRecapPicker ||
+    showThemePicker ||
+    showEffortPicker ||
     showWalletPicker ||
     !!pendingPaymentApproval ||
     showScheduleModal ||
     showAgentsModal ||
     showAgentsEditor ||
-    showUpdateModal;
+    showUpdateModal ||
+    showInspector;
 
   const showPlanPanel = !!activePlan?.questions?.length;
   const planQuestions = activePlan?.questions ?? [];
@@ -2464,13 +2854,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setPqs(initialPlanQuestionsState());
   }, []);
 
-  const submitPlanAnswers = useCallback(() => {
-    if (!activePlan?.questions?.length) return;
-    const text = formatPlanAnswers(activePlan.questions, pqs.answers);
-    setActivePlan(null);
-    setPqs(initialPlanQuestionsState());
-    processMessage(text);
-  }, [activePlan, pqs.answers, processMessage]);
+  const submitPlanAnswers = useCallback(
+    (answers: PlanAnswers = pqs.answers) => {
+      if (!activePlan?.questions?.length) return;
+      const text = formatPlanAnswers(activePlan.questions, answers);
+      setActivePlan(null);
+      setPqs(initialPlanQuestionsState());
+      processMessage(text);
+    },
+    [activePlan, pqs.answers, processMessage],
+  );
 
   const handlePlanSelect = useCallback(
     (q: PlanQuestion, idx: number, options: { id: string; label: string }[], showCustom: boolean) => {
@@ -2503,9 +2896,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           return { ...s, answers: { ...s.answers, [q.id]: next } };
         });
       } else {
-        setPqs((s) => ({ ...s, answers: { ...s.answers, [q.id]: opt.id } }));
+        const nextAnswers = { ...pqs.answers, [q.id]: opt.id };
+        setPqs((s) => ({ ...s, answers: nextAnswers }));
         if (isSinglePlan) {
-          submitPlanAnswers();
+          submitPlanAnswers(nextAnswers);
           return;
         }
         setPqs((s) => ({ ...s, tab: s.tab + 1, selected: 0 }));
@@ -2529,6 +2923,40 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         return;
       }
+      if (showInspector) {
+        if (isEscapeKey(key)) {
+          setShowInspector(false);
+          setInspectorTab("overview");
+          key.preventDefault();
+          key.stopPropagation();
+          return;
+        }
+        const inspectorTabs: InspectorTab[] = ["overview", "plan", "activity", "evidence", "agents"];
+        const keyTab: Record<string, InspectorTab> = {
+          "1": "overview",
+          "2": "plan",
+          "3": "activity",
+          "4": "evidence",
+          "5": "agents",
+        };
+        const directTab = keyTab[key.name] ?? keyTab[key.sequence ?? ""];
+        if (directTab) {
+          setInspectorTab(directTab);
+          return;
+        }
+        if (key.name === "tab" || key.name === "left" || key.name === "right") {
+          const current = inspectorTabs.indexOf(inspectorTab);
+          const direction = key.name === "left" || key.shift ? -1 : 1;
+          setInspectorTab(inspectorTabs[(current + direction + inspectorTabs.length) % inspectorTabs.length]);
+          return;
+        }
+        return;
+      }
+      if (key.name === "i" && key.ctrl) {
+        setInspectorTab("overview");
+        setShowInspector(true);
+        return;
+      }
       if (showPlanPanel) {
         const q = planQuestions[pqs.tab];
 
@@ -2550,16 +2978,18 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   const next = existing.includes(text) ? existing : [...existing, text];
                   setPqs((s) => ({ ...s, editing: false, answers: { ...s.answers, [qId]: next } }));
                 } else if (q.type === "text") {
-                  setPqs((s) => ({ ...s, editing: false, answers: { ...s.answers, [qId]: text } }));
+                  const nextAnswers = { ...pqs.answers, [qId]: text };
+                  setPqs((s) => ({ ...s, editing: false, answers: nextAnswers }));
                   if (isSinglePlan) {
-                    submitPlanAnswers();
+                    submitPlanAnswers(nextAnswers);
                     return;
                   }
                   setPqs((s) => ({ ...s, tab: s.tab + 1, selected: 0 }));
                 } else {
-                  setPqs((s) => ({ ...s, editing: false, answers: { ...s.answers, [qId]: text } }));
+                  const nextAnswers = { ...pqs.answers, [qId]: text };
+                  setPqs((s) => ({ ...s, editing: false, answers: nextAnswers }));
                   if (isSinglePlan) {
-                    submitPlanAnswers();
+                    submitPlanAnswers(nextAnswers);
                     return;
                   }
                   setPqs((s) => ({ ...s, tab: s.tab + 1, selected: 0 }));
@@ -2720,7 +3150,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         ) {
           const decrement = key.name === "up" || key.name === "left" || key.name === "k";
           setAgentsEditorModelIndex((index) =>
-            decrement ? Math.max(0, index - 1) : Math.min(MODELS.length - 1, index + 1),
+            decrement ? Math.max(0, index - 1) : Math.min(Math.max(0, modelCatalog.length - 1), index + 1),
           );
           return;
         }
@@ -2972,14 +3402,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         if (key.name === "return") {
           const sel = filteredModelIds[modelPickerIndex];
-          if (sel) {
-            agent.setModel(sel);
-            setModel(sel);
-            saveProjectSettings({ model: sel });
-            saveUserSettings({ defaultModel: sel });
+          if (sel && !switchingModel) {
+            // Keep the picker open on failure so its error is visible; closing
+            // it unconditionally hid every model-switch failure.
+            void selectLocalModel(sel).then((switched) => {
+              if (!switched) return;
+              setShowModelPicker(false);
+              setModelSearchQuery("");
+            });
           }
-          setShowModelPicker(false);
-          setModelSearchQuery("");
           return;
         }
         if (key.name === "backspace") {
@@ -3017,6 +3448,39 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         return;
       }
+      if (showThemePicker) {
+        if (isEscapeKey(key)) {
+          setShowThemePicker(false);
+          return;
+        }
+        if (key.name === "up") {
+          setThemePickerIndex((index) => Math.max(0, index - 1));
+          return;
+        }
+        if (key.name === "down") {
+          setThemePickerIndex((index) => Math.min(1, index + 1));
+          return;
+        }
+
+        const options: readonly string[] = themePickerIndex === 0 ? THEME_OPTIONS : MOTION_OPTIONS;
+        const current = themePickerIndex === 0 ? themePreference : motionPreference;
+        if (key.name === "left" || key.name === "right" || key.name === "return") {
+          const currentIndex = options.indexOf(current);
+          const nextIndex =
+            key.name === "left"
+              ? Math.max(0, currentIndex - 1)
+              : key.name === "right"
+                ? Math.min(options.length - 1, currentIndex + 1)
+                : (currentIndex + 1) % options.length;
+          const next = options[nextIndex];
+          if (next && next !== current) {
+            if (themePickerIndex === 0) applyThemePreference(next as ThemePreference);
+            else applyMotionPreference(next as MotionPreference);
+          }
+          return;
+        }
+        return;
+      }
       if (showRecapPicker) {
         if (isEscapeKey(key)) {
           setShowRecapPicker(false);
@@ -3036,6 +3500,37 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         if (key.name === "return") {
           applyRecapsEnabled(!recapsEnabled);
+          return;
+        }
+        return;
+      }
+      if (showEffortPicker) {
+        if (isEscapeKey(key)) {
+          setShowEffortPicker(false);
+          return;
+        }
+        const supportedEfforts = getSupportedReasoningEfforts(model);
+        if (supportedEfforts.length === 0) {
+          if (key.name === "return") setShowEffortPicker(false);
+          return;
+        }
+        const effortOptions: Array<ReasoningEffort | "auto"> = ["auto", ...supportedEfforts];
+        const currentEffort = reasoningEffort ?? "auto";
+        if (key.name === "left" || key.name === "right") {
+          const idx = effortOptions.indexOf(currentEffort);
+          const next =
+            key.name === "right"
+              ? effortOptions[Math.min(effortOptions.length - 1, idx + 1)]
+              : effortOptions[Math.max(0, idx - 1)];
+          if (next && next !== currentEffort) {
+            applyReasoningEffort(next === "auto" ? null : next);
+          }
+          return;
+        }
+        if (key.name === "return") {
+          const idx = effortOptions.indexOf(currentEffort);
+          const next = effortOptions[(idx + 1) % effortOptions.length];
+          applyReasoningEffort(next === "auto" ? null : next);
           return;
         }
         return;
@@ -3278,12 +3773,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       editingSubagent,
       editSavedMcp,
       adjustModelReasoningEffort,
+      selectLocalModel,
+      switchingModel,
       filteredModelIds,
       filteredSlashItems,
       handleExit,
       handlePlanSelect,
       handleSlashMenuSelect,
       interruptActiveRun,
+      inspectorTab,
       isPlanConfirmTab,
       isProcessing,
       isSinglePlan,
@@ -3310,9 +3808,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       pqs,
       removeEditingSubagent,
       applyRecapsEnabled,
+      applyReasoningEffort,
       applySandboxMode,
       applySandboxSettings,
+      applyThemePreference,
+      applyMotionPreference,
+      model,
+      motionPreference,
       recapsEnabled,
+      reasoningEffort,
+      showEffortPicker,
       sandboxSettings,
       sandboxSettingsEditing,
       sandboxSettingsEditBuffer,
@@ -3322,6 +3827,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       showPlanPanel,
       showRecapPicker,
       showSandboxPicker,
+      showThemePicker,
       pendingPaymentApproval,
       processMessage,
       showWalletPicker,
@@ -3331,11 +3837,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       applyWalletSettings,
       showSlashMenu,
       slashMenuIndex,
+      showInspector,
       submitApiKey,
       submitPlanAnswers,
+      themePickerIndex,
+      themePreference,
       copyTuiSelectionToHost,
       toggleSavedMcp,
       messages,
+      modelCatalog,
       startupConfig.version,
     ],
   );
@@ -3412,7 +3922,50 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     processMessage(enhancedMessage, displayText);
   }, [agent, clearLiveTurnUi, handleCommand, openApiKeyModal, processMessage, replacePasteBlocks, scrollToBottom]);
 
-  const hasMessages = messages.length > 0 || streamContent || isProcessing;
+  const inspectorPlan = useMemo(
+    () => resolvePlanState(messages) ?? publishedPlan ?? activePlan,
+    [activePlan, messages, publishedPlan],
+  );
+  const inspectorChangedFiles = changedFiles(messages, kernelState);
+  const originalIntent = messages.find((entry) => entry.type === "user")?.content ?? null;
+  const currentActivity = useMemo(() => {
+    if (activeSubagent) {
+      return `${formatSubagentName(activeSubagent.agent)}: ${truncateActivity(activeSubagent.detail)}`;
+    }
+    const activeTool = [...activeToolCalls].reverse().find(isPresentationToolCall);
+    if (activeTool) {
+      return toolLabel(activeTool);
+    }
+    const activeEvent = [...activityEvents]
+      .reverse()
+      .find((event) => event.status === "active" && event.operation !== "update_plan_step");
+    if (activeEvent) return activeEvent.label + (activeEvent.detail ? `: ${truncateActivity(activeEvent.detail)}` : "");
+    return phaseLabel(kernelState, isProcessing);
+  }, [activeSubagent, activeToolCalls, activityEvents, isProcessing, kernelState]);
+  const currentActivityStartedAt = useMemo(() => {
+    if (activeSubagent && activeSubagentStartedAt) return activeSubagentStartedAt;
+    const presentationTools = activeToolCalls.filter(isPresentationToolCall);
+    if (presentationTools.length > 0) {
+      const activeToolIds = new Set(presentationTools.map((toolCall) => toolCall.id));
+      const activeToolEvent = [...activityEvents]
+        .reverse()
+        .find((event) => event.status === "active" && [...activeToolIds].some((id) => event.id.includes(id)));
+      if (activeToolEvent) return activeToolEvent.at;
+    }
+    const activeEvent = [...activityEvents]
+      .reverse()
+      .find((event) => event.status === "active" && event.operation !== "update_plan_step");
+    if (activeEvent) return activeEvent.at;
+    return isProcessing ? startTimeRef.current || null : null;
+  }, [activeSubagent, activeSubagentStartedAt, activeToolCalls, activityEvents, isProcessing]);
+  const currentActivityElapsedMs = currentActivityStartedAt ? Math.max(0, nowTick - currentActivityStartedAt) : null;
+  const inspectorContextSummary = agent.getContextSummary();
+  const inspectorContextStats: InspectorContextStats | null = contextStats;
+  const transcriptItems = useMemo(() => projectTranscript(messages), [messages]);
+  const liveActivityItems = useMemo(() => visibleRuntimeActivity(activityEvents), [activityEvents]);
+  const hasMessages = messages.length > 0 || streamContent.length > 0 || isProcessing;
+  const workspaceLayout = resolveWorkspaceLayout(width, hasMessages);
+  const { sidebarWidth, showSidebar: showWorkspaceSidebar, chatWidth } = workspaceLayout;
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: OpenCode-style copy-on-mouse-up on root surface
@@ -3425,99 +3978,140 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     >
       {copyFlashId > 0 ? <CopyFlashBanner t={t} width={width} /> : null}
       {hasMessages ? (
-        <box flexGrow={1} flexDirection="column">
-          <SessionHeader t={t} modeInfo={modeInfo} sessionTitle={sessionTitle} sessionId={sessionId} />
-          <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
-            {/* Scrollable messages */}
-            {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
-            <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
-              {messages.map((msg, i) => (
-                <MessageView
-                  key={`${msg.timestamp.getTime()}-${msg.type}-${msg.remoteKey ?? ""}-${msg.content.slice(0, 24)}`}
-                  entry={msg}
-                  index={i}
+        <box flexGrow={1} flexDirection="row" minHeight={0}>
+          <box width={chatWidth} flexDirection="column" minHeight={0}>
+            <SessionHeader t={t} modeInfo={modeInfo} sessionTitle={sessionTitle} sessionId={sessionId} />
+            <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
+              {/* Scrollable messages */}
+              {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
+              <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
+                {transcriptItems.map((item) =>
+                  item.kind === "message" ? (
+                    <MessageView
+                      key={item.id}
+                      entry={item.entry}
+                      index={item.sourceIndex}
+                      t={t}
+                      modeColor={modeAccent(t, modeInfo)}
+                      expandedMessages={expandedMessages}
+                    />
+                  ) : (
+                    <TranscriptActivityView key={item.id} t={t} item={item} />
+                  ),
+                )}
+                {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
+                  <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                    <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
+                  </box>
+                )}
+                {/* Active tool calls — pending inline */}
+                <RuntimeActivityTree
                   t={t}
-                  modeColor={modeInfo.color}
-                  expandedMessages={expandedMessages}
+                  title={isProcessing ? currentActivity : null}
+                  elapsedMs={currentActivityElapsedMs}
+                  activities={liveActivityItems}
+                  now={nowTick}
+                  found={liveActivityItems.length > 0 ? streamContent || null : null}
+                  next={liveActivityItems.length > 0 ? nextPlanStepLabel(inspectorPlan) : null}
+                  isProcessing={isProcessing}
                 />
-              ))}
-              {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
-                <box paddingLeft={3} marginTop={1} flexShrink={0}>
-                  <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
-                </box>
-              )}
-              {/* Active tool calls — pending inline */}
-              {activeToolCalls.map((tc) =>
-                tc.function.name === "task" ? (
-                  <SubagentTaskLine
-                    key={tc.id}
-                    t={t}
-                    agent={tryParseArg(tc, "agent") || "sub-agent"}
-                    label={toolArgs(tc) || "Working"}
-                    pending
-                  />
-                ) : tc.function.name === "delegate" ? (
-                  <DelegationTaskLine
-                    key={tc.id}
-                    t={t}
-                    label={toolArgs(tc) || "Background research"}
-                    pending
-                    id={undefined}
-                  />
-                ) : (
-                  <InlineTool key={tc.id} t={t} pending>
-                    {toolLabel(tc)}
-                  </InlineTool>
-                ),
-              )}
-              {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
-              {/* Streaming assistant content */}
-              {streamContent && (
-                <box paddingLeft={3} marginTop={1} flexShrink={0}>
-                  <Markdown content={streamContent} t={t} />
-                </box>
-              )}
-              {/* Waiting indicator */}
-              {isProcessing && !streamContent && activeToolCalls.length === 0 && (
-                <ShimmerText t={t} text="Planning next moves" />
-              )}
-              {/* Plan questions panel — inline, OpenCode-style */}
-              {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
-              {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
-            </scrollbox>
-            {btwState && <BtwOverlay state={btwState} theme={t} />}
-            {/* Prompt */}
-            <box flexShrink={0} flexDirection="column">
-              {sessionRecap ? <RecapBanner t={t} recap={sessionRecap} /> : null}
-              <PromptBox
-                t={t}
-                inputRef={inputRef}
-                isProcessing={isProcessing}
-                showModelPicker={showModelPicker}
-                showSandboxPicker={showSandboxPicker}
-                showWalletPicker={showWalletPicker}
-                showSlashMenu={showSlashMenu}
-                showPlanQuestions={showPlanPanel}
-                showApiKeyModal={showApiKeyModal}
-                blockPrompt={blockPrompt}
-                onSubmit={handleSubmit}
-                onPaste={handlePaste}
-                pasteBlocks={pasteBlocks}
-                modeInfo={modeInfo}
-                model={model}
-                modelInfo={modelInfo}
-                contextStats={contextStats}
-                queuedCount={queuedMessages.length}
-                queuedMessages={queuedMessages}
-                typeahead={typeahead}
-              />
+                {/* Streaming assistant content — only when there's no live activity tree to fold it into */}
+                {streamContent && liveActivityItems.length === 0 && (
+                  <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                    <Markdown content={streamContent} t={t} />
+                  </box>
+                )}
+                {/* Waiting indicator */}
+                {/* Plan questions panel — inline, OpenCode-style */}
+                {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
+                {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
+              </scrollbox>
+              {btwState && <BtwOverlay state={btwState} theme={t} />}
+              {/* Prompt */}
+              <box flexShrink={0} flexDirection="column">
+                {sessionRecap ? <RecapBanner t={t} recap={sessionRecap} /> : null}
+                <SessionStatusStrip
+                  t={t}
+                  width={chatWidth}
+                  isProcessing={isProcessing}
+                  kernel={kernelState}
+                  currentActivity={currentActivity}
+                  elapsedMs={currentActivityElapsedMs}
+                  changedFileCount={inspectorChangedFiles.length}
+                  planStepCount={inspectorPlan?.steps.length ?? 0}
+                  activeAgent={activeSubagent}
+                />
+                <PromptBox
+                  t={t}
+                  width={chatWidth}
+                  reducedMotion={reducedMotion}
+                  inputRef={inputRef}
+                  isProcessing={isProcessing}
+                  showModelPicker={showModelPicker}
+                  showSandboxPicker={showSandboxPicker}
+                  showWalletPicker={showWalletPicker}
+                  showSlashMenu={showSlashMenu}
+                  showPlanQuestions={showPlanPanel}
+                  showApiKeyModal={showApiKeyModal}
+                  blockPrompt={blockPrompt}
+                  onSubmit={handleSubmit}
+                  onPaste={handlePaste}
+                  pasteBlocks={pasteBlocks}
+                  modeInfo={modeInfo}
+                  model={model}
+                  modelInfo={modelInfo}
+                  contextStats={contextStats}
+                  queuedCount={queuedMessages.length}
+                  queuedMessages={queuedMessages}
+                  typeahead={typeahead}
+                />
+                <ActiveAgentsStrip
+                  t={t}
+                  activeSubagent={activeSubagent}
+                  startedAt={activeSubagentStartedAt}
+                  lastActivityAt={activeSubagentActivityAt}
+                  delegations={delegations}
+                  now={nowTick}
+                />
+              </box>
+            </box>
+            <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
+              <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
+              {sandboxMode === "shuru" ? <text fg={t.warning}>{" · sandbox"}</text> : null}
+              <box flexGrow={1} />
             </box>
           </box>
-          <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
-            <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
-            {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
-            <box flexGrow={1} />
-          </box>
+          {showWorkspaceSidebar ? (
+            <WorkspaceSidebar
+              t={t}
+              width={sidebarWidth}
+              isProcessing={isProcessing}
+              kernel={kernelState}
+              currentActivity={currentActivity}
+              plan={inspectorPlan}
+              changedFiles={inspectorChangedFiles}
+              activities={activityEvents}
+              activeSubagent={activeSubagent}
+              lastActivityAt={activeSubagentActivityAt}
+              delegations={delegations}
+              activeToolCalls={activeToolCalls}
+              contextSummary={inspectorContextSummary}
+              contextStats={inspectorContextStats}
+              usage={usageSummary}
+              sessionStartedAt={sessionStartedAtRef.current}
+              now={nowTick}
+              model={model}
+              modeLabel={modeInfo.label}
+              reasoningEffort={describeReasoningEffort(
+                reasoningEffort,
+                reasoningEffortByModel[normalizeModelId(model)],
+                agent.resolveReasoningEffort(model),
+                getSupportedReasoningEfforts(model),
+              )}
+              verificationStatus={agent.getVerificationStatus()}
+              memoryStatus={memoryStatus}
+            />
+          ) : null}
         </box>
       ) : (
         /* ── Home ───────────────────────────────────────── */
@@ -3525,12 +4119,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
             <box flexGrow={1} minHeight={0} />
             <box flexShrink={0} alignItems="center">
-              <HeroLogo t={t} />
+              <HeroLogo t={t} width={width} />
             </box>
             <box height={1} minHeight={0} flexShrink={1} />
             <box width="100%" maxWidth={75} flexShrink={0}>
               <PromptBox
                 t={t}
+                width={Math.min(width, 75)}
+                reducedMotion={reducedMotion}
                 inputRef={inputRef}
                 isProcessing={isProcessing}
                 showModelPicker={showModelPicker}
@@ -3556,7 +4152,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           </box>
           {updateInfo?.hasUpdate && (
             <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
-              <text fg="#f59e0b">
+              <text fg={t.warning}>
                 {"┃ Update available: v"}
                 {startupConfig.version}
                 {" → v"}
@@ -3567,12 +4163,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           )}
           {isUpdating && (
             <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
-              <text fg="#f59e0b">{"┃ Updating..."}</text>
+              <text fg={t.warning}>{"┃ Updating..."}</text>
             </box>
           )}
           {updateOutput && !isUpdating && (
             <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
-              <text fg={updateOutput.startsWith("Update complete") ? "#22c55e" : "#ef4444"}>
+              <text fg={updateOutput.startsWith("Update complete") ? t.success : t.danger}>
                 {"┃ "}
                 {updateOutput}
               </text>
@@ -3580,7 +4176,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           )}
           <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
             <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
-            {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
+            {sandboxMode === "shuru" ? <text fg={t.warning}>{" · sandbox"}</text> : null}
             <box flexGrow={1} />
             <text fg={t.textDim}>{`v${startupConfig.version}`}</text>
           </box>
@@ -3594,6 +4190,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           inputRef={apiKeyInputRef}
           error={apiKeyError}
           onSubmit={submitApiKey}
+          cloudMode={Boolean(startupConfig.onApiKey)}
         />
       )}
       {showUpdateModal && updateInfo && (
@@ -3674,6 +4271,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           draft={agentsEditorDraft}
           focusedField={agentsEditorField}
           modelIndex={agentsEditorModelIndex}
+          models={modelCatalog}
           error={agentsEditorError}
           title={editingSubagent ? `Edit sub-agent: ${formatSubagentName(editingSubagent.name)}` : "Add sub-agent"}
           nameRef={subagentNameRef}
@@ -3692,6 +4290,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           searchQuery={modelSearchQuery}
           filteredModels={filteredModels}
           reasoningEffortByModel={reasoningEffortByModel}
+          switching={switchingModel}
+          error={modelSwitchError}
         />
       )}
       {showWalletPicker && (
@@ -3705,6 +4305,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         />
       )}
       {showRecapPicker && <RecapPickerModal t={t} enabled={recapsEnabled} width={width} height={height} />}
+      {showThemePicker && (
+        <ThemePickerModal
+          t={t}
+          appearance={themePreference}
+          motion={motionPreference}
+          focusIndex={themePickerIndex}
+          width={width}
+          height={height}
+        />
+      )}
+      {showEffortPicker && (
+        <EffortPickerModal t={t} modelId={model} effort={reasoningEffort} width={width} height={height} />
+      )}
       {showSandboxPicker && (
         <SandboxPickerModal
           t={t}
@@ -3746,6 +4359,33 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           onSubmit={() => void submitTelegramPair()}
         />
       )}
+      {showInspector && (
+        <SessionInspector
+          t={t}
+          width={width}
+          height={height}
+          tab={inspectorTab}
+          sessionId={sessionId}
+          cwd={agent.getCwd().replace(os.homedir(), "~")}
+          model={model}
+          modeLabel={modeInfo.label}
+          isProcessing={isProcessing}
+          kernel={kernelState}
+          currentActivity={currentActivity}
+          plan={inspectorPlan}
+          originalIntent={originalIntent}
+          activities={activityEvents}
+          changedFiles={inspectorChangedFiles}
+          activeSubagent={activeSubagent}
+          activeSubagentStartedAt={activeSubagentStartedAt}
+          lastActivityAt={activeSubagentActivityAt}
+          delegations={delegations}
+          activeToolCalls={activeToolCalls}
+          contextSummary={inspectorContextSummary}
+          contextStats={inspectorContextStats}
+          now={nowTick}
+        />
+      )}
     </box>
   );
 }
@@ -3767,7 +4407,7 @@ function SessionHeader({
     <box flexShrink={0} width="100%">
       <box flexDirection="row" width="100%" paddingTop={1} paddingBottom={1} paddingLeft={2} paddingRight={2}>
         <text>
-          <span style={{ fg: modeInfo.color }}>
+          <span style={{ fg: modeAccent(t, modeInfo) }}>
             <b>{modeInfo.label}</b>
           </span>
           {sessionTitle ? (
@@ -3791,7 +4431,7 @@ function RecapBanner({ t, recap }: { t: Theme; recap: string }) {
     <box width="100%" paddingBottom={1}>
       <text>
         <span style={{ fg: t.textDim }}>{"※ recap: "}</span>
-        <span style={{ fg: t.textMuted }}>{recap}</span>
+        <span style={{ fg: t.textMuted }}>{truncateLine(recap, 180)}</span>
       </text>
     </box>
   );
@@ -3821,6 +4461,8 @@ function ContextMeter({ t, stats }: { t: Theme; stats: ContextStats }) {
 
 function PromptBox({
   t,
+  width,
+  reducedMotion,
   inputRef,
   isProcessing,
   showModelPicker,
@@ -3843,6 +4485,8 @@ function PromptBox({
   typeahead,
 }: {
   t: Theme;
+  width: number;
+  reducedMotion: boolean;
   inputRef: React.RefObject<TextareaRenderable | null>;
   isProcessing: boolean;
   showModelPicker: boolean;
@@ -3866,9 +4510,24 @@ function PromptBox({
 }) {
   const hasQueue = (queuedMessages?.length ?? 0) > 0;
   const showSuggestions = typeahead?.visible ?? false;
+  const inputFocused =
+    !showModelPicker &&
+    !showSandboxPicker &&
+    !showWalletPicker &&
+    !showSlashMenu &&
+    !showPlanQuestions &&
+    !showApiKeyModal &&
+    !blockPrompt;
+  const composerBorder = isProcessing ? t.borderStrong : inputFocused ? t.composerFocusBorder : t.border;
 
   return (
-    <box backgroundColor={t.backgroundPanel}>
+    <box
+      backgroundColor={t.backgroundPanel}
+      border={["left", "right", "bottom"]}
+      borderColor={composerBorder}
+      flexDirection="column"
+    >
+      <AuroraEdge t={t} width={width} active={isProcessing} focused={inputFocused} reducedMotion={reducedMotion} />
       <box>
         {hasQueue && (
           <box
@@ -3917,16 +4576,8 @@ function PromptBox({
           <box flexGrow={1}>
             <textarea
               ref={inputRef}
-              focused={
-                !showModelPicker &&
-                !showSandboxPicker &&
-                !showWalletPicker &&
-                !showSlashMenu &&
-                !showPlanQuestions &&
-                !showApiKeyModal &&
-                !blockPrompt
-              }
-              placeholder={isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message Grok..."}
+              focused={inputFocused}
+              placeholder={isProcessing ? "Queue a follow-up..." : placeholder || "Ask Shelra..."}
               textColor={t.text}
               backgroundColor={t.backgroundElement}
               placeholderColor={t.textMuted}
@@ -3960,9 +4611,9 @@ function PromptBox({
                 {"enter "}
                 <span style={{ fg: t.textMuted }}>{"queue"}</span>
               </text>
-              <text fg={t.text}>
-                {"esc "}
-                <span style={{ fg: t.textMuted }}>{(queuedCount ?? 0) > 0 ? "clear queue" : "interrupt"}</span>
+              <text fg={t.danger}>
+                <b>{"■ Stop"}</b>
+                <span style={{ fg: t.textMuted }}>{`  esc${(queuedCount ?? 0) > 0 ? " clears queue first" : ""}`}</span>
               </text>
             </box>
           ) : showSuggestions ? (
@@ -4013,24 +4664,19 @@ function PromptModeLabel({
 }) {
   if (!isProcessing) {
     return (
-      <text fg={modeInfo.color}>
+      <text fg={modeAccent(t, modeInfo)}>
         <b>{modeInfo.label}</b>
       </text>
     );
   }
 
-  return <PromptLoadingBoxes t={t} color={modeInfo.color} />;
+  return <PromptLoadingBoxes color={modeAccent(t, modeInfo)} />;
 }
 
-function PromptLoadingBoxes({ t: _t, color }: { t: Theme; color: string }) {
-  const [frame, setFrame] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(() => setFrame((n) => (n + 1) % PROMPT_LOADING_FRAMES.length), 120);
-    return () => clearInterval(id);
-  }, []);
-
-  const step = PROMPT_LOADING_FRAMES[frame] ?? PROMPT_LOADING_FRAMES[0];
+function PromptLoadingBoxes({ color }: { color: string }) {
+  // Aurora owns the only working animation. This static marker keeps the mode
+  // label useful to screen readers and reduced-motion users alike.
+  const step = { active: 0, forward: true };
 
   return (
     <text>
@@ -4112,6 +4758,7 @@ function ApiKeyModal({
   inputRef,
   error,
   onSubmit,
+  cloudMode,
 }: {
   t: Theme;
   width: number;
@@ -4119,8 +4766,9 @@ function ApiKeyModal({
   inputRef: React.RefObject<TextareaRenderable | null>;
   error: string | null;
   onSubmit: () => void;
+  cloudMode: boolean;
 }) {
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
   const panelWidth = Math.min(68, width - 6);
   const panelHeight = 13;
   const top = bottomAlignedModalTop(height, panelHeight);
@@ -4146,19 +4794,23 @@ function ApiKeyModal({
       >
         <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
           <text fg={t.primary}>
-            <b>{"Add API key"}</b>
+            <b>{cloudMode ? "Connect OpenRouter" : "Add API key"}</b>
           </text>
           <text fg={t.textMuted}>{"esc"}</text>
         </box>
         <box paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <text fg={t.text}>{"Paste your xAI API key to unlock chat. You can hide this prompt with esc."}</text>
+          <text fg={t.text}>
+            {cloudMode
+              ? "Paste your OpenRouter key. Shelra will discover the Free cloud catalog and keep local mode available with --local."
+              : "Paste a compatible provider API key. You can hide this prompt with esc."}
+          </text>
         </box>
         <box paddingLeft={2} paddingRight={2} paddingTop={1}>
           <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1} width="100%">
             <textarea
               ref={inputRef}
               focused={true}
-              placeholder="xai-..."
+              placeholder={cloudMode ? "sk-or-v1-..." : "provider key..."}
               textColor={t.text}
               backgroundColor={t.backgroundElement}
               placeholderColor={t.textMuted}
@@ -4191,6 +4843,123 @@ function ApiKeyModal({
 /* ── Messages ────────────────────────────────────────────────── */
 
 const USER_MSG_COLLAPSED_LINES = 5;
+
+function TranscriptActivityView({ t, item }: { t: Theme; item: TranscriptActivityItem }) {
+  const failed = item.status === "failed";
+  const tone = failed ? t.danger : item.activityKind === "agent" ? t.subagentAccent : t.text;
+  const marker = failed ? "×" : "✓";
+  const visibleDetails = item.details.slice(0, failed ? 6 : 4);
+  const hidden = Math.max(0, item.details.length - visibleDetails.length);
+
+  return (
+    <box paddingLeft={3} marginTop={1} marginBottom={1} flexShrink={0} flexDirection="column">
+      <text fg={tone}>
+        <b>{`${marker} ${item.title}`}</b>
+      </text>
+      {visibleDetails.map((detail, index) => (
+        <text
+          key={`${item.id}:detail:${detail}`}
+          fg={failed && index === visibleDetails.length - 1 ? t.danger : t.textMuted}
+        >
+          {`${index === visibleDetails.length - 1 && hidden === 0 ? "└─" : "├─"} ${truncateLine(detail, 110)}`}
+        </text>
+      ))}
+      {hidden > 0 ? <text fg={t.textDim}>{`└─ ${hidden} more operation${hidden === 1 ? "" : "s"}`}</text> : null}
+    </box>
+  );
+}
+
+interface ActivityTreeNode {
+  key: string;
+  /** The branch line itself, e.g. "Explored 3 files" or "Found". */
+  branch: string;
+  branchTone?: string;
+  /** Wrapped lines indented under the branch, e.g. the finding text under "Found". */
+  continuation?: string[];
+}
+
+/**
+ * Live, in-progress activity as a branch tree — the same visual grammar
+ * `TranscriptActivityView` already uses for completed history (├─/└─), so a still-running
+ * phase reads as the natural in-progress version of what it collapses into once done.
+ * "Found" reuses the model's own real streamed text (never invented); "Next" reuses the
+ * real next plan step (never invented) — see `nextPlanStepLabel` in observability.ts.
+ */
+export function RuntimeActivityTree({
+  t,
+  title,
+  elapsedMs,
+  activities,
+  now,
+  found,
+  next,
+  isProcessing,
+}: {
+  t: Theme;
+  title: string | null;
+  elapsedMs: number | null;
+  activities: UiActivityEvent[];
+  now: number;
+  found: string | null;
+  next: string | null;
+  isProcessing: boolean;
+}) {
+  const failedEvent = [...activities].reverse().find((event) => event.status === "failed");
+  const counts = groupLiveActivity(activities);
+  // Each group is rendered with a blank "│" spacer before it (except the first) — sibling
+  // lines within a group (the count lines) are NOT separated, matching the mandated format:
+  // "Explored N files" / "Searched N symbols" sit directly under each other, while "Found"
+  // and "Next" are their own groups with a spacer above.
+  const groups: ActivityTreeNode[][] = [];
+  if (counts.length > 0) groups.push(counts.map((line) => ({ key: line.key, branch: line.text })));
+  if (found) groups.push([{ key: "found", branch: "Found", continuation: found.split("\n"), branchTone: t.text }]);
+  if (!failedEvent && next) groups.push([{ key: "next", branch: "Next", continuation: [next] }]);
+
+  if (!title && groups.length === 0) return null;
+  const marker = failedEvent ? "×" : isProcessing ? "●" : "✓";
+  const tone = failedEvent ? t.danger : isProcessing ? t.accent : t.success;
+  const elapsed = isProcessing && elapsedMs !== null ? formatActivityElapsed(elapsedMs) : null;
+  const totalNodes = groups.reduce((sum, group) => sum + group.length, 0);
+  let nodeIndex = -1;
+
+  return (
+    <box paddingLeft={3} marginTop={1} marginBottom={1} flexShrink={0} flexDirection="column">
+      {title ? (
+        <box flexDirection="row">
+          <text fg={tone}>
+            <b>{`${marker} ${title}`}</b>
+          </text>
+          <box flexGrow={1} />
+          {elapsed ? <text fg={t.textMuted}>{elapsed}</text> : null}
+        </box>
+      ) : null}
+      {failedEvent ? (
+        <text fg={t.danger}>{`├─ ${truncateLine(failedEvent.detail || failedEvent.label, 110)}`}</text>
+      ) : null}
+      {groups.map((group, groupIndex) => (
+        <box key={`group:${groupIndex}`} flexDirection="column">
+          {groupIndex > 0 ? <text fg={t.textDim}>{"│"}</text> : null}
+          {group.map((node) => {
+            nodeIndex += 1;
+            const isLastOverall = nodeIndex === totalNodes - 1;
+            const glyph = isLastOverall ? "└─" : "├─";
+            const continuationPrefix = isLastOverall ? "  " : "│ ";
+            return (
+              <box key={node.key} flexDirection="column">
+                <text fg={node.branchTone ?? t.textMuted}>{`${glyph} ${truncateLine(node.branch, 110)}`}</text>
+                {node.continuation?.map((line, lineIndex) => (
+                  <text key={`${node.key}:${lineIndex}`} fg={t.textMuted}>
+                    {`${continuationPrefix} ${truncateLine(line, 108)}`}
+                  </text>
+                ))}
+              </box>
+            );
+          })}
+        </box>
+      ))}
+    </box>
+  );
+}
 
 function UserMessageContent({ content, t, expanded }: { content: string; t: Theme; expanded: boolean }) {
   const lines = content.split("\n");
@@ -4242,13 +5011,14 @@ function MessageView({
   modeColor: string;
   expandedMessages?: Set<number>;
 }) {
+  const entryColor = resolvedEntryModeColor(t, entry.modeColor, modeColor);
   switch (entry.type) {
     case "user":
       return (
         <box
           border={["left"]}
           customBorderChars={SPLIT}
-          borderColor={entry.modeColor || modeColor}
+          borderColor={entryColor}
           marginTop={index === 0 ? 0 : 1}
           marginBottom={1}
         >
@@ -4260,8 +5030,13 @@ function MessageView({
             flexShrink={0}
             flexDirection="column"
           >
+            <text fg={entryColor}>
+              <b>{"USER"}</b>
+            </text>
             {entry.sourceLabel ? <text fg={t.textMuted}>{entry.sourceLabel}</text> : null}
-            <UserMessageContent content={entry.content} t={t} expanded={expandedMessages?.has(index) ?? false} />
+            <box paddingTop={1} flexDirection="column">
+              <UserMessageContent content={entry.content} t={t} expanded={expandedMessages?.has(index) ?? false} />
+            </box>
           </box>
         </box>
       );
@@ -4269,8 +5044,13 @@ function MessageView({
     case "assistant":
       return (
         <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
+          <text fg={t.primary}>
+            <b>{"SHELRA"}</b>
+          </text>
           {entry.sourceLabel ? <text fg={t.textMuted}>{entry.sourceLabel}</text> : null}
-          <Markdown content={entry.content} t={t} />
+          <box paddingTop={1} flexDirection="column">
+            <Markdown content={entry.content} t={t} />
+          </box>
         </box>
       );
 
@@ -4278,7 +5058,7 @@ function MessageView({
       return (
         <box paddingLeft={3} marginTop={1}>
           <text>
-            <span style={{ fg: entry.modeColor || modeColor }}>{"▣ "}</span>
+            <span style={{ fg: entryColor }}>{"▣ "}</span>
             <span style={{ fg: t.textMuted }}>{entry.content.replace("▣  ", "")}</span>
           </text>
         </box>
@@ -4332,9 +5112,14 @@ function MessageView({
         return <MediaToolResultView t={t} label={toolLabel(entry.toolCall!)} toolResult={entry.toolResult!} />;
       }
 
-      if (name === "write_file" || name === "edit_file") {
+      if (name === "write_file" || name === "edit_file" || name === "delete_file") {
         const filePath = diff?.filePath || tryParseArg(entry.toolCall, "path") || args;
-        const label = name === "write_file" ? `Write ${filePath}` : `Edit ${filePath}`;
+        const label =
+          name === "write_file"
+            ? `Write ${filePath}`
+            : name === "edit_file"
+              ? `Edit ${filePath}`
+              : `Delete ${filePath}`;
         return (
           <box gap={0}>
             <InlineTool t={t} pending={false}>
@@ -4610,19 +5395,6 @@ function formatLspSeverity(severity?: number): string {
   }
 }
 
-function ShimmerText({ t, text }: { t: Theme; text: string }) {
-  return (
-    <box paddingLeft={3}>
-      <text>
-        <span style={{ fg: t.textMuted }}>
-          <LoadingSpinner />
-        </span>
-        <span style={{ fg: t.textMuted }}> {text}</span>
-      </text>
-    </box>
-  );
-}
-
 function InlineTool({ t, pending: _pending, children }: { t: Theme; pending: boolean; children: React.ReactNode }) {
   return (
     <box paddingLeft={3}>
@@ -4641,11 +5413,7 @@ function SubagentTaskLine({ t, agent, label, pending }: { t: Theme; agent: strin
   return (
     <box paddingLeft={3}>
       <text>
-        {pending ? (
-          <span style={{ fg: t.subagentAccent }}>
-            <LoadingSpinner />
-          </span>
-        ) : null}
+        {pending ? <span style={{ fg: t.subagentAccent }}>{"◌"}</span> : null}
         {pending ? " " : ""}
         <span style={{ fg: t.subagentAccent }}>
           <b>{`${displayAgent}: ${displayLabel}`}</b>
@@ -4662,9 +5430,7 @@ function DelegationTaskLine({ t, label, pending, id }: { t: Theme; label: string
     <box paddingLeft={3}>
       <text>
         {pending ? (
-          <span style={{ fg: t.subagentAccent }}>
-            <LoadingSpinner />
-          </span>
+          <span style={{ fg: t.subagentAccent }}>{"◌"}</span>
         ) : (
           <span style={{ fg: t.subagentAccent }}>{"◆"}</span>
         )}{" "}
@@ -4679,17 +5445,6 @@ function DelegationTaskLine({ t, label, pending, id }: { t: Theme; label: string
       </text>
     </box>
   );
-}
-
-function LoadingSpinner() {
-  const [frame, setFrame] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(() => setFrame((n) => (n + 1) % LOADING_SPINNER_FRAMES.length), 120);
-    return () => clearInterval(id);
-  }, []);
-
-  return <>{LOADING_SPINNER_FRAMES[frame]}</>;
 }
 
 function SubagentActivity({ t, status }: { t: Theme; status: SubagentStatus }) {
@@ -4744,11 +5499,11 @@ function DelegationListView({ t, content }: { t: Theme; content: string }) {
       {items.map((item) => {
         const statusColor =
           item.status === "complete"
-            ? "#8adf8a"
+            ? t.success
             : item.status === "running"
               ? t.subagentAccent
               : item.status === "error"
-                ? "#df8a8a"
+                ? t.danger
                 : t.textMuted;
 
         return (
@@ -4941,7 +5696,7 @@ function UpdateModal({
   currentVersion: string;
   latestVersion: string;
 }) {
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
   const panelWidth = Math.min(60, width - 6);
   const panelHeight = 9;
   const top = bottomAlignedModalTop(height, panelHeight);
@@ -4966,20 +5721,20 @@ function UpdateModal({
         flexDirection="column"
       >
         <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg="#f59e0b">
+          <text fg={t.warning}>
             <b>{"Update Available"}</b>
           </text>
           <text fg={t.textMuted}>{"esc to dismiss"}</text>
         </box>
         <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
           <text fg={t.text}>
-            {"A new version of grok is available: "}
+            {"A new version of ShelraCode is available: "}
             <span style={{ fg: t.textMuted }}>
               {"v"}
               {currentVersion}
             </span>
             {" → "}
-            <span style={{ fg: "#22c55e" }}>
+            <span style={{ fg: t.success }}>
               {"v"}
               {latestVersion}
             </span>
@@ -5019,7 +5774,7 @@ function SlashMenuModal({
   const maxH = Math.floor(height * 0.6);
   const panelHeight = Math.min(contentHeight, maxH);
   const top = bottomAlignedModalTop(height, panelHeight);
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
   return (
     <box
       position="absolute"
@@ -5098,7 +5853,7 @@ function ConnectModal({
 
   const panelHeight = Math.min(channels.length + 9, Math.floor(height * 0.5));
   const top = bottomAlignedModalTop(height, panelHeight);
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
   return (
     <box
       position="absolute"
@@ -5173,7 +5928,7 @@ function TelegramTokenModal({
   error: string | null;
   onSubmit: () => void;
 }) {
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
   const panelWidth = Math.min(68, width - 6);
   const panelHeight = 14;
   const top = bottomAlignedModalTop(height, panelHeight);
@@ -5205,7 +5960,7 @@ function TelegramTokenModal({
         </box>
         <box paddingLeft={2} paddingRight={2} paddingTop={1}>
           <text fg={t.text}>
-            {"From @BotFather: /newbot, then paste the token here. Stored in ~/.grok/user-settings.json."}
+            {"From @BotFather: /newbot, then paste the token here. Stored in ~/.shelra/user-settings.json."}
           </text>
         </box>
         <box paddingLeft={2} paddingRight={2} paddingTop={1}>
@@ -5258,7 +6013,7 @@ function TelegramPairModal({
   error: string | null;
   onSubmit: () => void;
 }) {
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
   const panelWidth = Math.min(68, width - 6);
   const panelHeight = 13;
   const top = bottomAlignedModalTop(height, panelHeight);
@@ -5337,6 +6092,8 @@ function ModelPickerModal({
   searchQuery,
   filteredModels,
   reasoningEffortByModel,
+  switching,
+  error,
 }: {
   t: Theme;
   currentModel: string;
@@ -5346,6 +6103,8 @@ function ModelPickerModal({
   searchQuery: string;
   filteredModels: ModelInfo[];
   reasoningEffortByModel: Record<string, ReasoningEffort>;
+  switching: boolean;
+  error: string | null;
 }) {
   const listRef = useRef<ScrollBoxRenderable>(null);
   useEffect(() => {
@@ -5356,11 +6115,11 @@ function ModelPickerModal({
   const itemCount = Math.max(filteredModels.length, 1);
   const selectedModel = filteredModels[selectedIndex];
   const selectedSupportsReasoning = !!selectedModel && getSupportedReasoningEfforts(selectedModel.id).length > 0;
-  const contentHeight = itemCount + 6;
+  const contentHeight = itemCount * 2 + 6;
   const maxH = Math.floor(height * 0.6);
   const panelHeight = Math.min(contentHeight, maxH);
   const top = bottomAlignedModalTop(height, panelHeight);
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
   return (
     <box
       position="absolute"
@@ -5405,11 +6164,14 @@ function ModelPickerModal({
                 paddingRight={2}
                 width="100%"
               >
-                <box width="100%" flexDirection="row" justifyContent="space-between">
-                  <text fg={current ? t.accent : selected ? t.selected : t.text}>{m.name}</text>
-                  {supportedReasoningEfforts.length > 0 ? (
-                    <text fg={selected ? t.primary : t.textMuted}>{`[${reasoningEffort}]`}</text>
-                  ) : null}
+                <box width="100%" flexDirection="column">
+                  <box width="100%" flexDirection="row" justifyContent="space-between">
+                    <text fg={current ? t.accent : selected ? t.selected : t.text}>{m.name}</text>
+                    {supportedReasoningEfforts.length > 0 ? (
+                      <text fg={selected ? t.primary : t.textMuted}>{`[${reasoningEffort}]`}</text>
+                    ) : null}
+                  </box>
+                  <text fg={selected ? t.textMuted : t.textDim}>{modelMetadataLabel(m)}</text>
                 </box>
               </box>
             );
@@ -5421,13 +6183,35 @@ function ModelPickerModal({
           )}
         </scrollbox>
         <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <text fg={t.textMuted}>
-            {selectedSupportsReasoning ? "left/right reasoning  enter select  esc close" : "enter select  esc close"}
+          {error ? <text fg={t.diffRemovedFg}>{error}</text> : null}
+          <text fg={switching ? t.accent : t.textMuted}>
+            {switching
+              ? "Preparing model..."
+              : selectedSupportsReasoning
+                ? "left/right reasoning  enter select  esc close"
+                : "enter select  esc close"}
           </text>
         </box>
       </box>
     </box>
   );
+}
+
+function modelMetadataLabel(model: ModelInfo): string {
+  const price =
+    model.pricingKnown === false
+      ? "price unavailable"
+      : model.inputPrice === 0 && model.outputPrice === 0
+        ? "free"
+        : `$${(model.inputPrice * 1_000_000).toFixed(2)}/M in · $${(model.outputPrice * 1_000_000).toFixed(2)}/M out`;
+  const capabilities = [
+    model.supportsClientTools ? "tools" : undefined,
+    model.reasoning ? "reasoning" : undefined,
+    model.supportsVision ? "vision" : undefined,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  return `${model.category === "cloud" ? price : "local"} · ${formatTokenCount(model.contextWindow)} ctx${capabilities ? ` · ${capabilities}` : ""}`;
 }
 
 function SandboxPickerModal({
@@ -5452,7 +6236,7 @@ function SandboxPickerModal({
   const visibleRows = getSandboxVisibleRows(currentMode);
   const panelHeight = Math.min(visibleRows.length + 6, Math.floor(height * 0.6));
   const top = bottomAlignedModalTop(height, panelHeight);
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
 
   return (
     <box
@@ -5538,7 +6322,7 @@ function RecapPickerModal({
 }) {
   const panelHeight = Math.min(7, Math.floor(height * 0.6));
   const top = bottomAlignedModalTop(height, panelHeight);
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
   const display = formatRecapsEnabled(enabled);
 
   return (
@@ -5586,6 +6370,161 @@ function RecapPickerModal({
   );
 }
 
+function ThemePickerModal({
+  t,
+  appearance,
+  motion,
+  focusIndex,
+  width,
+  height,
+}: {
+  t: Theme;
+  width: number;
+  appearance: ThemePreference;
+  motion: MotionPreference;
+  focusIndex: number;
+  height: number;
+}) {
+  const panelHeight = Math.min(10, Math.floor(height * 0.6));
+  const top = bottomAlignedModalTop(height, panelHeight);
+  const rows = [
+    { label: "Appearance", value: formatThemePreference(appearance) },
+    { label: "Motion", value: motion === "reduced" ? "Reduced" : "Full" },
+  ];
+
+  return (
+    <box
+      position="absolute"
+      left={0}
+      top={0}
+      width={width}
+      height={height}
+      alignItems="center"
+      paddingTop={top}
+      backgroundColor={t.overlay}
+    >
+      <box
+        width={Math.min(64, width - 6)}
+        height={panelHeight}
+        backgroundColor={t.surface}
+        border={["top", "right", "bottom", "left"]}
+        borderColor={t.borderStrong}
+        paddingTop={1}
+        paddingBottom={1}
+        flexDirection="column"
+      >
+        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+          <text fg={t.primary}>
+            <b>{"Appearance"}</b>
+          </text>
+          <text fg={t.textMuted}>{"esc"}</text>
+        </box>
+        <box flexGrow={1} minHeight={0} flexDirection="column">
+          {rows.map((row, index) => {
+            const focused = focusIndex === index;
+            return (
+              <box key={row.label} backgroundColor={focused ? t.brandSoft : undefined} paddingLeft={2} paddingRight={2}>
+                <box width="100%" flexDirection="row" justifyContent="space-between">
+                  <text fg={focused ? t.brand : t.text}>{row.label}</text>
+                  <text fg={focused ? t.brand : t.textSecondary}>{`< ${row.value} >`}</text>
+                </box>
+              </box>
+            );
+          })}
+          <box paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <text fg={t.textMuted}>
+              {"System follows the terminal when it reports a scheme; otherwise Shelra uses dark."}
+            </text>
+          </box>
+        </box>
+        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
+          <text fg={t.textMuted}>{"up/down select  left/right change  enter cycle  esc close"}</text>
+        </box>
+      </box>
+    </box>
+  );
+}
+
+function formatThemePreference(preference: ThemePreference): string {
+  return preference[0].toUpperCase() + preference.slice(1);
+}
+
+function EffortPickerModal({
+  t,
+  modelId,
+  effort,
+  width,
+  height,
+}: {
+  t: Theme;
+  modelId: string;
+  effort: ReasoningEffort | null;
+  width: number;
+  height: number;
+}) {
+  const panelHeight = Math.min(9, Math.floor(height * 0.6));
+  const top = bottomAlignedModalTop(height, panelHeight);
+  const overlayBg = t.overlay;
+  const supported = getSupportedReasoningEfforts(modelId);
+  const display = effort ?? "auto";
+
+  return (
+    <box
+      position="absolute"
+      left={0}
+      top={0}
+      width={width}
+      height={height}
+      alignItems="center"
+      paddingTop={top}
+      backgroundColor={overlayBg}
+    >
+      <box
+        width={Math.min(64, width - 6)}
+        height={panelHeight}
+        backgroundColor={t.backgroundPanel}
+        paddingTop={1}
+        paddingBottom={1}
+        flexDirection="column"
+      >
+        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+          <text fg={t.primary}>
+            <b>{"Reasoning effort"}</b>
+          </text>
+          <text fg={t.textMuted}>{"esc"}</text>
+        </box>
+        <box flexGrow={1} minHeight={0} flexDirection="column">
+          {supported.length === 0 ? (
+            <box paddingLeft={2} paddingRight={2}>
+              <text fg={t.textMuted}>{`${modelId} does not support reasoning effort control.`}</text>
+            </box>
+          ) : (
+            <box backgroundColor={t.selectedBg} paddingLeft={2} paddingRight={2} width="100%">
+              <box width="100%" flexDirection="row" justifyContent="space-between">
+                <text fg={t.selected}>{modelId}</text>
+                <text fg={t.primary}>
+                  {"< "}
+                  {display}
+                  {" >"}
+                </text>
+              </box>
+            </box>
+          )}
+          <box paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <text fg={t.textMuted}>
+              {"auto = "}
+              {"high in agent mode when the model supports it, otherwise the provider's default."}
+            </text>
+          </box>
+        </box>
+        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
+          <text fg={t.textMuted}>{"left/right toggle  enter cycle  esc close"}</text>
+        </box>
+      </box>
+    </box>
+  );
+}
+
 function PaymentApprovalPanel({
   t,
   payment,
@@ -5622,7 +6561,7 @@ function PaymentApprovalPanel({
         leftT: "",
         rightT: "",
       }}
-      borderColor="#e5c07b"
+      borderColor={t.warning}
       marginTop={1}
       paddingLeft={2}
       paddingRight={2}
@@ -5647,12 +6586,12 @@ function PaymentApprovalPanel({
         {payment.security ? (
           <text>
             <span style={{ fg: t.textMuted }}>{"Security: "}</span>
-            <span style={{ fg: "#60a5fa" }}>{payment.securityLabel}</span>
+            <span style={{ fg: t.info }}>{payment.securityLabel}</span>
           </text>
         ) : null}
         <text>
           <span style={{ fg: t.textMuted }}>{"Price: "}</span>
-          <span style={{ fg: "#22c55e" }}>
+          <span style={{ fg: t.success }}>
             <b>{`${payment.amount} USDC`}</b>
           </span>
           <span style={{ fg: t.textMuted }}>{` on ${payment.network}`}</span>
@@ -5663,7 +6602,7 @@ function PaymentApprovalPanel({
           const isSel = i === payment.selected;
           return (
             <text key={label}>
-              <span style={{ fg: isSel ? "#22c55e" : t.textMuted }}>{isSel ? "> " : "  "}</span>
+              <span style={{ fg: isSel ? t.success : t.textMuted }}>{isSel ? "> " : "  "}</span>
               <span style={{ fg: isSel ? t.text : t.textMuted }}>{isSel ? <b>{label}</b> : label}</span>
             </text>
           );
@@ -5704,7 +6643,7 @@ function WalletPickerModal({
 }) {
   const panelHeight = Math.min(WALLET_ROWS.length + 6, Math.floor(height * 0.6));
   const top = bottomAlignedModalTop(height, panelHeight);
-  const overlayBg = "#000000cc" as string;
+  const overlayBg = t.overlay;
 
   return (
     <box
@@ -5784,7 +6723,12 @@ function toolArgs(tc?: ToolCall): string {
   try {
     const a = JSON.parse(tc.function.arguments);
     if (tc.function.name === "bash") return a.command || "";
-    if (tc.function.name === "read_file" || tc.function.name === "write_file" || tc.function.name === "edit_file")
+    if (
+      tc.function.name === "read_file" ||
+      tc.function.name === "write_file" ||
+      tc.function.name === "edit_file" ||
+      tc.function.name === "delete_file"
+    )
       return a.path || "";
     if (tc.function.name === "generate_image" || tc.function.name === "generate_video") return a.prompt || "";
     if (tc.function.name === "task") return a.description || "";
@@ -5815,13 +6759,16 @@ function toolLabel(tc: ToolCall): string {
     } catch {
       /* */
     }
-    return trunc(args || "Running command...", 80);
+    return commandActivityLabel(args);
   }
-  if (tc.function.name === "read_file") return `Read ${trunc(args, 60)}`;
-  if (tc.function.name === "write_file") return `Write ${trunc(args, 60)}`;
-  if (tc.function.name === "edit_file") return `Edit ${trunc(args, 60)}`;
-  if (tc.function.name === "search_web") return `Web Search "${trunc(args, 60)}"`;
-  if (tc.function.name === "search_x") return `X Search "${trunc(args, 60)}"`;
+  if (tc.function.name === "read_file") return `Reading ${trunc(args, 60)}`;
+  if (tc.function.name === "grep") return `Searching repository${args ? `: ${trunc(args, 54)}` : ""}`;
+  if (tc.function.name === "write_file") return `Writing ${trunc(args, 60)}`;
+  if (tc.function.name === "edit_file") return `Editing ${trunc(args, 60)}`;
+  if (tc.function.name === "delete_file") return `Deleting ${trunc(args, 60)}`;
+  if (tc.function.name === "search_web") return `Researching ${trunc(args, 60)}`;
+  if (tc.function.name === "open_web") return `Inspecting source ${trunc(args, 56)}`;
+  if (tc.function.name === "search_x") return `Researching X ${trunc(args, 60)}`;
   if (tc.function.name === "generate_image") return `Generate image "${trunc(args, 60)}"`;
   if (tc.function.name === "generate_video") return `Generate video "${trunc(args, 60)}"`;
   if (tc.function.name === "task") return `Task ${trunc(args, 60)}`;
@@ -5832,8 +6779,60 @@ function toolLabel(tc: ToolCall): string {
   if (tc.function.name === "process_stop") return `Stop process ${args}`;
   if (tc.function.name === "process_list") return "List processes";
   if (tc.function.name === "generate_plan") return "Generating plan...";
+  if (tc.function.name === "update_plan_step") return "Updating plan";
   return trunc(`${tc.function.name} ${args}`, 80);
 }
+
+function isPresentationToolCall(toolCall: ToolCall): boolean {
+  return toolCall.function.name !== "update_plan_step";
+}
+
+function commandActivityLabel(command: string): string {
+  if (!command) return "Running command";
+  if (/\b(test|vitest|jest|playwright)\b/i.test(command)) return "Running tests";
+  if (/\b(typecheck|tsc\s+--noEmit)\b/i.test(command)) return "Checking types";
+  if (/\b(lint|biome\s+check)\b/i.test(command)) return "Running lint";
+  if (/\b(build|compile)\b/i.test(command)) return "Building project";
+  if (/\b(verify|verification)\b/i.test(command)) return "Running verification";
+  return `Running ${trunc(command, 68)}`;
+}
+
+function toolActivityDetail(tc: ToolCall): string {
+  const args = toolArgs(tc);
+  switch (tc.function.name) {
+    case "read_file":
+      return args ? `Reading ${trunc(args, 90)}` : "Reading repository file";
+    case "grep":
+      return args ? `Searching ${trunc(args, 90)}` : "Searching repository";
+    case "search_web":
+    case "open_web":
+      return args ? trunc(args, 100) : "Inspecting external source";
+    case "write_file":
+    case "edit_file":
+      return args ? trunc(args, 100) : "Updating file";
+    case "delete_file":
+      return args ? trunc(args, 100) : "Deleting file";
+    case "bash":
+      return args ? trunc(args, 100) : "Running command";
+    case "task":
+    case "delegate":
+      return args ? trunc(args, 100) : "Delegating work";
+    default:
+      return args ? trunc(args, 100) : "Working";
+  }
+}
+
+function formatActivityElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes > 0 ? `${minutes}:${String(remainder).padStart(2, "0")}` : `${remainder}s`;
+}
+
+function truncateActivity(value: string): string {
+  return trunc(value.replace(/\s+/g, " ").trim(), 120);
+}
+
 function sanitizeContent(raw: string): string {
   let s = raw.replace(/^[\s\n]*assistant:\s*/gi, "");
   s = s.replace(/\{"success"\s*:\s*(true|false)\s*,\s*"output"\s*:\s*"[\s\S]*$/m, "");
@@ -5859,4 +6858,12 @@ function trunc(s: string, n: number): string {
 }
 function truncateLine(s: string, n: number): string {
   return trunc(s.replace(/\s+/g, " ").trim(), n);
+}
+
+function findLatestPlan(entries: ChatEntry[]): Plan | null {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const plan = entries[index]?.toolResult?.plan;
+    if (plan) return plan;
+  }
+  return null;
 }

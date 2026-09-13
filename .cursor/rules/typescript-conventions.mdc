@@ -6,49 +6,40 @@ alwaysApply: false
 
 # TypeScript Conventions
 
-## Module System
+## Module system
 
-- This is an ESM project (`"type": "module"` in package.json).
-- Always use ES module `import`/`export` syntax — never `require()`.
-- When importing local modules, include the `.js` extension (TypeScript compiles `.ts` → `.js`):
-  ```typescript
-  import { GrokAgent } from "./agent/grok-agent.js";
-  ```
+- ESM project (`"type": "module"`). Use `import`/`export` only, never `require()`.
+- `moduleResolution: "Bundler"` — import local modules **without** a file
+  extension (`import { Agent } from "./agent/agent"`).
 
-## TypeScript Configuration
+## Compiler configuration (`tsconfig.json`)
 
-- Target: ES2022, Module: ESNext, JSX: react
-- `strict: false` and `noImplicitAny: false` — the codebase does not enforce strict mode.
-- `moduleResolution: "Bundler"` is used.
-- Source files live in `src/`, compiled output goes to `dist/`.
+- Target ES2022, module ESNext, `"jsx": "react-jsx"` with
+  `jsxImportSource: "@opentui/react"`.
+- **`strict: true`.** New code must typecheck under strict mode.
+- `bun run typecheck` (`tsc --noEmit`) must stay green; CI enforces it.
 
-## Type Practices
+## Type practices
 
-- Prefer explicit interfaces for public API boundaries (e.g. `ChatEntry`, `ToolResult`, `GrokToolCall`).
-- Use `type` imports when importing only types:
-  ```typescript
-  import type { ChatCompletionMessageParam } from "openai/resources/chat";
-  ```
-- `any` is acceptable where strict typing would add friction, but prefer narrower types when practical.
-- Shared types belong in `src/types/index.ts`.
+- Explicit interfaces for public boundaries (`ToolResult`, `ProviderAdapter`,
+  `LocalRuntimeAdapter`, startup/context types).
+- `import type { ... }` for type-only imports.
+- Biome forbids `any` (`noExplicitAny: "error"`); model it or use `unknown` and
+  narrow. Shared types live in `src/types/index.ts`.
 
-## Naming Conventions
+## Naming
 
-- **Files**: kebab-case (`grok-agent.ts`, `chat-interface.tsx`, `settings-manager.ts`).
-- **Classes**: PascalCase (`GrokAgent`, `TextEditorTool`, `BashTool`).
-- **Interfaces/Types**: PascalCase (`ChatEntry`, `ToolResult`, `StreamingChunk`).
-- **Functions/variables**: camelCase (`processUserMessage`, `loadApiKey`).
-- **Constants**: camelCase or UPPER_SNAKE_CASE for true constants (`GROK_TOOLS`).
+- Files: kebab-case. Classes/interfaces/types: PascalCase.
+  Functions/variables: camelCase. True constants: UPPER_SNAKE_CASE.
 
-## Error Handling
+## Error handling
 
-- Catch errors as `error: any` and access `.message` for display.
-- Tool execution methods return `ToolResult` objects (`{ success, output?, error? }`) rather than throwing.
-- Use `process.exit(1)` for fatal CLI errors.
+- Tool/executor functions return result objects (`{ success, output?/error? }`)
+  rather than throwing.
+- `process.exit(1)` for fatal CLI errors; the entry point releases the managed
+  runtime child on every exit path.
 
-## ESLint Rules
+## Lint / format
 
-- `@typescript-eslint/no-unused-vars`: error
-- `@typescript-eslint/no-explicit-any`: warn
-
-Run `bun run lint` to check and `bun run typecheck` to verify types.
+- Biome only (`biome.json`) — there is no ESLint config. Run `bun run lint` and
+  `bun run format`; both are CI gates.

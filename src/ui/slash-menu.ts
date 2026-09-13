@@ -10,12 +10,31 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "help", label: "help", description: "Show available commands" },
   { id: "remote-control", label: "remote-control", description: "Remote control" },
   { id: "agents", label: "agents", description: "Manage custom sub-agents" },
+  { id: "status", label: "status", description: "Inspect current work and evidence" },
+  {
+    id: "tasks",
+    label: "tasks",
+    description: "Inspect running and finished delegated agents",
+    aliases: ["delegations"],
+  },
   { id: "schedule", label: "schedule", description: "View scheduled runs" },
   { id: "mcp", label: "mcp", description: "Manage MCP servers" },
   { id: "sandbox", label: "sandbox", description: "Select shell sandbox mode" },
   { id: "wallet", label: "wallet", description: "Wallet and payment settings" },
   { id: "models", label: "models", description: "Select a model", aliases: ["model", "mode"] },
+  {
+    id: "effort",
+    label: "effort",
+    description: "Set reasoning effort for coding/agentic work",
+    aliases: ["reasoning"],
+  },
   { id: "recaps", label: "recaps", description: "Turn session recaps on/off", aliases: ["recap", "summary"] },
+  {
+    id: "theme",
+    label: "theme",
+    description: "Set light, dark, system appearance and motion",
+    aliases: ["appearance"],
+  },
   { id: "new", label: "new session", description: "Start a new session" },
   { id: "commit-push", label: "commit & push", description: "Commit and push" },
   { id: "commit-pr", label: "commit & pr", description: "Commit and open PR" },
@@ -23,7 +42,7 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "verify", label: "verify", description: "Run local verification" },
   { id: "skills", label: "skills", description: "Manage skills" },
   { id: "btw", label: "btw", description: "Ask a side question without interrupting" },
-  { id: "update", label: "update", description: "Update grok to the latest version" },
+  { id: "update", label: "update", description: "Update ShelraCode to the latest version" },
 ];
 
 export function filterSlashMenuItems(items: SlashMenuItem[], query: string): SlashMenuItem[] {

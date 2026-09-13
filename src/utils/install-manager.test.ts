@@ -109,6 +109,30 @@ describe("getScriptInstallContext", () => {
   it("returns null when no metadata exists", () => {
     expect(getScriptInstallContext(createTempDir("grok-no-ctx-"))).toBeNull();
   });
+
+  it("recognizes the active.json manifest written by the Bun build", () => {
+    const homeDir = createTempDir("shelra-active-ctx-");
+    const installDir = getScriptInstallDir(homeDir);
+    const target = getReleaseTargetForPlatform()!;
+    fs.mkdirSync(installDir, { recursive: true });
+    fs.writeFileSync(path.join(installDir, target.binaryName), "binary");
+    fs.writeFileSync(
+      path.join(homeDir, ".shelra", "active.json"),
+      JSON.stringify({
+        product: "ShelraCode",
+        command: "shelra",
+        version: "1.1.7",
+        platform: process.platform,
+        architecture: process.arch,
+        executable: target.binaryName,
+        installedAt: "2026-09-06T00:00:00.000Z",
+      }),
+    );
+
+    const context = getScriptInstallContext(homeDir);
+    expect(context?.metadata.version).toBe("1.1.7");
+    expect(context?.binaryPath).toBe(path.join(installDir, target.binaryName));
+  });
 });
 
 describe("buildScriptUninstallPlan", () => {
@@ -161,5 +185,27 @@ describe("buildScriptUninstallPlan", () => {
     const plan = buildScriptUninstallPlan({ keepConfig: true, keepData: true }, homeDir);
     expect(plan?.removePaths).not.toContain(path.join(homeDir, ".grok"));
     expect(plan?.removePaths).toContain(path.join(installDir, currentTarget.binaryName));
+  });
+
+  it("removes active.json when keeping Shelra config and data", () => {
+    const homeDir = createTempDir("shelra-active-uninstall-");
+    const installDir = getScriptInstallDir(homeDir);
+    const currentTarget = getReleaseTargetForPlatform()!;
+    fs.mkdirSync(installDir, { recursive: true });
+    fs.writeFileSync(path.join(installDir, currentTarget.binaryName), "binary");
+    fs.writeFileSync(
+      path.join(homeDir, ".shelra", "active.json"),
+      JSON.stringify({
+        product: "ShelraCode",
+        command: "shelra",
+        version: "1.1.7",
+        platform: process.platform,
+        architecture: process.arch,
+        executable: currentTarget.binaryName,
+      }),
+    );
+
+    const plan = buildScriptUninstallPlan({ keepConfig: true, keepData: true }, homeDir);
+    expect(plan?.removePaths).toContain(path.join(homeDir, ".shelra", "active.json"));
   });
 });

@@ -43,7 +43,7 @@ export function createTelegramBridge(opts: TelegramBridgeOptions): TelegramBridg
 
     const approved = opts.getApprovedUserIds();
     if (!approved.includes(userId)) {
-      await ctx.reply("Not paired yet. Send /pair to get a code, then approve in Grok CLI.");
+      await ctx.reply("Not paired yet. Send /pair to get a code, then approve in ShelraCode.");
       return null;
     }
 
@@ -210,14 +210,16 @@ export function createTelegramBridge(opts: TelegramBridgeOptions): TelegramBridg
   };
 
   bot.command("start", async (ctx) => {
-    await ctx.reply("Send /pair to link this chat to Grok CLI, then approve the code in the terminal.");
+    await ctx.reply("Send /pair to link this chat to ShelraCode, then approve the code in the terminal.");
   });
 
   bot.command("pair", async (ctx) => {
     const userId = ctx.from?.id;
     if (userId === undefined) return;
     const code = registerPairingCode(userId);
-    await ctx.reply(`Your pairing code: ${code}\nEnter this code in Grok CLI (/remote-control → Telegram) to approve.`);
+    await ctx.reply(
+      `Your pairing code: ${code}\nEnter this code in ShelraCode (/remote-control → Telegram) to approve.`,
+    );
   });
 
   bot.on("message:text", async (ctx) => {

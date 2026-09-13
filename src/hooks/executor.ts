@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { HOOK_EVENT_ENV } from "../product/identity";
 import type { AggregatedHookResult, CommandHook, HookInput, HookOutput, HookResult } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -42,7 +43,7 @@ export function execCommandHook(
     const child = spawn("sh", ["-c", hook.command], {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, GROK_HOOK_EVENT: input.hook_event_name },
+      env: { ...process.env, [HOOK_EVENT_ENV]: input.hook_event_name, GROK_HOOK_EVENT: input.hook_event_name },
     });
 
     child.stdout?.on("data", (chunk: Buffer) => {
